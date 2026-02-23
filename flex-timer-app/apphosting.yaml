@@ -1,6 +1,8 @@
 # Settings for Backend (on Cloud Run).
 # See https://firebase.google.com/docs/app-hosting/configure#cloud-run
 runConfig:
+  # Deployed container root is the contents of .next/standalone/, so server.js is at root.
+  runCommand: node server.js
   minInstances: 0
 
 # Environment variables. Cloud Run sets PORT=8080; Next.js standalone must listen on 0.0.0.0.
