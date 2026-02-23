@@ -1,8 +1,9 @@
 import { adminAuth } from '@/lib/firebase-admin'
+import { DEFAULT_ADMIN_USER_IDS } from '@/lib/admin-user-ids'
 
 const ADMIN_USER_IDS = process.env.ADMIN_USER_IDS
   ? new Set(process.env.ADMIN_USER_IDS.split(',').map((id) => id.trim()).filter(Boolean))
-  : new Set<string>()
+  : new Set(DEFAULT_ADMIN_USER_IDS)
 
 /**
  * Verifies the Firebase ID token from the request and checks if the user is an admin.
@@ -32,6 +33,8 @@ export async function requireAdminAuth(
     }
     return { uid }
   } catch (e) {
+    // Log the real cause so you can fix project mismatch or credential issues
+    console.error('[requireAdminAuth] Token verification failed:', e)
     return { error: 'Invalid or expired token', status: 401 }
   }
 }

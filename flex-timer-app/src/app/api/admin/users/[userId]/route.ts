@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAdminAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
-import { getUserDataCounts } from '@/lib/firestore'
+import { getUserDataCounts, getUserWorkoutCollections, getUserWorkoutPlans } from '@/lib/firestore'
 import type { AdminUserProfile } from '@/types/user'
 
 /**
@@ -30,10 +30,17 @@ export async function GET(
   }
 
   try {
-    const [userRecord, dataCounts] = await Promise.all([
+    const [userRecord, dataCounts, allWorkoutPlans, allWorkoutCollections] = await Promise.all([
       adminAuth.getUser(userId),
       getUserDataCounts(userId),
+      getUserWorkoutPlans(userId),
+      getUserWorkoutCollections(userId),
     ])
+
+    const deletedWorkoutPlansCount = allWorkoutPlans.filter((p) => p.deletedAt).length
+    const workoutPlans = allWorkoutPlans.filter((p) => !p.deletedAt)
+    const deletedWorkoutCollectionsCount = allWorkoutCollections.filter((c) => c.deletedAt).length
+    const workoutCollections = allWorkoutCollections.filter((c) => !c.deletedAt)
 
     const profile: AdminUserProfile = {
       uid: userRecord.uid,
@@ -47,6 +54,10 @@ export async function GET(
         lastSignInTime: userRecord.metadata.lastSignInTime ?? null,
       },
       dataCounts,
+      workoutPlans,
+      deletedWorkoutPlansCount,
+      workoutCollections,
+      deletedWorkoutCollectionsCount,
     }
 
     return NextResponse.json(profile)

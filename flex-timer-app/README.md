@@ -34,6 +34,15 @@ Regular user routes can live alongside these later (e.g. `/dashboard`, `/workout
 4. **Admin access:** Set `ADMIN_USER_IDS` to a comma-separated list of Firebase Auth UIDs that may use `/admin` and the admin API. Example:
    - `ADMIN_USER_IDS=abc123,def456`
 
+## Production
+
+Firebase **client** config works in production in two ways:
+
+1. **Defaults in code** – The app includes fallbacks for the gymnext-flex-timer project, so it runs without any env vars. Client config is public in the bundle; this is fine if you have one Firebase project.
+2. **Env vars on the host** – To override or avoid hardcoding: in your host (Vercel, Firebase App Hosting, etc.), set `NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`, etc. for the **Production** environment. No file is needed; the host injects them at build time.
+
+**Server** config (`GOOGLE_APPLICATION_CREDENTIALS` or `FIREBASE_ADMIN_*`, and `ADMIN_USER_IDS`) must be set in the production environment on your host; there is no in-code default for those.
+
 ## Run
 
 ```bash
