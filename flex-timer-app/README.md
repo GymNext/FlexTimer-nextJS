@@ -43,6 +43,14 @@ Firebase **client** config works in production in two ways:
 
 **Server** config (`GOOGLE_APPLICATION_CREDENTIALS` or `FIREBASE_ADMIN_*`, and `ADMIN_USER_IDS`) must be set in the production environment on your host; there is no in-code default for those.
 
+### Cloud Run / Firebase App Hosting
+
+The Next.js standalone server must listen on **all interfaces** (`0.0.0.0`) so Cloud Run’s health checks succeed. Set:
+
+- **`HOSTNAME=0.0.0.0`** (RUNTIME)
+
+Cloud Run already sets `PORT=8080`. If you use **Firebase App Hosting**, `apphosting.yaml` in this repo sets `HOSTNAME=0.0.0.0` for you. If you deploy to Cloud Run another way (e.g. Docker or a custom pipeline), add that env var to the Cloud Run service. If the container still fails to start, consider increasing the [startup timeout](https://cloud.google.com/run/docs/troubleshooting#container-failed-to-start) in the Cloud Run revision.
+
 ## Run
 
 ```bash

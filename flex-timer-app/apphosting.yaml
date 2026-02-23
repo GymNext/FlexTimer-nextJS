@@ -1,0 +1,11 @@
+# Settings for Backend (on Cloud Run).
+# See https://firebase.google.com/docs/app-hosting/configure#cloud-run
+runConfig:
+  minInstances: 0
+
+# Environment variables. Cloud Run sets PORT=8080; Next.js standalone must listen on 0.0.0.0.
+env:
+  - variable: HOSTNAME
+    value: "0.0.0.0"
+    availability:
+      - RUNTIME
