@@ -1,0 +1,65 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { requireAdminAuth } from '@/lib/auth'
+import { adminAuth } from '@/lib/firebase-admin'
+import { getUserDataCounts } from '@/lib/firestore'
+import type { AdminUserProfile } from '@/types/user'
+
+/**
+ * GET /api/admin/users/[userId]
+ * Returns one user's Auth record plus Firestore data counts (workouts, workoutCollections, workoutPlans).
+ */
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ userId: string }> }
+) {
+  const authResult = await requireAdminAuth(request.headers.get('authorization'))
+  if ('error' in authResult) {
+    return NextResponse.json({ error: authResult.error }, { status: authResult.status })
+  }
+
+  if (!adminAuth) {
+    return NextResponse.json(
+      { error: 'Firebase Admin not configured' },
+      { status: 503 }
+    )
+  }
+
+  const { userId } = await params
+  if (!userId) {
+    return NextResponse.json({ error: 'userId required' }, { status: 400 })
+  }
+
+  try {
+    const [userRecord, dataCounts] = await Promise.all([
+      adminAuth.getUser(userId),
+      getUserDataCounts(userId),
+    ])
+
+    const profile: AdminUserProfile = {
+      uid: userRecord.uid,
+      email: userRecord.email ?? null,
+      displayName: userRecord.displayName ?? null,
+      photoURL: userRecord.photoURL ?? null,
+      emailVerified: userRecord.emailVerified,
+      disabled: userRecord.disabled,
+      metadata: {
+        creationTime: userRecord.metadata.creationTime,
+        lastSignInTime: userRecord.metadata.lastSignInTime ?? null,
+      },
+      dataCounts,
+    }
+
+    return NextResponse.json(profile)
+  } catch (err: unknown) {
+    const message = err && typeof err === 'object' && 'code' in err
+      ? (err as { code: string }).code === 'auth/user-not-found'
+        ? 'User not found'
+        : (err as Error).message
+      : 'Failed to get user'
+    const status = err && typeof err === 'object' && 'code' in err
+      ? (err as { code: string }).code === 'auth/user-not-found'
+        ? 404
+        : 500
+    return NextResponse.json({ error: message }, { status })
+  }
+}
