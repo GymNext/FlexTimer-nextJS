@@ -1,13 +1,23 @@
 # Settings for Backend (on Cloud Run).
 # See https://firebase.google.com/docs/app-hosting/configure#cloud-run
 runConfig:
-  # Deployed container root is the contents of .next/standalone/, so server.js is at root.
-  runCommand: node server.js
   minInstances: 0
+  # maxInstances: 100
+  # concurrency: 80
+  # cpu: 1
+  # memoryMiB: 512
 
-# Environment variables. Cloud Run sets PORT=8080; Next.js standalone must listen on 0.0.0.0.
-env:
-  - variable: HOSTNAME
-    value: "0.0.0.0"
-    availability:
-      - RUNTIME
+# Environment variables and secrets.
+# env:
+  # Configure environment variables.
+  # See https://firebase.google.com/docs/app-hosting/configure#user-defined-environment
+  # - variable: MESSAGE
+  #   value: Hello world!
+  #   availability:
+  #     - BUILD
+  #     - RUNTIME
+
+  # Grant access to secrets in Cloud Secret Manager.
+  # See https://firebase.google.com/docs/app-hosting/configure#secret-parameters
+  # - variable: MY_SECRET
+  #   secret: mySecretRef
