@@ -1,5 +1,5 @@
 import { adminAuth } from '@/lib/firebase-admin'
-import { DEFAULT_ADMIN_USER_IDS } from '@/lib/admin-user-ids'
+import { DEFAULT_ADMIN_USER_IDS } from './admin-user-ids'
 
 const ADMIN_USER_IDS = process.env.ADMIN_USER_IDS
   ? new Set(process.env.ADMIN_USER_IDS.split(',').map((id) => id.trim()).filter(Boolean))
