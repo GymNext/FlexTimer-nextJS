@@ -10,7 +10,7 @@ import type { AdminUserRecord } from '@/types/user'
  */
 export async function GET(request: NextRequest) {
   const authResult = await requireAdminAuth(request.headers.get('authorization'))
-  if ('error' in authResult) {
+  if ('status' in authResult) {
     return NextResponse.json({ error: authResult.error }, { status: authResult.status })
   }
 

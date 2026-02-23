@@ -13,7 +13,7 @@ export async function GET(
   { params }: { params: Promise<{ userId: string }> }
 ) {
   const authResult = await requireAdminAuth(request.headers.get('authorization'))
-  if ('error' in authResult) {
+  if ('status' in authResult) {
     return NextResponse.json({ error: authResult.error }, { status: authResult.status })
   }
 
@@ -54,11 +54,13 @@ export async function GET(
     const message = err && typeof err === 'object' && 'code' in err
       ? (err as { code: string }).code === 'auth/user-not-found'
         ? 'User not found'
-        : (err as Error).message
+        : err instanceof Error ? err.message : String(err)
       : 'Failed to get user'
-    const status = err && typeof err === 'object' && 'code' in err
-      ? (err as { code: string }).code === 'auth/user-not-found'
-        ? 404
+    const status =
+      err && typeof err === 'object' && 'code' in err
+        ? (err as { code: string }).code === 'auth/user-not-found'
+          ? 404
+          : 500
         : 500
     return NextResponse.json({ error: message }, { status })
   }
