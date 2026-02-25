@@ -41,6 +41,57 @@ export interface WorkoutPlan {
   deletedAt?: string | null
 }
 
+/** One entry in PlanDay.entries[] (stored as map in Firestore). Can be single-segment (flat) or MultiSegmentWorkout (has segments array). */
+export interface PlanDayEntry {
+  continuity?: boolean
+  direction?: boolean
+  metronome?: number
+  prelude?: number
+  restDirection?: number
+  segue?: boolean
+  timerMode?: number
+  type?: string
+  userId?: string
+  warningStrategy?: number
+  warnings?: number[]
+  workoutDescription?: string | null
+  workoutId?: string
+  workoutImage?: string | null
+  workoutName?: string | null
+  /** JSON string (single-segment) */
+  workoutSchedule?: string
+  workoutShareId?: string | null
+  planId?: string
+  /** MultiSegmentWorkout: nested segments */
+  segments?: WorkoutSegment[]
+  autoProgress?: boolean
+  timerModes?: number[]
+}
+
+/** Planned workout document from users/<userId>/plannedWorkouts/<plannedWorkoutId> */
+export interface PlannedWorkout {
+  id: string
+  day: string
+  ordinal: number
+  planId: string
+  plannedWorkoutId: string
+  sourceWorkoutId: string | null
+  userId: string
+  /** Embedded workout data (same shape as PlanDayEntry) */
+  workout: PlanDayEntry
+  deletedAt?: string | null
+}
+
+/** Plan day document from users/<userId>/workoutPlans/<planId>/planDays/<date> */
+export interface PlanDay {
+  id: string
+  day: string
+  entries: PlanDayEntry[]
+  planId: string
+  sourceWorkoutIds: (string | null)[]
+  userId: string
+}
+
 /** Workout collection document from users/<userId>/workoutCollections */
 export interface WorkoutCollection {
   id: string
@@ -58,6 +109,25 @@ export interface WorkoutCollection {
 /** Workout document from users/<userId>/workouts (SingleSegmentWorkout or MultiSegmentWorkout) */
 export type WorkoutType = 'SingleSegmentWorkout' | 'MultiSegmentWorkout'
 
+/** Segment in Firestore: workoutSchedule is JSON string; enums stored as raw int. */
+export interface WorkoutSegment {
+  workoutId: string
+  workoutName?: string | null
+  workoutDescription?: string | null
+  workoutImage?: string | null
+  workoutShareId?: string | null
+  /** JSON string from JsonHelper.toJsonFromWorkoutSchedule */
+  workoutSchedule?: string | null
+  prelude?: number
+  segue?: boolean
+  warnings?: number[]
+  metronome?: number
+  direction?: boolean
+  restDirection?: number
+  warningStrategy?: number
+  continuity?: boolean
+}
+
 export interface Workout {
   id: string
   type: WorkoutType
@@ -67,17 +137,73 @@ export interface Workout {
   workoutName: string | null
   workoutDescription: string | null
   workoutImage: string | null
+  /** SingleSegmentWorkout: timer mode (raw int) */
+  timerMode?: unknown
+  /** MultiSegmentWorkout: timer modes (raw int[]) */
+  timerModes?: unknown
+  /** SingleSegmentWorkout: schedule as JSON string */
+  workoutSchedule?: string | null
+  /** SingleSegmentWorkout: options (enums as raw int) */
+  prelude?: number
+  segue?: boolean
+  warnings?: number[]
+  metronome?: number
+  direction?: boolean
+  restDirection?: number
+  warningStrategy?: number
+  continuity?: boolean
+  /** MultiSegmentWorkout only */
+  autoProgress?: boolean
+  /** MultiSegmentWorkout only */
+  segments?: WorkoutSegment[]
   /** Set when workout is soft-deleted */
   deletedAt?: string | null
 }
 
-/** Full admin view of a user: Auth record + Firestore counts + workout plans/collections lists */
+/** Subscription plan enum (stored as int on user document). */
+export const SUBSCRIPTION_PLAN = {
+  basic: 0,
+  pro: 1,
+  proPlus: 2,
+  classic: 3,
+} as const
+
+export type SubscriptionPlanKey = keyof typeof SUBSCRIPTION_PLAN
+
+const SUBSCRIPTION_PLAN_LABELS: Record<number, string> = {
+  [SUBSCRIPTION_PLAN.basic]: 'Basic',
+  [SUBSCRIPTION_PLAN.pro]: 'Pro',
+  [SUBSCRIPTION_PLAN.proPlus]: 'Pro Plus',
+  [SUBSCRIPTION_PLAN.classic]: 'Classic',
+}
+
+export function getSubscriptionPlanLabel(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—'
+  return SUBSCRIPTION_PLAN_LABELS[value] ?? String(value)
+}
+
+/** Fields stored on the user document (users/<userId>) in Firestore */
+export interface UserDocumentFields {
+  email?: string | null
+  firstName?: string | null
+  lastName?: string | null
+  subscriptionPlan?: number | null
+}
+
+/** Full admin view of a user: Auth record + user document + Firestore counts + workout/plan/collection lists */
 export interface AdminUserProfile extends AdminUserRecord {
+  /** From user document users/<userId> */
+  firstName?: string | null
+  lastName?: string | null
+  subscriptionPlan?: number | null
   dataCounts: UserDataCounts
+  workouts: Workout[]
+  /** Workouts with deletedAt set (for Deleted data section) */
+  deletedWorkouts: Workout[]
   workoutPlans: WorkoutPlan[]
-  /** Number of workout plans with deletedAt set (hidden from list) */
-  deletedWorkoutPlansCount: number
+  /** Workout plans with deletedAt set (for Deleted data section) */
+  deletedWorkoutPlans: WorkoutPlan[]
   workoutCollections: WorkoutCollection[]
-  /** Number of workout collections with deletedAt set (hidden from list) */
-  deletedWorkoutCollectionsCount: number
+  /** Workout collections with deletedAt set (for Deleted data section) */
+  deletedWorkoutCollections: WorkoutCollection[]
 }

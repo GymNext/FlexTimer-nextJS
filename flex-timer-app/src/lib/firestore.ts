@@ -1,5 +1,46 @@
+import { randomUUID } from 'node:crypto'
+import { DocumentSnapshot, FieldPath, FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase-admin'
-import { USER_COLLECTIONS, type UserDataCounts, type Workout, type WorkoutCollection, type WorkoutPlan } from '@/types/user'
+import { USER_COLLECTIONS, type UserDataCounts, type PlanDay, type PlanDayEntry, type PlannedWorkout, type Workout, type WorkoutCollection, type WorkoutPlan, type WorkoutSegment, type WorkoutType } from '@/types/user'
+
+function mapSegmentFromEntry(seg: Record<string, unknown>, index: number, fallbackWorkoutId: string): WorkoutSegment {
+  const workoutId = typeof seg.workoutId === 'string' ? seg.workoutId : `${fallbackWorkoutId}-seg-${index}`
+  const decodeInt = (key: string, def: number) => {
+    const v = seg[key]
+    if (typeof v === 'number') return v
+    if (typeof v === 'string') { const n = parseInt(v, 10); return Number.isNaN(n) ? def : n }
+    return def
+  }
+  const decodeBool = (key: string, def: boolean) => {
+    const v = seg[key]
+    if (typeof v === 'boolean') return v
+    if (typeof v === 'number') return v !== 0
+    return def
+  }
+  const decodeIntArray = (key: string): number[] => {
+    const v = seg[key]
+    if (!Array.isArray(v)) return []
+    const nums = v.filter((x): x is number => typeof x === 'number')
+    if (nums.length > 0) return nums
+    return (v as string[]).map((x) => parseInt(String(x), 10)).filter((n) => !Number.isNaN(n))
+  }
+  return {
+    workoutId,
+    workoutName: (seg.workoutName as string) ?? null,
+    workoutDescription: (seg.workoutDescription as string) ?? null,
+    workoutImage: (seg.workoutImage as string) ?? null,
+    workoutShareId: (seg.workoutShareId as string) ?? null,
+    workoutSchedule: typeof seg.workoutSchedule === 'string' ? seg.workoutSchedule : null,
+    prelude: decodeInt('prelude', -1),
+    segue: decodeBool('segue', false),
+    warnings: decodeIntArray('warnings'),
+    metronome: decodeInt('metronome', 0),
+    direction: decodeBool('direction', false),
+    restDirection: decodeInt('restDirection', 0),
+    warningStrategy: decodeInt('warningStrategy', 0),
+    continuity: decodeBool('continuity', false),
+  }
+}
 
 function parseDeletedAt(d: Record<string, unknown>): string | null {
   const deletedAtRaw = d.deletedAt
@@ -8,6 +49,30 @@ function parseDeletedAt(d: Record<string, unknown>): string | null {
   if (typeof deletedAtRaw === 'object' && deletedAtRaw !== null && 'toDate' in deletedAtRaw && typeof (deletedAtRaw as { toDate: () => Date }).toDate === 'function')
     return (deletedAtRaw as { toDate: () => Date }).toDate().toISOString()
   return null
+}
+
+function parseTimestamp(value: unknown): string {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'object' && value !== null && 'toDate' in value && typeof (value as { toDate: () => Date }).toDate === 'function')
+    return (value as { toDate: () => Date }).toDate().toISOString()
+  return String(value)
+}
+
+/** User document at users/<userId> (top-level fields like firstName, lastName, subscriptionPlan). */
+export async function getUserDocument(
+  userId: string
+): Promise<{ firstName?: string | null; lastName?: string | null; subscriptionPlan?: number | null; email?: string | null } | null> {
+  if (!adminDb) return null
+  const doc = await adminDb.collection('users').doc(userId).get()
+  if (!doc.exists) return null
+  const d = doc.data()!
+  return {
+    firstName: typeof d.firstName === 'string' ? d.firstName : null,
+    lastName: typeof d.lastName === 'string' ? d.lastName : null,
+    subscriptionPlan: typeof d.subscriptionPlan === 'number' ? d.subscriptionPlan : null,
+    email: typeof d.email === 'string' ? d.email : null,
+  }
 }
 
 export async function getUserDataCounts(userId: string): Promise<UserDataCounts> {
@@ -80,7 +145,124 @@ export async function getUserWorkoutCollections(userId: string): Promise<Workout
   return collections
 }
 
-/** Fetch workout documents by id from users/<userId>/workouts (doc id = workoutId). */
+/** Fetch a single workout collection by doc id from users/<userId>/workoutCollections. */
+export async function getCollectionById(userId: string, collectionId: string): Promise<WorkoutCollection | null> {
+  if (!adminDb) return null
+  const doc = await adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutCollections)
+    .doc(collectionId)
+    .get()
+  if (!doc.exists) return null
+  const d = doc.data()!
+  const workoutIdsRaw = d.workoutIds
+  const workoutIds = Array.isArray(workoutIdsRaw)
+    ? workoutIdsRaw.filter((x): x is string => typeof x === 'string')
+    : []
+  return {
+    id: doc.id,
+    ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
+    userId: typeof d.userId === 'string' ? d.userId : '',
+    workoutCollectionDescription: d.workoutCollectionDescription ?? null,
+    workoutCollectionId: typeof d.workoutCollectionId === 'string' ? d.workoutCollectionId : '',
+    workoutCollectionName: typeof d.workoutCollectionName === 'string' ? d.workoutCollectionName : '',
+    workoutCollectionShareId: typeof d.workoutCollectionShareId === 'string' ? d.workoutCollectionShareId : '',
+    workoutIds,
+    deletedAt: parseDeletedAt(d),
+  }
+}
+
+/** Fetch all workout documents from users/<userId>/workouts (for profile list). */
+export async function getUserWorkouts(userId: string): Promise<Workout[]> {
+  if (!adminDb) return []
+  const snapshot = await adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workouts)
+    .get()
+  const workouts = snapshot.docs.map((doc) => {
+    const d = doc.data()
+    const type: WorkoutType = d.type === 'MultiSegmentWorkout' ? 'MultiSegmentWorkout' : 'SingleSegmentWorkout'
+    return {
+      id: doc.id,
+      type,
+      userId: typeof d.userId === 'string' ? d.userId : '',
+      workoutId: typeof d.workoutId === 'string' ? d.workoutId : doc.id,
+      workoutShareId: typeof d.workoutShareId === 'string' ? d.workoutShareId : '',
+      workoutName: d.workoutName ?? null,
+      workoutDescription: d.workoutDescription ?? null,
+      workoutImage: d.workoutImage ?? null,
+      timerMode: (d as Record<string, unknown>).timerMode,
+      timerModes: (d as Record<string, unknown>).timerModes,
+      deletedAt: parseDeletedAt(d as Record<string, unknown>),
+    }
+  })
+  workouts.sort((a, b) => (a.workoutName ?? a.workoutId).localeCompare(b.workoutName ?? b.workoutId))
+  return workouts
+}
+
+/** Map a workout document snapshot to Workout (includes workoutSchedule, direction, segments for UIHelper-style display). */
+function mapWorkoutDoc(doc: DocumentSnapshot): Workout | null {
+  if (!doc.exists) return null
+  const d = doc.data()!
+  const type = d.type === 'MultiSegmentWorkout' ? 'MultiSegmentWorkout' : 'SingleSegmentWorkout'
+  const raw = d as Record<string, unknown>
+  const decodeInt = (key: string, def: number) => {
+    const v = raw[key]
+    if (typeof v === 'number') return v
+    if (typeof v === 'string') { const n = parseInt(v, 10); return Number.isNaN(n) ? def : n }
+    return def
+  }
+  const decodeBool = (key: string, def: boolean) => {
+    const v = raw[key]
+    if (typeof v === 'boolean') return v
+    if (typeof v === 'number') return v !== 0
+    return def
+  }
+  const decodeIntArray = (key: string): number[] => {
+    const v = raw[key]
+    if (Array.isArray(v)) return v.filter((x): x is number => typeof x === 'number')
+    return []
+  }
+  const base: Workout = {
+    id: doc.id,
+    type,
+    userId: typeof d.userId === 'string' ? d.userId : '',
+    workoutId: typeof d.workoutId === 'string' ? d.workoutId : doc.id,
+    workoutShareId: typeof d.workoutShareId === 'string' ? d.workoutShareId : '',
+    workoutName: d.workoutName ?? null,
+    workoutDescription: d.workoutDescription ?? null,
+    workoutImage: d.workoutImage ?? null,
+    timerMode: raw.timerMode,
+    timerModes: raw.timerModes,
+    deletedAt: parseDeletedAt(raw),
+  }
+  if (type === 'SingleSegmentWorkout') {
+    const workoutSchedule = typeof raw.workoutSchedule === 'string' ? raw.workoutSchedule : null
+    return {
+      ...base,
+      workoutSchedule: workoutSchedule ?? undefined,
+      prelude: decodeInt('prelude', -1),
+      segue: decodeBool('segue', false),
+      warnings: decodeIntArray('warnings'),
+      metronome: decodeInt('metronome', 0),
+      direction: decodeBool('direction', false),
+      restDirection: decodeInt('restDirection', 0),
+      warningStrategy: decodeInt('warningStrategy', 0),
+      continuity: decodeBool('continuity', false),
+    }
+  }
+  const segmentDicts = Array.isArray(raw.segments) ? (raw.segments as Record<string, unknown>[]) : []
+  const segments: WorkoutSegment[] = segmentDicts.map((seg, i) => parseSegment(seg, i, base.workoutId))
+  return {
+    ...base,
+    autoProgress: raw.autoProgress === true,
+    segments,
+  }
+}
+
+/** Fetch workout documents by id from users/<userId>/workouts (doc id = workoutId). Includes workoutSchedule, direction, segments for display names. */
 export async function getWorkoutsByIds(userId: string, workoutIds: string[]): Promise<Workout[]> {
   if (!adminDb || workoutIds.length === 0) return []
   const userRef = adminDb.collection('users').doc(userId)
@@ -90,20 +272,400 @@ export async function getWorkoutsByIds(userId: string, workoutIds: string[]): Pr
   const results: Workout[] = []
   for (let i = 0; i < uniqueIds.length; i++) {
     const doc = snaps[i]
-    if (!doc?.exists) continue
-    const d = doc.data()!
-    const type = d.type === 'MultiSegmentWorkout' ? 'MultiSegmentWorkout' : 'SingleSegmentWorkout'
-    results.push({
-      id: doc.id,
-      type,
-      userId: typeof d.userId === 'string' ? d.userId : '',
-      workoutId: typeof d.workoutId === 'string' ? d.workoutId : doc.id,
-      workoutShareId: typeof d.workoutShareId === 'string' ? d.workoutShareId : '',
-      workoutName: d.workoutName ?? null,
-      workoutDescription: d.workoutDescription ?? null,
-      workoutImage: d.workoutImage ?? null,
-      deletedAt: parseDeletedAt(d as Record<string, unknown>),
-    })
+    const workout = doc ? mapWorkoutDoc(doc) : null
+    if (workout) results.push(workout)
   }
   return results
+}
+
+function parseSegment(raw: Record<string, unknown>, index: number, fallbackWorkoutId: string): WorkoutSegment {
+  const workoutId = typeof raw.workoutId === 'string' ? raw.workoutId : `${fallbackWorkoutId}-seg-${index}`
+  const workoutSchedule = typeof raw.workoutSchedule === 'string' ? raw.workoutSchedule : null
+  const decodeInt = (key: string, def: number) => {
+    const v = raw[key]
+    if (typeof v === 'number') return v
+    if (typeof v === 'string') { const n = parseInt(v, 10); return Number.isNaN(n) ? def : n }
+    return def
+  }
+  const decodeBool = (key: string, def: boolean) => {
+    const v = raw[key]
+    if (typeof v === 'boolean') return v
+    if (typeof v === 'number') return v !== 0
+    return def
+  }
+  const decodeIntArray = (key: string): number[] => {
+    const v = raw[key]
+    if (!Array.isArray(v)) return []
+    const nums = v.filter((x): x is number => typeof x === 'number')
+    if (nums.length > 0) return nums
+    return (v as string[]).map((x) => parseInt(String(x), 10)).filter((n) => !Number.isNaN(n))
+  }
+  return {
+    workoutId,
+    workoutName: (raw.workoutName as string) ?? null,
+    workoutDescription: (raw.workoutDescription as string) ?? null,
+    workoutImage: (raw.workoutImage as string) ?? null,
+    workoutShareId: (raw.workoutShareId as string) ?? null,
+    workoutSchedule: workoutSchedule ?? undefined,
+    prelude: decodeInt('prelude', -1),
+    segue: decodeBool('segue', false),
+    warnings: decodeIntArray('warnings'),
+    metronome: decodeInt('metronome', 0),
+    direction: decodeBool('direction', false),
+    restDirection: decodeInt('restDirection', 0),
+    warningStrategy: decodeInt('warningStrategy', 0),
+    continuity: decodeBool('continuity', false),
+  }
+}
+
+/** Soft-delete a workout: set deletedAt to now. */
+export async function setWorkoutDeletedAt(userId: string, workoutId: string, deletedAt: Date = new Date()): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(workoutId)
+  await ref.update({ deletedAt: Timestamp.fromDate(deletedAt) })
+}
+
+/** Clear deletedAt on a workout (recover). */
+export async function clearWorkoutDeletedAt(userId: string, workoutId: string): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(workoutId)
+  await ref.update({ deletedAt: FieldValue.delete() })
+}
+
+/** Permanently delete a workout document from users/<userId>/workouts/<workoutId>. */
+export async function deleteWorkout(userId: string, workoutId: string): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(workoutId)
+  await ref.delete()
+}
+
+/** Soft-delete a collection: set deletedAt to now. */
+export async function setCollectionDeletedAt(userId: string, collectionId: string, deletedAt: Date = new Date()): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutCollections)
+    .doc(collectionId)
+  await ref.update({ deletedAt: Timestamp.fromDate(deletedAt) })
+}
+
+/** Clear deletedAt on a collection (recover). */
+export async function clearCollectionDeletedAt(userId: string, collectionId: string): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutCollections)
+    .doc(collectionId)
+  await ref.update({ deletedAt: FieldValue.delete() })
+}
+
+/** Permanently delete a workout collection document from users/<userId>/workoutCollections/<collectionId>. */
+export async function deleteCollection(userId: string, collectionId: string): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutCollections)
+    .doc(collectionId)
+  await ref.delete()
+}
+
+const FIRESTORE_BATCH_SIZE = 500
+
+/** Soft-delete a plan: set deletedAt to now. */
+export async function setPlanDeletedAt(userId: string, planId: string, deletedAt: Date = new Date()): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutPlans)
+    .doc(planId)
+  await ref.update({ deletedAt: Timestamp.fromDate(deletedAt) })
+}
+
+/** Clear deletedAt on a plan (recover). */
+export async function clearPlanDeletedAt(userId: string, planId: string): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutPlans)
+    .doc(planId)
+  await ref.update({ deletedAt: FieldValue.delete() })
+}
+
+/** Permanently delete a workout plan: deletes all planDays subcollection docs, then the plan document. */
+export async function deletePlan(userId: string, planId: string): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const planRef = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutPlans)
+    .doc(planId)
+  const planDaysSnap = await planRef.collection('planDays').get()
+  for (let i = 0; i < planDaysSnap.docs.length; i += FIRESTORE_BATCH_SIZE) {
+    const batch = adminDb.batch()
+    planDaysSnap.docs.slice(i, i + FIRESTORE_BATCH_SIZE).forEach((d) => batch.delete(d.ref))
+    await batch.commit()
+  }
+  await planRef.delete()
+}
+
+/** Create a new workout collection under users/<userId>/workoutCollections. Returns the created collection. */
+export async function createWorkoutCollection(
+  userId: string,
+  data: { name: string; description?: string | null }
+): Promise<WorkoutCollection> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const colRef = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutCollections)
+  const id = randomUUID()
+  const newRef = colRef.doc(id)
+  await newRef.set({
+    ordinal: 0,
+    userId,
+    workoutCollectionId: id,
+    workoutCollectionName: data.name.trim() || 'Untitled collection',
+    workoutCollectionDescription: data.description?.trim() || null,
+    workoutCollectionShareId: '',
+    workoutIds: [],
+  })
+  const created = await getCollectionById(userId, id)
+  if (!created) throw new Error('Failed to read created collection')
+  return created
+}
+
+/** Create a new workout plan under users/<userId>/workoutPlans. Returns the created plan. */
+export async function createWorkoutPlan(
+  userId: string,
+  data: { name: string; description?: string | null }
+): Promise<WorkoutPlan> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const colRef = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutPlans)
+  const id = randomUUID()
+  const newRef = colRef.doc(id)
+  await newRef.set({
+    ordinal: 0,
+    userId,
+    isPersonal: true,
+    workoutPlanId: id,
+    workoutPlanName: data.name.trim() || 'Untitled plan',
+    workoutPlanDescription: data.description?.trim() || null,
+  })
+  const created = await getPlanById(userId, id)
+  if (!created) throw new Error('Failed to read created plan')
+  return created
+}
+
+/** Fetch a single workout by id from users/<userId>/workouts. Includes workoutSchedule (string), options, and segments for detail view. */
+export async function getWorkoutById(userId: string, workoutId: string): Promise<Workout | null> {
+  if (!adminDb) return null
+  const doc = await adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(workoutId)
+    .get()
+  return mapWorkoutDoc(doc)
+}
+
+/** Fetch a single workout plan by doc id from users/<userId>/workoutPlans. */
+export async function getPlanById(userId: string, planId: string): Promise<WorkoutPlan | null> {
+  if (!adminDb) return null
+  const doc = await adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutPlans)
+    .doc(planId)
+    .get()
+  if (!doc.exists) return null
+  const d = doc.data()!
+  return {
+    id: doc.id,
+    isPersonal: d.isPersonal === true,
+    ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
+    userId: typeof d.userId === 'string' ? d.userId : '',
+    workoutPlanDescription: d.workoutPlanDescription ?? null,
+    workoutPlanId: typeof d.workoutPlanId === 'string' ? d.workoutPlanId : '',
+    workoutPlanName: typeof d.workoutPlanName === 'string' ? d.workoutPlanName : '',
+    deletedAt: parseDeletedAt(d),
+  }
+}
+
+/** Fetch plan days in date range from users/<userId>/workoutPlans/<planId>/planDays. Document IDs are date strings (e.g. YYYY-MM-DD). */
+export async function getPlanDays(userId: string, planId: string, fromDate: string, toDate: string): Promise<PlanDay[]> {
+  if (!adminDb) return []
+  const planDaysRef = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutPlans)
+    .doc(planId)
+    .collection('planDays')
+  const snapshot = await planDaysRef
+    .where(FieldPath.documentId(), '>=', fromDate)
+    .where(FieldPath.documentId(), '<=', toDate)
+    .orderBy(FieldPath.documentId())
+    .get()
+  return snapshot.docs.map((doc) => {
+    const d = doc.data() as Record<string, unknown>
+    const entriesRaw = d.entries
+    const entries: PlanDayEntry[] = Array.isArray(entriesRaw)
+      ? (entriesRaw as Record<string, unknown>[]).map((e) => mapPlanDayEntry(e))
+      : []
+    const sourceWorkoutIdsRaw = d.sourceWorkoutIds
+    const sourceWorkoutIds = Array.isArray(sourceWorkoutIdsRaw)
+      ? (sourceWorkoutIdsRaw as unknown[]).map((s) => (typeof s === 'string' ? s : null))
+      : []
+    return {
+      id: doc.id,
+      day: parseTimestamp(d.day),
+      entries,
+      planId: typeof d.planId === 'string' ? d.planId : '',
+      sourceWorkoutIds,
+      userId: typeof d.userId === 'string' ? d.userId : '',
+    }
+  })
+}
+
+const PLANNED_WORKOUTS_COLLECTION = 'plannedWorkouts'
+
+/** Fetch planned workouts for a plan in date range from users/<userId>/plannedWorkouts. Excludes soft-deleted (deletedAt set). */
+export async function getPlannedWorkouts(
+  userId: string,
+  planId: string,
+  fromDate: string,
+  toDate: string
+): Promise<PlannedWorkout[]> {
+  if (!adminDb) return []
+  const startTs = Timestamp.fromDate(new Date(fromDate + 'T00:00:00.000Z'))
+  const endTs = Timestamp.fromDate(new Date(toDate + 'T23:59:59.999Z'))
+  const snapshot = await adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(PLANNED_WORKOUTS_COLLECTION)
+    .where('planId', '==', planId)
+    .where('day', '>=', startTs)
+    .where('day', '<=', endTs)
+    .orderBy('day')
+    .get()
+  const results: PlannedWorkout[] = []
+  for (const doc of snapshot.docs) {
+    const d = doc.data() as Record<string, unknown>
+    if (parseDeletedAt(d)) continue
+    const workoutRaw = d.workout
+    const workout = mapPlanDayEntry(
+      typeof workoutRaw === 'object' && workoutRaw !== null ? (workoutRaw as Record<string, unknown>) : {}
+    )
+    results.push({
+      id: doc.id,
+      day: parseTimestamp(d.day),
+      ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
+      planId: typeof d.planId === 'string' ? d.planId : '',
+      plannedWorkoutId:
+        typeof d.plannedWorkoutId === 'string' ? d.plannedWorkoutId : doc.id,
+      sourceWorkoutId:
+        d.sourceWorkoutId != null && typeof d.sourceWorkoutId === 'string'
+          ? d.sourceWorkoutId
+          : null,
+      userId: typeof d.userId === 'string' ? d.userId : '',
+      workout,
+      deletedAt: parseDeletedAt(d),
+    })
+  }
+  results.sort((a, b) => a.ordinal - b.ordinal || a.day.localeCompare(b.day))
+  return results
+}
+
+/** Fetch a single planned workout by id from users/<userId>/plannedWorkouts/<plannedWorkoutId>. */
+export async function getPlannedWorkout(
+  userId: string,
+  plannedWorkoutId: string
+): Promise<PlannedWorkout | null> {
+  if (!adminDb) return null
+  const docRef = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(PLANNED_WORKOUTS_COLLECTION)
+    .doc(plannedWorkoutId)
+  const snap = await docRef.get()
+  if (!snap.exists) return null
+  const d = snap.data() as Record<string, unknown>
+  const workoutRaw = d.workout
+  const workout = mapPlanDayEntry(
+    typeof workoutRaw === 'object' && workoutRaw !== null ? (workoutRaw as Record<string, unknown>) : {}
+  )
+  return {
+    id: snap.id,
+    day: parseTimestamp(d.day),
+    ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
+    planId: typeof d.planId === 'string' ? d.planId : '',
+    plannedWorkoutId: typeof d.plannedWorkoutId === 'string' ? d.plannedWorkoutId : snap.id,
+    sourceWorkoutId:
+      d.sourceWorkoutId != null && typeof d.sourceWorkoutId === 'string' ? d.sourceWorkoutId : null,
+    userId: typeof d.userId === 'string' ? d.userId : '',
+    workout,
+    deletedAt: parseDeletedAt(d),
+  }
+}
+
+/** Permanently delete a planned workout document from users/<userId>/plannedWorkouts/<plannedWorkoutId>. */
+export async function deletePlannedWorkout(userId: string, plannedWorkoutId: string): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(PLANNED_WORKOUTS_COLLECTION)
+    .doc(plannedWorkoutId)
+  await ref.delete()
+}
+
+function mapPlanDayEntry(e: Record<string, unknown>): PlanDayEntry {
+  const entryWorkoutId = typeof e.workoutId === 'string' ? e.workoutId : 'entry'
+  const segmentsRaw = e.segments
+  const segments: WorkoutSegment[] = Array.isArray(segmentsRaw)
+    ? (segmentsRaw as Record<string, unknown>[]).map((seg, i) => mapSegmentFromEntry(seg, i, entryWorkoutId))
+    : []
+  const timerModes = Array.isArray(e.timerModes) ? (e.timerModes as number[]) : undefined
+  return {
+    continuity: e.continuity === true,
+    direction: e.direction === true,
+    metronome: typeof e.metronome === 'number' ? e.metronome : undefined,
+    prelude: typeof e.prelude === 'number' ? e.prelude : undefined,
+    restDirection: typeof e.restDirection === 'number' ? e.restDirection : undefined,
+    segue: e.segue === true,
+    timerMode: typeof e.timerMode === 'number' ? e.timerMode : undefined,
+    type: typeof e.type === 'string' ? e.type : undefined,
+    userId: typeof e.userId === 'string' ? e.userId : undefined,
+    warningStrategy: typeof e.warningStrategy === 'number' ? e.warningStrategy : undefined,
+    warnings: Array.isArray(e.warnings) ? (e.warnings as number[]) : undefined,
+    workoutDescription: e.workoutDescription != null ? String(e.workoutDescription) : null,
+    workoutId: typeof e.workoutId === 'string' ? e.workoutId : undefined,
+    workoutImage: e.workoutImage != null ? String(e.workoutImage) : null,
+    workoutName: e.workoutName != null ? String(e.workoutName) : null,
+    workoutSchedule: typeof e.workoutSchedule === 'string' ? e.workoutSchedule : undefined,
+    workoutShareId: e.workoutShareId != null ? String(e.workoutShareId) : null,
+    planId: typeof e.planId === 'string' ? e.planId : undefined,
+    segments: segments.length > 0 ? segments : undefined,
+    autoProgress: e.autoProgress === true,
+    timerModes: timerModes?.length ? timerModes : undefined,
+  }
 }

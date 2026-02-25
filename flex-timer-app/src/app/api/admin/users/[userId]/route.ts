@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAdminAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
-import { getUserDataCounts, getUserWorkoutCollections, getUserWorkoutPlans } from '@/lib/firestore'
+import { getUserDataCounts, getUserDocument, getUserWorkoutCollections, getUserWorkoutPlans, getUserWorkouts } from '@/lib/firestore'
 import type { AdminUserProfile } from '@/types/user'
 
 /**
@@ -30,21 +30,25 @@ export async function GET(
   }
 
   try {
-    const [userRecord, dataCounts, allWorkoutPlans, allWorkoutCollections] = await Promise.all([
+    const [userRecord, userDoc, dataCounts, allWorkouts, allWorkoutPlans, allWorkoutCollections] = await Promise.all([
       adminAuth.getUser(userId),
+      getUserDocument(userId),
       getUserDataCounts(userId),
+      getUserWorkouts(userId),
       getUserWorkoutPlans(userId),
       getUserWorkoutCollections(userId),
     ])
 
-    const deletedWorkoutPlansCount = allWorkoutPlans.filter((p) => p.deletedAt).length
+    const deletedWorkouts = allWorkouts.filter((w) => w.deletedAt)
+    const workouts = allWorkouts.filter((w) => !w.deletedAt)
+    const deletedWorkoutPlans = allWorkoutPlans.filter((p) => p.deletedAt)
     const workoutPlans = allWorkoutPlans.filter((p) => !p.deletedAt)
-    const deletedWorkoutCollectionsCount = allWorkoutCollections.filter((c) => c.deletedAt).length
+    const deletedWorkoutCollections = allWorkoutCollections.filter((c) => c.deletedAt)
     const workoutCollections = allWorkoutCollections.filter((c) => !c.deletedAt)
 
     const profile: AdminUserProfile = {
       uid: userRecord.uid,
-      email: userRecord.email ?? null,
+      email: userRecord.email ?? userDoc?.email ?? null,
       displayName: userRecord.displayName ?? null,
       photoURL: userRecord.photoURL ?? null,
       emailVerified: userRecord.emailVerified,
@@ -53,11 +57,16 @@ export async function GET(
         creationTime: userRecord.metadata.creationTime,
         lastSignInTime: userRecord.metadata.lastSignInTime ?? null,
       },
+      firstName: userDoc?.firstName ?? null,
+      lastName: userDoc?.lastName ?? null,
+      subscriptionPlan: userDoc?.subscriptionPlan ?? null,
       dataCounts,
+      workouts,
+      deletedWorkouts,
       workoutPlans,
-      deletedWorkoutPlansCount,
+      deletedWorkoutPlans,
       workoutCollections,
-      deletedWorkoutCollectionsCount,
+      deletedWorkoutCollections,
     }
 
     return NextResponse.json(profile)
