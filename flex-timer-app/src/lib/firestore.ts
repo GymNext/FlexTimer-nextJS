@@ -59,19 +59,30 @@ function parseTimestamp(value: unknown): string {
   return String(value)
 }
 
-/** User document at users/<userId> (top-level fields like firstName, lastName, subscriptionPlan). */
+/** User document at users/<userId> (top-level fields plus optional settings map). */
 export async function getUserDocument(
   userId: string
-): Promise<{ firstName?: string | null; lastName?: string | null; subscriptionPlan?: number | null; email?: string | null } | null> {
+): Promise<{
+  firstName?: string | null
+  lastName?: string | null
+  subscriptionPlan?: number | null
+  email?: string | null
+  settings?: Record<string, unknown>
+} | null> {
   if (!adminDb) return null
   const doc = await adminDb.collection('users').doc(userId).get()
   if (!doc.exists) return null
   const d = doc.data()!
+  const raw = d as Record<string, unknown>
+  const settings = raw.settings != null && typeof raw.settings === 'object' && !Array.isArray(raw.settings)
+    ? (raw.settings as Record<string, unknown>)
+    : undefined
   return {
     firstName: typeof d.firstName === 'string' ? d.firstName : null,
     lastName: typeof d.lastName === 'string' ? d.lastName : null,
     subscriptionPlan: typeof d.subscriptionPlan === 'number' ? d.subscriptionPlan : null,
     email: typeof d.email === 'string' ? d.email : null,
+    settings,
   }
 }
 
@@ -173,7 +184,7 @@ export async function getCollectionById(userId: string, collectionId: string): P
   }
 }
 
-/** Fetch all workout documents from users/<userId>/workouts (for profile list). */
+/** Fetch all workout documents from users/<userId>/workouts (for profile list). Uses full mapping so display name/description work. */
 export async function getUserWorkouts(userId: string): Promise<Workout[]> {
   if (!adminDb) return []
   const snapshot = await adminDb
@@ -181,23 +192,11 @@ export async function getUserWorkouts(userId: string): Promise<Workout[]> {
     .doc(userId)
     .collection(USER_COLLECTIONS.workouts)
     .get()
-  const workouts = snapshot.docs.map((doc) => {
-    const d = doc.data()
-    const type: WorkoutType = d.type === 'MultiSegmentWorkout' ? 'MultiSegmentWorkout' : 'SingleSegmentWorkout'
-    return {
-      id: doc.id,
-      type,
-      userId: typeof d.userId === 'string' ? d.userId : '',
-      workoutId: typeof d.workoutId === 'string' ? d.workoutId : doc.id,
-      workoutShareId: typeof d.workoutShareId === 'string' ? d.workoutShareId : '',
-      workoutName: d.workoutName ?? null,
-      workoutDescription: d.workoutDescription ?? null,
-      workoutImage: d.workoutImage ?? null,
-      timerMode: (d as Record<string, unknown>).timerMode,
-      timerModes: (d as Record<string, unknown>).timerModes,
-      deletedAt: parseDeletedAt(d as Record<string, unknown>),
-    }
-  })
+  const workouts: Workout[] = []
+  for (const doc of snapshot.docs) {
+    const w = mapWorkoutDoc(doc)
+    if (w) workouts.push(w)
+  }
   workouts.sort((a, b) => (a.workoutName ?? a.workoutId).localeCompare(b.workoutName ?? b.workoutId))
   return workouts
 }
@@ -382,6 +381,59 @@ export async function deleteCollection(userId: string, collectionId: string): Pr
     .collection(USER_COLLECTIONS.workoutCollections)
     .doc(collectionId)
   await ref.delete()
+}
+
+/** Create a SingleSegmentWorkout in users/<userId>/workouts. data: { timerMode, workoutSchedule (string), direction? }. */
+export async function createWorkout(
+  userId: string,
+  data: { timerMode: number; workoutSchedule: string; direction?: boolean }
+): Promise<Workout> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const id = randomUUID()
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(id)
+  await ref.set({
+    type: 'SingleSegmentWorkout',
+    userId,
+    workoutId: id,
+    workoutShareId: '',
+    workoutName: null,
+    workoutDescription: null,
+    workoutImage: null,
+    timerMode: data.timerMode,
+    workoutSchedule: data.workoutSchedule,
+    direction: data.direction === true,
+    prelude: -1,
+    segue: false,
+    warnings: [],
+    metronome: 0,
+    restDirection: 0,
+    warningStrategy: 0,
+    continuity: false,
+  })
+  const created = await getWorkoutById(userId, id)
+  if (!created) throw new Error('Failed to read created workout')
+  return created
+}
+
+/** Append a workout id to a collection's workoutIds. */
+export async function addWorkoutToCollection(
+  userId: string,
+  collectionId: string,
+  workoutId: string
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const coll = await getCollectionById(userId, collectionId)
+  if (!coll) throw new Error('Collection not found')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutCollections)
+    .doc(collectionId)
+  await ref.update({ workoutIds: [...coll.workoutIds, workoutId] })
 }
 
 const FIRESTORE_BATCH_SIZE = 500
@@ -625,6 +677,57 @@ export async function getPlannedWorkout(
     workout,
     deletedAt: parseDeletedAt(d),
   }
+}
+
+/** Create a new planned workout. day is YYYY-MM-DD; ordinal defaults to 0; workout is the PlanDayEntry-shaped object (timerMode, workoutSchedule JSON string, direction, etc.). */
+export async function createPlannedWorkout(
+  userId: string,
+  planId: string,
+  params: { day: string; ordinal?: number; workout: Record<string, unknown> }
+): Promise<PlannedWorkout> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const id = randomUUID()
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(PLANNED_WORKOUTS_COLLECTION)
+    .doc(id)
+  const dayTs = Timestamp.fromDate(new Date(params.day + 'T12:00:00.000Z'))
+  await ref.set({
+    day: dayTs,
+    ordinal: typeof params.ordinal === 'number' ? params.ordinal : 0,
+    planId,
+    plannedWorkoutId: id,
+    sourceWorkoutId: null,
+    userId,
+    workout: params.workout,
+  })
+  const created = await getPlannedWorkout(userId, id)
+  if (!created) throw new Error('Failed to read created planned workout')
+  return created
+}
+
+/** Update a planned workout's day and/or ordinal. day is YYYY-MM-DD; ordinal is a number (can be fractional for insert-between). */
+export async function updatePlannedWorkoutDayAndOrdinal(
+  userId: string,
+  plannedWorkoutId: string,
+  updates: { day?: string; ordinal?: number }
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(PLANNED_WORKOUTS_COLLECTION)
+    .doc(plannedWorkoutId)
+  const data: Record<string, unknown> = {}
+  if (updates.day !== undefined) {
+    data.day = Timestamp.fromDate(new Date(updates.day + 'T12:00:00.000Z'))
+  }
+  if (updates.ordinal !== undefined) {
+    data.ordinal = updates.ordinal
+  }
+  if (Object.keys(data).length === 0) return
+  await ref.update(data)
 }
 
 /** Permanently delete a planned workout document from users/<userId>/plannedWorkouts/<plannedWorkoutId>. */

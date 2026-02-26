@@ -5,6 +5,65 @@ import Link from 'next/link'
 import { auth } from '@/lib/firebase'
 import type { AdminUserRecord } from '@/types/user'
 
+const PROVIDER_ICON_SIZE = 18
+
+function ProviderIcon({ provider }: { provider: string }) {
+  const title = provider
+  const common = { width: PROVIDER_ICON_SIZE, height: PROVIDER_ICON_SIZE, className: 'shrink-0' }
+  switch (provider) {
+    case 'Google':
+      return (
+        <span title={title} aria-hidden className="inline-flex items-center justify-center">
+          <img src="/icons/google.png" alt="" width={PROVIDER_ICON_SIZE} height={PROVIDER_ICON_SIZE} className="shrink-0 object-contain" />
+        </span>
+      )
+    case 'Apple':
+      return (
+        <span title={title} aria-hidden className="inline-flex items-center justify-center">
+          <img src="/icons/apple.png" alt="" width={PROVIDER_ICON_SIZE} height={PROVIDER_ICON_SIZE} className="shrink-0 object-contain" />
+        </span>
+      )
+    case 'Facebook':
+      return (
+        <span title={title} aria-hidden className="inline-flex items-center justify-center">
+          <img src="/icons/facebook.png" alt="" width={PROVIDER_ICON_SIZE} height={PROVIDER_ICON_SIZE} className="shrink-0 object-contain" />
+        </span>
+      )
+    case 'Email':
+      return (
+        <span title={title} aria-hidden className="inline-flex items-center justify-center text-gray-500">
+          <svg {...common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="4" width="20" height="16" rx="2" />
+            <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
+          </svg>
+        </span>
+      )
+    case 'Phone':
+      return (
+        <span title={title} aria-hidden className="inline-flex items-center justify-center text-gray-500">
+          <svg {...common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+          </svg>
+        </span>
+      )
+    case 'Guest':
+      return (
+        <span title={title} aria-hidden className="inline-flex items-center justify-center">
+          <img src="/icons/guest.png" alt="" width={PROVIDER_ICON_SIZE} height={PROVIDER_ICON_SIZE} className="shrink-0 object-contain" />
+        </span>
+      )
+    default:
+      return (
+        <span title={title} aria-hidden className="inline-flex items-center justify-center rounded bg-gray-100 text-gray-500">
+          <svg {...common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 16v-4M12 8h.01" />
+          </svg>
+        </span>
+      )
+  }
+}
+
 export default function AdminUsersPage() {
   const [users, setUsers] = useState<AdminUserRecord[]>([])
   const [search, setSearch] = useState('')
@@ -71,13 +130,16 @@ export default function AdminUsersPage() {
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
-                  User ID
+                  Provider
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
+                  Display name
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
                   Email
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
-                  Display name
+                  User ID
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
                   Created
@@ -90,21 +152,33 @@ export default function AdminUsersPage() {
             <tbody className="divide-y divide-gray-200 bg-white">
               {users.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
                     No users found.
                   </td>
                 </tr>
               ) : (
                 users.map((u) => (
                   <tr key={u.uid} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 text-sm font-mono text-gray-900">
-                      {u.uid}
+                    <td className="px-4 py-3 text-sm text-gray-600">
+                      <span className="inline-flex items-center gap-2">
+                        {u.providers?.length ? (
+                          <>
+                            <ProviderIcon provider={u.providers[0]} />
+                            <span>{u.providers.join(', ')}</span>
+                          </>
+                        ) : (
+                          '—'
+                        )}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-600">
+                      {u.displayName ?? '—'}
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-600">
                       {u.email ?? '—'}
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-600">
-                      {u.displayName ?? '—'}
+                    <td className="px-4 py-3 text-sm font-mono text-gray-900">
+                      {u.uid}
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-500">
                       {u.metadata.creationTime

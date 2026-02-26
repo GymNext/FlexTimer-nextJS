@@ -23,20 +23,41 @@ export async function GET(request: NextRequest) {
 
   const search = request.nextUrl.searchParams.get('search')?.trim().toLowerCase() || ''
 
+  const providerIdToLabel: Record<string, string> = {
+    'google.com': 'Google',
+    'apple.com': 'Apple',
+    'password': 'Email',
+    'phone': 'Phone',
+    'anonymous': 'Anonymous',
+    'facebook.com': 'Facebook',
+    'github.com': 'GitHub',
+    'microsoft.com': 'Microsoft',
+    'twitter.com': 'Twitter',
+    'yahoo.com': 'Yahoo',
+  }
+  const unknownProviderLabel = 'Guest'
+
   try {
     const listResult = await adminAuth.listUsers(1000)
-    let users: AdminUserRecord[] = listResult.users.map((u) => ({
-      uid: u.uid,
-      email: u.email ?? null,
-      displayName: u.displayName ?? null,
-      photoURL: u.photoURL ?? null,
-      emailVerified: u.emailVerified,
-      disabled: u.disabled,
-      metadata: {
-        creationTime: u.metadata.creationTime,
-        lastSignInTime: u.metadata.lastSignInTime ?? null,
-      },
-    }))
+    let users: AdminUserRecord[] = listResult.users.map((u) => {
+      const providers =
+        u.providerData?.length > 0
+          ? [...new Set(u.providerData.map((p) => providerIdToLabel[p.providerId] ?? p.providerId))]
+          : u.providerId ? [providerIdToLabel[u.providerId] ?? u.providerId] : [unknownProviderLabel]
+      return {
+        uid: u.uid,
+        email: u.email ?? null,
+        displayName: u.displayName ?? null,
+        photoURL: u.photoURL ?? null,
+        emailVerified: u.emailVerified,
+        disabled: u.disabled,
+        providers,
+        metadata: {
+          creationTime: u.metadata.creationTime,
+          lastSignInTime: u.metadata.lastSignInTime ?? null,
+        },
+      }
+    })
 
     if (search) {
       users = users.filter((u) => {

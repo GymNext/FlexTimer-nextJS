@@ -6,6 +6,8 @@ export interface AdminUserRecord {
   photoURL: string | null
   emailVerified: boolean
   disabled: boolean
+  /** Auth provider(s), e.g. ['Google'], ['Apple'], ['Email'] */
+  providers: string[]
   metadata: {
     creationTime: string
     lastSignInTime: string | null
@@ -196,6 +198,8 @@ export interface AdminUserProfile extends AdminUserRecord {
   firstName?: string | null
   lastName?: string | null
   subscriptionPlan?: number | null
+  /** UserDetails settings map (key-value pairs from app) */
+  settings?: Record<string, unknown>
   dataCounts: UserDataCounts
   workouts: Workout[]
   /** Workouts with deletedAt set (for Deleted data section) */

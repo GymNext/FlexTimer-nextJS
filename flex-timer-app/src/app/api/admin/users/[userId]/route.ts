@@ -46,6 +46,24 @@ export async function GET(
     const deletedWorkoutCollections = allWorkoutCollections.filter((c) => c.deletedAt)
     const workoutCollections = allWorkoutCollections.filter((c) => !c.deletedAt)
 
+    const providerIdToLabel: Record<string, string> = {
+      'google.com': 'Google',
+      'apple.com': 'Apple',
+      'password': 'Email',
+      'phone': 'Phone',
+      'anonymous': 'Anonymous',
+      'facebook.com': 'Facebook',
+      'github.com': 'GitHub',
+      'microsoft.com': 'Microsoft',
+      'twitter.com': 'Twitter',
+      'yahoo.com': 'Yahoo',
+    }
+    const unknownProviderLabel = 'Guest'
+    const providers =
+      userRecord.providerData?.length > 0
+        ? [...new Set(userRecord.providerData.map((p) => providerIdToLabel[p.providerId] ?? p.providerId))]
+        : [unknownProviderLabel]
+
     const profile: AdminUserProfile = {
       uid: userRecord.uid,
       email: userRecord.email ?? userDoc?.email ?? null,
@@ -53,6 +71,7 @@ export async function GET(
       photoURL: userRecord.photoURL ?? null,
       emailVerified: userRecord.emailVerified,
       disabled: userRecord.disabled,
+      providers,
       metadata: {
         creationTime: userRecord.metadata.creationTime,
         lastSignInTime: userRecord.metadata.lastSignInTime ?? null,
@@ -60,6 +79,7 @@ export async function GET(
       firstName: userDoc?.firstName ?? null,
       lastName: userDoc?.lastName ?? null,
       subscriptionPlan: userDoc?.subscriptionPlan ?? null,
+      settings: userDoc?.settings ?? undefined,
       dataCounts,
       workouts,
       deletedWorkouts,

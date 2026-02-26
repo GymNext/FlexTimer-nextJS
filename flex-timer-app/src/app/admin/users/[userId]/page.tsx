@@ -6,6 +6,8 @@ import { useParams, useRouter } from 'next/navigation'
 import { auth } from '@/lib/firebase'
 import type { AdminUserProfile } from '@/types/user'
 import { getSubscriptionPlanLabel } from '@/types/user'
+import { getWorkoutDisplayName, getWorkoutDisplayDescription } from '@/lib/json-workout-format'
+import { USER_SETTINGS_SECTIONS, getSectionSubgroupsWithRows } from '@/lib/user-settings-sections'
 
 export default function AdminUserProfilePage() {
   const params = useParams()
@@ -19,6 +21,7 @@ export default function AdminUserProfilePage() {
   const [formDescription, setFormDescription] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const [expandedSettingsSection, setExpandedSettingsSection] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -253,6 +256,52 @@ export default function AdminUserProfilePage() {
       </div>
 
       <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+        <div className="border-b border-gray-200 bg-gray-50 px-4 py-2">
+          <h2 className="text-xs font-medium uppercase tracking-wide text-gray-500">User Settings</h2>
+        </div>
+        <div className="divide-y divide-gray-200">
+          {USER_SETTINGS_SECTIONS.map((section) => {
+            const isExpanded = expandedSettingsSection === section.id
+            const subgroupsWithRows = getSectionSubgroupsWithRows(profile.settings, section)
+            return (
+              <div key={section.id}>
+                <button
+                  type="button"
+                  onClick={() => setExpandedSettingsSection(isExpanded ? null : section.id)}
+                  className="flex w-full items-center justify-between px-4 py-3 text-left text-sm text-gray-700 hover:bg-gray-50"
+                >
+                  <span className="font-medium">{section.title}</span>
+                  <span className="text-gray-400" aria-hidden>{isExpanded ? '▼' : '▶'}</span>
+                </button>
+                {isExpanded && (
+                  <div className="border-t border-gray-100 bg-gray-50/50 max-w-4xl">
+                    {subgroupsWithRows.map((subgroup) => (
+                      <div key={subgroup.title} className="border-b border-gray-100 last:border-b-0">
+                        <h3 className="px-4 pt-3 pb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                          {subgroup.title}
+                        </h3>
+                        <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-2 px-4 pb-3">
+                          {subgroup.rows.map((row) => (
+                            <div key={row.key} className="min-w-0">
+                              <dt className="text-sm font-medium text-gray-500 truncate" title={row.label}>{row.label}</dt>
+                              <dd className="text-sm text-gray-900 font-mono break-all">{row.value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+        {(!profile.settings || Object.keys(profile.settings).length === 0) && (
+          <p className="px-4 py-3 text-sm text-gray-500 border-t border-gray-200">No settings stored for this user.</p>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
         <div className="border-b border-gray-200 bg-gray-50 px-4 py-3">
           <h2 className="text-sm font-medium text-gray-700">
             Workout collections ({sortedCollections.length})
@@ -383,6 +432,7 @@ export default function AdminUserProfilePage() {
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-4 py-2 text-left text-xs font-medium uppercase text-gray-500">Name</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium uppercase text-gray-500">Description</th>
                       <th className="px-4 py-2 text-left text-xs font-medium uppercase text-gray-500">Deleted</th>
                     </tr>
                   </thead>
@@ -394,8 +444,11 @@ export default function AdminUserProfilePage() {
                             href={`/admin/users/${userId}/workouts/${encodeURIComponent(w.id)}`}
                             className="text-blue-600 hover:text-blue-800"
                           >
-                            {w.workoutName ?? '—'}
+                            {getWorkoutDisplayName(w) || '—'}
                           </Link>
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-600">
+                          {getWorkoutDisplayDescription(w) || '—'}
                         </td>
                         <td className="px-4 py-3 text-sm text-amber-600">
                           {w.deletedAt ? new Date(w.deletedAt).toLocaleString() : '—'}

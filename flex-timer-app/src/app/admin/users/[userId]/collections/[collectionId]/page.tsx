@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { auth } from '@/lib/firebase'
@@ -12,6 +12,43 @@ import {
   getWorkoutDisplayName,
   getWorkoutDisplayDescription,
 } from '@/lib/json-workout-format'
+
+/** Timer modes we can create. */
+const CREATABLE_TIMER_MODES = [
+  { value: 1, label: 'Standard' },
+  { value: 2, label: 'Round' },
+  { value: 4, label: 'Tabata' },
+  { value: 5, label: 'EMOM' },
+  { value: 6, label: 'Lap Timer' },
+  { value: 7, label: 'Shot Clock' },
+  { value: 10, label: 'Warmup' },
+  { value: 11, label: 'Cooldown' },
+  { value: 12, label: 'Sets with Rest' },
+  { value: 13, label: 'Rest' },
+] as const
+
+/** Parse "M:SS" or "M" to seconds. */
+function parseDurationInput(s: string): number {
+  const t = s.trim()
+  if (!t) return 0
+  const parts = t.split(':')
+  if (parts.length === 1) {
+    const m = parseInt(parts[0]!, 10)
+    return Number.isNaN(m) ? 0 : m * 60
+  }
+  if (parts.length === 2) {
+    const m = parseInt(parts[0]!, 10)
+    const s = parseInt(parts[1]!, 10)
+    return (Number.isNaN(m) ? 0 : m * 60) + (Number.isNaN(s) ? 0 : s)
+  }
+  if (parts.length === 3) {
+    const h = parseInt(parts[0]!, 10)
+    const m = parseInt(parts[1]!, 10)
+    const s = parseInt(parts[2]!, 10)
+    return (Number.isNaN(h) ? 0 : h * 3600) + (Number.isNaN(m) ? 0 : m * 60) + (Number.isNaN(s) ? 0 : s)
+  }
+  return 0
+}
 
 export default function AdminCollectionDetailPage() {
   const params = useParams()
@@ -25,6 +62,12 @@ export default function AdminCollectionDetailPage() {
   const [deleting, setDeleting] = useState(false)
   const [recovering, setRecovering] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [createModalOpen, setCreateModalOpen] = useState(false)
+  const [createStep, setCreateStep] = useState<1 | 2>(1)
+  const [createMode, setCreateMode] = useState<number>(1)
+  const [createOptions, setCreateOptions] = useState<Record<string, string | number>>({})
+  const [createSubmitting, setCreateSubmitting] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -156,6 +199,91 @@ export default function AdminCollectionDetailPage() {
     }
   }
 
+  const buildWorkoutFromCreateForm = useCallback((): { timerMode: number; workoutSchedule: string; direction: boolean } => {
+    const schedule: Record<string, unknown> = { timerMode: createMode }
+    const dir = createOptions.direction === true || createOptions.direction === 'true'
+    const num = (key: string) => {
+      const v = createOptions[key]
+      if (typeof v === 'number') return v
+      if (typeof v === 'string') { const n = parseInt(v, 10); return Number.isNaN(n) ? 0 : n }
+      return 0
+    }
+    const dur = (key: string) => {
+      const v = createOptions[key]
+      if (typeof v === 'number') return v
+      if (typeof v === 'string') return parseDurationInput(v)
+      return 0
+    }
+    switch (createMode) {
+      case 1: schedule.standardTimeCap = dur('timeCap'); break
+      case 2:
+        schedule.commonIntervalDuration = dur('duration')
+        schedule.commonIntervalNumberOfRounds = num('rounds')
+        schedule.commonIntervalRestBetweenRounds = dur('restBetween')
+        break
+      case 4:
+        schedule.tabataWorkDuration = dur('workDuration')
+        schedule.tabataRestDuration = dur('restDuration')
+        schedule.roundsPerTabata = num('roundsPerTabata')
+        schedule.numberOfTabatas = num('numberOfTabatas')
+        break
+      case 5:
+        schedule.emomIntervalDuration = num('intervalSeconds')
+        schedule.emomNumberOfIntervals = num('intervals')
+        break
+      case 7: schedule.shotClockDuration = num('shotClockSeconds'); break
+      case 10: schedule.warmupTimeCap = dur('timeCap'); break
+      case 11: schedule.cooldownTimeCap = dur('timeCap'); break
+      case 12:
+        schedule.restDrivenNumberOfSets = num('sets')
+        schedule.restDrivenType = num('restDrivenType')
+        if (schedule.restDrivenType === 0) schedule.restDrivenFixedRestDuration = dur('fixedRest')
+        else {
+          schedule.restDrivenWorkRatio = num('workRatio')
+          schedule.restDrivenRestRatio = num('restRatio')
+        }
+        break
+      case 13: schedule.restTimeCap = dur('timeCap'); break
+      default: break
+    }
+    return {
+      timerMode: createMode,
+      workoutSchedule: JSON.stringify(schedule),
+      direction: dir,
+    }
+  }, [createMode, createOptions])
+
+  const handleCreateWorkoutSubmit = useCallback(async () => {
+    const user = auth.currentUser
+    if (!user || !userId || !collectionId) return
+    setCreateError(null)
+    setCreateSubmitting(true)
+    try {
+      const workout = buildWorkoutFromCreateForm()
+      const token = await user.getIdToken()
+      const res = await fetch(
+        `/api/admin/users/${encodeURIComponent(userId)}/collections/${encodeURIComponent(collectionId)}/workouts`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ workout }),
+        }
+      )
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error ?? res.statusText)
+      }
+      const created = (await res.json()) as Workout
+      setWorkouts((prev) => [...prev, created])
+      setCollection((prev) => prev ? { ...prev, workoutIds: [...prev.workoutIds, created.id] } : null)
+      setCreateModalOpen(false)
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : 'Failed to create workout')
+    } finally {
+      setCreateSubmitting(false)
+    }
+  }, [userId, collectionId, buildWorkoutFromCreateForm])
+
   if (loading) {
     return <p className="text-gray-500">Loading collection…</p>
   }
@@ -245,8 +373,23 @@ export default function AdminCollectionDetailPage() {
       </div>
 
       <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
-        <div className="border-b border-gray-200 bg-gray-50 px-4 py-3">
+        <div className="border-b border-gray-200 bg-gray-50 px-4 py-3 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-medium text-gray-700">Workouts in this collection ({workouts.length})</h2>
+          {!collection.deletedAt && (
+            <button
+              type="button"
+              onClick={() => {
+                setCreateModalOpen(true)
+                setCreateStep(1)
+                setCreateMode(1)
+                setCreateOptions({})
+                setCreateError(null)
+              }}
+              className="rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              Create workout
+            </button>
+          )}
         </div>
         {workouts.length === 0 ? (
           <p className="px-4 py-6 text-sm text-gray-500">No workouts in this collection.</p>
@@ -290,6 +433,196 @@ export default function AdminCollectionDetailPage() {
           </div>
         )}
       </div>
+
+      {createModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50" aria-hidden onClick={() => !createSubmitting && setCreateModalOpen(false)} />
+          <div className="relative w-full max-w-md rounded-lg border border-gray-200 bg-white shadow-lg">
+            <div className="border-b border-gray-200 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-900">Create workout</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Step {createStep} of 2</p>
+            </div>
+            <div className="p-4 space-y-4">
+              {createStep === 1 && (
+                <>
+                  <div>
+                    <label htmlFor="create-mode" className="block text-sm font-medium text-gray-700">Workout mode</label>
+                    <select
+                      id="create-mode"
+                      value={createMode}
+                      onChange={(e) => {
+                        setCreateMode(Number(e.target.value))
+                        setCreateOptions({})
+                      }}
+                      className="mt-1 block w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                    >
+                      {CREATABLE_TIMER_MODES.map((m) => (
+                        <option key={m.value} value={m.value}>{m.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setCreateStep(2)}
+                      className="rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </>
+              )}
+              {createStep === 2 && (
+                <>
+                  <CreateWorkoutOptions
+                    mode={createMode}
+                    options={createOptions}
+                    onChange={setCreateOptions}
+                    parseDurationInput={parseDurationInput}
+                  />
+                  {createError && (
+                    <div className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">{createError}</div>
+                  )}
+                  <div className="flex justify-between">
+                    <button
+                      type="button"
+                      onClick={() => setCreateStep(1)}
+                      disabled={createSubmitting}
+                      className="rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Back
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCreateWorkoutSubmit}
+                      disabled={createSubmitting}
+                      className="rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+                    >
+                      {createSubmitting ? 'Creating…' : 'Create'}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
+}
+
+function CreateWorkoutOptions({
+  mode,
+  options,
+  onChange,
+  parseDurationInput,
+}: {
+  mode: number
+  options: Record<string, string | number>
+  onChange: (o: Record<string, string | number>) => void
+  parseDurationInput: (s: string) => number
+}) {
+  const setOpt = (key: string, value: string | number) => onChange({ ...options, [key]: value })
+  const getOpt = (key: string, def: string | number) => options[key] ?? def
+  const durationInput = (key: string, label: string, placeholder = '0:00') => (
+    <div key={key}>
+      <label className="block text-sm font-medium text-gray-700">{label}</label>
+      <input
+        type="text"
+        placeholder={placeholder}
+        value={String(getOpt(key, '') ?? '')}
+        onChange={(e) => setOpt(key, e.target.value)}
+        className="mt-1 block w-full rounded border border-gray-300 px-3 py-2 text-sm"
+      />
+    </div>
+  )
+  const numberInput = (key: string, label: string, def = 0, min = 0) => (
+    <div key={key}>
+      <label className="block text-sm font-medium text-gray-700">{label}</label>
+      <input
+        type="number"
+        min={min}
+        value={Number(getOpt(key, def))}
+        onChange={(e) => setOpt(key, parseInt(e.target.value, 10) || 0)}
+        className="mt-1 block w-full rounded border border-gray-300 px-3 py-2 text-sm"
+      />
+    </div>
+  )
+  const directionSelect = () => (
+    <div key="direction">
+      <label className="block text-sm font-medium text-gray-700">Direction</label>
+      <select
+        value={getOpt('direction', false) ? 'up' : 'down'}
+        onChange={(e) => setOpt('direction', e.target.value === 'up')}
+        className="mt-1 block w-full rounded border border-gray-300 px-3 py-2 text-sm"
+      >
+        <option value="up">Count up</option>
+        <option value="down">Count down</option>
+      </select>
+    </div>
+  )
+
+  switch (mode) {
+    case 1:
+      return <div className="space-y-3">{durationInput('timeCap', 'Time cap (0 = infinite)', '3:00')}{directionSelect()}</div>
+    case 2:
+      return (
+        <div className="space-y-3">
+          {durationInput('duration', 'Round duration', '1:00')}
+          {numberInput('rounds', 'Number of rounds (0 = infinite)', 3)}
+          {durationInput('restBetween', 'Rest between rounds', '0:30')}
+        </div>
+      )
+    case 4:
+      return (
+        <div className="space-y-3">
+          {durationInput('workDuration', 'Work duration', '0:20')}
+          {durationInput('restDuration', 'Rest duration', '0:10')}
+          {numberInput('roundsPerTabata', 'Rounds per tabata', 8)}
+          {numberInput('numberOfTabatas', 'Number of tabatas', 1)}
+        </div>
+      )
+    case 5:
+      return (
+        <div className="space-y-3">
+          {numberInput('intervalSeconds', 'Interval (seconds)', 60)}
+          {numberInput('intervals', 'Number of intervals', 10)}
+        </div>
+      )
+    case 6:
+      return <p className="text-sm text-gray-500">No options for lap timer.</p>
+    case 7:
+      return <div className="space-y-3">{numberInput('shotClockSeconds', 'Shot clock (seconds)', 24)}</div>
+    case 10:
+    case 11:
+    case 13:
+      return (
+        <div className="space-y-3">
+          {durationInput('timeCap', mode === 13 ? 'Rest duration' : mode === 10 ? 'Warmup duration' : 'Cooldown duration', '5:00')}
+          {directionSelect()}
+        </div>
+      )
+    case 12:
+      return (
+        <div className="space-y-3">
+          {numberInput('sets', 'Number of sets', 3)}
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Rest type</label>
+            <select
+              value={Number(getOpt('restDrivenType', 0))}
+              onChange={(e) => setOpt('restDrivenType', parseInt(e.target.value, 10))}
+              className="mt-1 block w-full rounded border border-gray-300 px-3 py-2 text-sm"
+            >
+              <option value={0}>Fixed rest duration</option>
+              <option value={1}>Work:rest ratio</option>
+            </select>
+          </div>
+          {Number(getOpt('restDrivenType', 0)) === 0
+            ? durationInput('fixedRest', 'Rest duration', '1:00')
+            : <>{numberInput('workRatio', 'Work ratio', 1)}{numberInput('restRatio', 'Rest ratio', 1)}</>}
+        </div>
+      )
+    default:
+      return <p className="text-sm text-gray-500">No options for this mode.</p>
+  }
 }
