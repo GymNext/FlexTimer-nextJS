@@ -59,30 +59,68 @@ function parseTimestamp(value: unknown): string {
   return String(value)
 }
 
-/** User document at users/<userId> (top-level fields plus optional settings map). */
+/** Categories under users/<userId>/meta/ for user settings. */
+const USER_META_CATEGORIES = ['AppBehaviour', 'Audio', 'Backup', 'HeartRates', 'Internal', 'MultiPeer', 'TimerDefaults', 'Visual'] as const
+
+function toPlainValue(value: unknown): unknown {
+  if (value == null) return value
+  if (typeof value === 'object' && value !== null && 'toDate' in value && typeof (value as { toDate: () => Date }).toDate === 'function')
+    return (value as { toDate: () => Date }).toDate().toISOString()
+  if (Array.isArray(value)) return value.map(toPlainValue)
+  if (typeof value === 'object' && value !== null && !(value instanceof Date)) {
+    const o = value as Record<string, unknown>
+    return Object.fromEntries(Object.entries(o).map(([k, v]) => [k, toPlainValue(v)]))
+  }
+  return value
+}
+
+/** User document at users/<userId> (top-level fields). Settings come from users/<userId>/meta/<category>. */
 export async function getUserDocument(
   userId: string
 ): Promise<{
   firstName?: string | null
   lastName?: string | null
-  subscriptionPlan?: number | null
   email?: string | null
+  /** From user doc (UserDetails) */
+  hasConnectedToDisplay?: boolean
+  connectedToDisplayType?: string | null
+  /** Optional override; when set, classic eligibility = this. Else derived from effective/expiry dates. */
+  classicEligibleOverride?: boolean
+  classicEligibleEffectiveDate?: unknown
+  classicEligibleExpiryDate?: unknown
+  /** User IDs that have been merged into this user (UserDetails). */
+  mergedUserIds?: string[]
   settings?: Record<string, unknown>
 } | null> {
   if (!adminDb) return null
-  const doc = await adminDb.collection('users').doc(userId).get()
-  if (!doc.exists) return null
-  const d = doc.data()!
-  const raw = d as Record<string, unknown>
-  const settings = raw.settings != null && typeof raw.settings === 'object' && !Array.isArray(raw.settings)
-    ? (raw.settings as Record<string, unknown>)
-    : undefined
+  const userRef = adminDb.collection('users').doc(userId)
+  const [userSnap, ...metaSnaps] = await Promise.all([
+    userRef.get(),
+    ...USER_META_CATEGORIES.map((cat) => userRef.collection('meta').doc(cat).get()),
+  ])
+  if (!userSnap.exists) return null
+  const d = userSnap.data()! as Record<string, unknown>
+  const settings: Record<string, unknown> = {}
+  for (const snap of metaSnaps) {
+    if (!snap.exists) continue
+    const data = snap.data() as Record<string, unknown>
+    for (const [key, value] of Object.entries(data)) {
+      settings[key] = toPlainValue(value)
+    }
+  }
   return {
     firstName: typeof d.firstName === 'string' ? d.firstName : null,
     lastName: typeof d.lastName === 'string' ? d.lastName : null,
-    subscriptionPlan: typeof d.subscriptionPlan === 'number' ? d.subscriptionPlan : null,
     email: typeof d.email === 'string' ? d.email : null,
-    settings,
+    hasConnectedToDisplay: typeof d.hasConnectedToDisplay === 'boolean' ? d.hasConnectedToDisplay : undefined,
+    connectedToDisplayType: typeof d.connectedToDisplayType === 'string' ? d.connectedToDisplayType : null,
+    classicEligibleOverride: typeof d.classicEligibleOverride === 'boolean' ? d.classicEligibleOverride : undefined,
+    classicEligibleEffectiveDate: d.classicEligibleEffectiveDate,
+    classicEligibleExpiryDate: d.classicEligibleExpiryDate,
+    mergedUserIds: Array.isArray(d.mergedUserIds)
+      ? (d.mergedUserIds as unknown[]).filter((id): id is string => typeof id === 'string')
+      : undefined,
+    settings: Object.keys(settings).length > 0 ? settings : undefined,
   }
 }
 

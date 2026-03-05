@@ -184,12 +184,17 @@ export function getSubscriptionPlanLabel(value: number | null | undefined): stri
   return SUBSCRIPTION_PLAN_LABELS[value] ?? String(value)
 }
 
-/** Fields stored on the user document (users/<userId>) in Firestore */
+/** Fields stored on the user document (users/<userId>) in Firestore. Subscription/entitlements come from RevenueCat (Firestore) instead. */
 export interface UserDocumentFields {
   email?: string | null
   firstName?: string | null
   lastName?: string | null
-  subscriptionPlan?: number | null
+}
+
+/** RevenueCat subscription summary for admin profile (entitlements from Firestore). */
+export interface AdminSubscriptionInfo {
+  activeEntitlementIds: string[]
+  activeProductIds: string[]
 }
 
 /** Full admin view of a user: Auth record + user document + Firestore counts + workout/plan/collection lists */
@@ -197,7 +202,18 @@ export interface AdminUserProfile extends AdminUserRecord {
   /** From user document users/<userId> */
   firstName?: string | null
   lastName?: string | null
-  subscriptionPlan?: number | null
+  /** From UserDetails/settings: hasConnectedToDisplay -> "Connected User" | "Standalone User" */
+  connectedUserDisplay?: string | null
+  /** From UserDetails/settings: connectedToDisplayType (noDisplay | singleDisplay | multiDisplay) */
+  userTypeDisplay?: string | null
+  /** From RevenueCat (Firestore); human-readable plan/entitlement label for display */
+  subscriptionDisplayLabel?: string | null
+  /** From RevenueCat (Firestore); active entitlements and product IDs */
+  subscriptionInfo?: AdminSubscriptionInfo
+  /** User IDs merged into this user (UserDetails.mergedUserIds) */
+  mergedUserIds?: string[]
+  /** User IDs merged into this user (UserDetails.mergedUserIds) */
+  mergedUserIds?: string[]
   /** UserDetails settings map (key-value pairs from app) */
   settings?: Record<string, unknown>
   dataCounts: UserDataCounts

@@ -5,7 +5,6 @@ import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { auth } from '@/lib/firebase'
 import type { AdminUserProfile } from '@/types/user'
-import { getSubscriptionPlanLabel } from '@/types/user'
 import { getWorkoutDisplayName, getWorkoutDisplayDescription } from '@/lib/json-workout-format'
 import { USER_SETTINGS_SECTIONS, getSectionSubgroupsWithRows } from '@/lib/user-settings-sections'
 
@@ -22,6 +21,12 @@ export default function AdminUserProfilePage() {
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [expandedSettingsSection, setExpandedSettingsSection] = useState<string | null>(null)
+  const [changingToClassic, setChangingToClassic] = useState(false)
+  const [classicChangeError, setClassicChangeError] = useState<string | null>(null)
+  const [changingToBasic, setChangingToBasic] = useState(false)
+  const [basicChangeError, setBasicChangeError] = useState<string | null>(null)
+  const [deletingUser, setDeletingUser] = useState(false)
+  const [deleteUserError, setDeleteUserError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -78,6 +83,19 @@ export default function AdminUserProfilePage() {
   const sortedCollections = useMemo(
     () => [...(profile?.workoutCollections ?? [])].sort((a, b) => a.ordinal - b.ordinal),
     [profile?.workoutCollections]
+  )
+  const favoritesCollection = useMemo(
+    () => sortedCollections.find((c) => c.id === 'favorite'),
+    [sortedCollections]
+  )
+  const favoriteWorkouts = useMemo(() => {
+    if (!profile?.workouts || !favoritesCollection) return []
+    const byId = new Map(profile.workouts.map((w) => [w.id, w]))
+    return favoritesCollection.workoutIds.map((id) => byId.get(id)).filter(Boolean) as typeof profile.workouts
+  }, [profile?.workouts, favoritesCollection])
+  const collectionsExcludingFavorites = useMemo(
+    () => sortedCollections.filter((c) => c.id !== 'favorite'),
+    [sortedCollections]
   )
   const sortedPlans = useMemo(
     () => [...(profile?.workoutPlans ?? [])].sort((a, b) => a.ordinal - b.ordinal),
@@ -144,6 +162,86 @@ export default function AdminUserProfilePage() {
     }
   }
 
+  const handleChangeToClassic = async () => {
+    const user = auth.currentUser
+    if (!user || !userId) return
+    setClassicChangeError(null)
+    setChangingToClassic(true)
+    try {
+      const token = await user.getIdToken()
+      const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/classic`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error ?? res.statusText)
+
+      const t = await user.getIdToken()
+      const profileRes = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+        headers: { Authorization: `Bearer ${t}` },
+      })
+      if (profileRes.ok) setProfile(await profileRes.json())
+    } catch (e) {
+      setClassicChangeError(e instanceof Error ? e.message : 'Failed to change to Classic')
+    } finally {
+      setChangingToClassic(false)
+    }
+  }
+
+  const handleChangeToBasic = async () => {
+    const user = auth.currentUser
+    if (!user || !userId) return
+    setBasicChangeError(null)
+    setChangingToBasic(true)
+    try {
+      const token = await user.getIdToken()
+      const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/basic`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error ?? res.statusText)
+
+      const t = await user.getIdToken()
+      const profileRes = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+        headers: { Authorization: `Bearer ${t}` },
+      })
+      if (profileRes.ok) setProfile(await profileRes.json())
+    } catch (e) {
+      setBasicChangeError(e instanceof Error ? e.message : 'Failed to change to Basic')
+    } finally {
+      setChangingToBasic(false)
+    }
+  }
+
+  const handleDeleteUser = async () => {
+    if (
+      !window.confirm(
+        `Are you sure you want to delete this user? They will no longer be able to sign in. This cannot be undone.`
+      )
+    ) {
+      return
+    }
+    const user = auth.currentUser
+    if (!user || !userId) return
+    setDeleteUserError(null)
+    setDeletingUser(true)
+    try {
+      const token = await user.getIdToken()
+      const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error ?? res.statusText)
+      router.push('/admin')
+    } catch (e) {
+      setDeleteUserError(e instanceof Error ? e.message : 'Failed to delete user')
+    } finally {
+      setDeletingUser(false)
+    }
+  }
+
   if (loading) {
     return <p className="text-gray-500">Loading profile…</p>
   }
@@ -206,13 +304,85 @@ export default function AdminUserProfilePage() {
               </a>
             </p>
           </div>
-          <div className="flex-shrink-0">
-            <span className="inline-flex items-center rounded-full px-5 py-2.5 text-lg font-semibold bg-indigo-100 text-indigo-800">
-              {getSubscriptionPlanLabel(profile.subscriptionPlan)}
-            </span>
+          <div className="flex-shrink-0 flex flex-col items-end gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-3">
+              {/* Pill 1: Connected / Standalone */}
+              <span className="inline-flex items-center rounded-full px-5 py-2.5 text-lg font-medium bg-slate-100 text-slate-700">
+                {profile.connectedUserDisplay ?? '—'}
+              </span>
+
+              {/* Pill 2: No Display / Single Display / Multi Display (only when Connected User) */}
+              {profile.connectedUserDisplay === 'Connected User' && (
+                <span
+                  className={[
+                    'inline-flex items-center rounded-full px-5 py-2.5 text-lg font-medium',
+                    profile.userTypeDisplay === 'noDisplay' && 'bg-gray-100 text-gray-700',
+                    profile.userTypeDisplay === 'singleDisplay' && 'bg-blue-100 text-blue-800',
+                    profile.userTypeDisplay === 'multiDisplay' && 'bg-blue-100 text-blue-800 font-bold',
+                    (!profile.userTypeDisplay ||
+                      !['noDisplay', 'singleDisplay', 'multiDisplay'].includes(profile.userTypeDisplay)) &&
+                      'bg-gray-100 text-gray-700',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                >
+                  {profile.userTypeDisplay === 'noDisplay' && 'No Display'}
+                  {profile.userTypeDisplay === 'singleDisplay' && 'Single Display'}
+                  {profile.userTypeDisplay === 'multiDisplay' && 'Multi Display'}
+                  {(!profile.userTypeDisplay ||
+                    !['noDisplay', 'singleDisplay', 'multiDisplay'].includes(profile.userTypeDisplay)) &&
+                    (profile.userTypeDisplay ?? '—')}
+                </span>
+              )}
+
+              {/* Pill 3: Subscription tier */}
+              <span className="inline-flex items-center rounded-full px-5 py-2.5 text-lg font-semibold bg-indigo-100 text-indigo-800">
+                {profile.subscriptionDisplayLabel ?? '—'}
+              </span>
+            </div>
           </div>
         </div>
       </div>
+
+      {profile.subscriptionDisplayLabel === 'Basic' && (
+        <div className="flex justify-end">
+          <div className="flex flex-col items-end gap-2">
+            {classicChangeError && (
+              <div className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">
+                {classicChangeError}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={handleChangeToClassic}
+              disabled={changingToClassic}
+              className="inline-flex items-center rounded-md bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {changingToClassic ? 'Changing…' : 'Change to Classic'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {profile.subscriptionDisplayLabel === 'Classic' && (
+        <div className="flex justify-end">
+          <div className="flex flex-col items-end gap-2">
+            {basicChangeError && (
+              <div className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">
+                {basicChangeError}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={handleChangeToBasic}
+              disabled={changingToBasic}
+              className="inline-flex items-center rounded-md bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {changingToBasic ? 'Changing…' : 'Change to Basic'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Account / system details */}
       <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
@@ -252,6 +422,25 @@ export default function AdminUserProfilePage() {
                 : '—'}
             </dd>
           </div>
+          {(profile.mergedUserIds?.length ?? 0) > 0 && (
+            <div className="px-4 py-2.5 sm:grid sm:grid-cols-3 sm:gap-4">
+              <dt className="text-sm font-medium text-gray-500">Merged user IDs</dt>
+              <dd className="mt-0.5 text-sm text-gray-900 sm:col-span-2">
+                <ul className="list-disc list-inside space-y-1 font-mono">
+                  {profile.mergedUserIds!.map((mergedId) => (
+                    <li key={mergedId}>
+                      <Link
+                        href={`/admin/users/${encodeURIComponent(mergedId)}`}
+                        className="text-indigo-600 hover:text-indigo-800"
+                      >
+                        {mergedId}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </dd>
+            </div>
+          )}
         </dl>
       </div>
 
@@ -301,14 +490,71 @@ export default function AdminUserProfilePage() {
         )}
       </div>
 
+      {/* Favorites: workouts from the collection with id "favorite" */}
       <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
         <div className="border-b border-gray-200 bg-gray-50 px-4 py-3">
           <h2 className="text-sm font-medium text-gray-700">
-            Workout collections ({sortedCollections.length})
+            Favorites{favoritesCollection != null ? ` (${favoriteWorkouts.length})` : ''}
           </h2>
         </div>
-        {sortedCollections.length === 0 ? (
-          <p className="px-4 py-6 text-sm text-gray-500">No workout collections.</p>
+        {favoritesCollection == null ? (
+          <p className="px-4 py-6 text-sm text-gray-500">No favorites collection.</p>
+        ) : favoriteWorkouts.length === 0 ? (
+          <p className="px-4 py-6 text-sm text-gray-500">No workouts in favorites.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase text-gray-500">
+                    Name
+                  </th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase text-gray-500">
+                    Description
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200 bg-white">
+                {favoriteWorkouts.map((workout) => (
+                  <tr key={workout.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-3 text-sm font-medium">
+                      <Link
+                        href={`/admin/users/${userId}/workouts/${encodeURIComponent(workout.id)}`}
+                        className="text-blue-600 hover:text-blue-800"
+                      >
+                        {getWorkoutDisplayName(workout)}
+                      </Link>
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-600">
+                      {getWorkoutDisplayDescription(workout) ?? '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {favoritesCollection != null && (
+          <div className="px-4 py-3 border-t border-gray-200">
+            <Link
+              href={`/admin/users/${userId}/collections/${encodeURIComponent(favoritesCollection.id)}`}
+              className="text-sm font-medium text-indigo-600 hover:text-indigo-800"
+            >
+              Open favorites collection →
+            </Link>
+          </div>
+        )}
+      </div>
+
+      {/* Workout collections (excluding favorites, which is shown above) */}
+      <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+        <div className="border-b border-gray-200 bg-gray-50 px-4 py-3">
+          <h2 className="text-sm font-medium text-gray-700">
+            Workout collections ({collectionsExcludingFavorites.length})
+          </h2>
+        </div>
+        {collectionsExcludingFavorites.length === 0 ? (
+          <p className="px-4 py-6 text-sm text-gray-500">No other workout collections.</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
@@ -326,7 +572,7 @@ export default function AdminUserProfilePage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200 bg-white">
-                {sortedCollections.map((coll) => (
+                {collectionsExcludingFavorites.map((coll) => (
                   <tr key={coll.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 text-sm font-medium">
                       <Link
@@ -531,6 +777,31 @@ export default function AdminUserProfilePage() {
                 </table>
               </div>
             )}
+          </div>
+        </div>
+      </div>
+
+      {/* Delete user */}
+      <div className="rounded-lg border border-red-200 bg-red-50/30 overflow-hidden">
+        <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-medium text-red-800">Danger zone</h2>
+            <p className="text-sm text-red-700 mt-0.5">
+              Permanently delete this user. They will no longer be able to sign in.
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            {deleteUserError && (
+              <div className="rounded bg-red-100 px-3 py-2 text-sm text-red-700">{deleteUserError}</div>
+            )}
+            <button
+              type="button"
+              onClick={handleDeleteUser}
+              disabled={deletingUser}
+              className="inline-flex items-center rounded-md border border-red-600 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {deletingUser ? 'Deleting…' : 'Delete user'}
+            </button>
           </div>
         </div>
       </div>
