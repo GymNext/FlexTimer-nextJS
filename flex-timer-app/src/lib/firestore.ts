@@ -495,6 +495,45 @@ export async function updateCollectionWorkoutIds(
   await ref.update({ workoutIds: uniqueIds })
 }
 
+/**
+ * Update collection ordinals to match the order of collectionIds. Each collection's ordinal is set to its index.
+ * Used for reordering collections in the app. Pass all collection IDs in desired order (including 'favorite' if present).
+ */
+export async function updateCollectionOrdinals(
+  userId: string,
+  collectionIds: string[]
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const colRef = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutCollections)
+  const batch = adminDb.batch()
+  collectionIds.forEach((collectionId, index) => {
+    const ref = colRef.doc(collectionId)
+    batch.update(ref, { ordinal: index })
+  })
+  await batch.commit()
+}
+
+/** Update a collection's name and/or description. */
+export async function updateCollectionMetadata(
+  userId: string,
+  collectionId: string,
+  data: { name: string; description?: string | null }
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutCollections)
+    .doc(collectionId)
+  await ref.update({
+    workoutCollectionName: data.name.trim() || 'Untitled collection',
+    workoutCollectionDescription: data.description?.trim() || null,
+  })
+}
+
 const FIRESTORE_BATCH_SIZE = 500
 
 /** Soft-delete a plan: set deletedAt to now. */
@@ -517,6 +556,24 @@ export async function clearPlanDeletedAt(userId: string, planId: string): Promis
     .collection(USER_COLLECTIONS.workoutPlans)
     .doc(planId)
   await ref.update({ deletedAt: FieldValue.delete() })
+}
+
+/** Update a plan's name and/or description. */
+export async function updatePlanMetadata(
+  userId: string,
+  planId: string,
+  data: { name: string; description?: string | null }
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutPlans)
+    .doc(planId)
+  await ref.update({
+    workoutPlanName: data.name.trim() || 'Untitled plan',
+    workoutPlanDescription: data.description?.trim() || null,
+  })
 }
 
 /** Permanently delete a workout plan: deletes all planDays subcollection docs, then the plan document. */
@@ -565,7 +622,7 @@ export async function createWorkoutCollection(
 /** Create a new workout plan under users/<userId>/workoutPlans. Returns the created plan. */
 export async function createWorkoutPlan(
   userId: string,
-  data: { name: string; description?: string | null }
+  data: { name: string; description?: string | null; isPersonal?: boolean }
 ): Promise<WorkoutPlan> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const colRef = adminDb
@@ -577,7 +634,7 @@ export async function createWorkoutPlan(
   await newRef.set({
     ordinal: 0,
     userId,
-    isPersonal: true,
+    isPersonal: data.isPersonal ?? true,
     workoutPlanId: id,
     workoutPlanName: data.name.trim() || 'Untitled plan',
     workoutPlanDescription: data.description?.trim() || null,
@@ -597,6 +654,24 @@ export async function getWorkoutById(userId: string, workoutId: string): Promise
     .doc(workoutId)
     .get()
   return mapWorkoutDoc(doc)
+}
+
+/**
+ * Update plan ordinals to match the order of planIds. Each plan's ordinal is set to its index.
+ * Used for reordering plans in the app.
+ */
+export async function updatePlanOrdinals(userId: string, planIds: string[]): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const colRef = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutPlans)
+  const batch = adminDb.batch()
+  planIds.forEach((planId, index) => {
+    const ref = colRef.doc(planId)
+    batch.update(ref, { ordinal: index })
+  })
+  await batch.commit()
 }
 
 /** Fetch a single workout plan by doc id from users/<userId>/workoutPlans. */
@@ -738,11 +813,16 @@ export async function getPlannedWorkout(
   }
 }
 
-/** Create a new planned workout. day is YYYY-MM-DD; ordinal defaults to 0; workout is the PlanDayEntry-shaped object (timerMode, workoutSchedule JSON string, direction, etc.). */
+/** Create a new planned workout. day is YYYY-MM-DD; ordinal defaults to 0; workout is the PlanDayEntry-shaped object (timerMode, workoutSchedule JSON string, direction, etc.). sourceWorkoutId optional. */
 export async function createPlannedWorkout(
   userId: string,
   planId: string,
-  params: { day: string; ordinal?: number; workout: Record<string, unknown> }
+  params: {
+    day: string
+    ordinal?: number
+    workout: Record<string, unknown>
+    sourceWorkoutId?: string | null
+  }
 ): Promise<PlannedWorkout> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const id = randomUUID()
@@ -757,7 +837,10 @@ export async function createPlannedWorkout(
     ordinal: typeof params.ordinal === 'number' ? params.ordinal : 0,
     planId,
     plannedWorkoutId: id,
-    sourceWorkoutId: null,
+    sourceWorkoutId:
+      params.sourceWorkoutId != null && params.sourceWorkoutId !== ''
+        ? params.sourceWorkoutId
+        : null,
     userId,
     workout: params.workout,
   })
@@ -787,6 +870,44 @@ export async function updatePlannedWorkoutDayAndOrdinal(
   }
   if (Object.keys(data).length === 0) return
   await ref.update(data)
+}
+
+/** Update a planned workout's embedded workout name and/or description. */
+export async function updatePlannedWorkoutWorkoutMetadata(
+  userId: string,
+  plannedWorkoutId: string,
+  updates: { workoutName?: string | null; workoutDescription?: string | null }
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(PLANNED_WORKOUTS_COLLECTION)
+    .doc(plannedWorkoutId)
+  const data: Record<string, unknown> = {}
+  if (updates.workoutName !== undefined) {
+    data['workout.workoutName'] = updates.workoutName
+  }
+  if (updates.workoutDescription !== undefined) {
+    data['workout.workoutDescription'] = updates.workoutDescription
+  }
+  if (Object.keys(data).length === 0) return
+  await ref.update(data)
+}
+
+/** Replace the entire embedded workout object on a planned workout (e.g. after editing schedule). */
+export async function updatePlannedWorkoutWorkout(
+  userId: string,
+  plannedWorkoutId: string,
+  workout: Record<string, unknown>
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(PLANNED_WORKOUTS_COLLECTION)
+    .doc(plannedWorkoutId)
+  await ref.update({ workout })
 }
 
 /** Permanently delete a planned workout document from users/<userId>/plannedWorkouts/<plannedWorkoutId>. */
@@ -829,6 +950,99 @@ export async function updateWorkoutMetadata(
     .doc(userId)
     .collection(USER_COLLECTIONS.workouts)
     .doc(workoutId)
+  await ref.update(data)
+}
+
+/** Allowed fields when updating a SingleSegmentWorkout (no meta settings). */
+export type SingleSegmentUpdate = {
+  workoutName?: string | null
+  workoutDescription?: string | null
+  timerMode?: number
+  workoutSchedule?: string | null
+  direction?: boolean
+  prelude?: number
+  segue?: boolean
+  warnings?: number[]
+  metronome?: number
+  restDirection?: number
+  warningStrategy?: number
+  continuity?: boolean
+}
+
+/** Update a SingleSegmentWorkout document with schedule and options. */
+export async function updateWorkoutSingleSegment(
+  userId: string,
+  workoutId: string,
+  updates: SingleSegmentUpdate
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(workoutId)
+  const data: Record<string, unknown> = {}
+  if ('workoutName' in updates) data.workoutName = updates.workoutName ?? null
+  if ('workoutDescription' in updates) data.workoutDescription = updates.workoutDescription ?? null
+  if ('timerMode' in updates && typeof updates.timerMode === 'number') data.timerMode = updates.timerMode
+  if ('workoutSchedule' in updates) data.workoutSchedule = updates.workoutSchedule ?? null
+  if ('direction' in updates) data.direction = updates.direction === true
+  if ('prelude' in updates) data.prelude = updates.prelude ?? -1
+  if ('segue' in updates) data.segue = updates.segue === true
+  if ('warnings' in updates) data.warnings = Array.isArray(updates.warnings) ? updates.warnings : []
+  if ('metronome' in updates) data.metronome = typeof updates.metronome === 'number' ? updates.metronome : 0
+  if ('restDirection' in updates) data.restDirection = typeof updates.restDirection === 'number' ? updates.restDirection : 0
+  if ('warningStrategy' in updates) data.warningStrategy = typeof updates.warningStrategy === 'number' ? updates.warningStrategy : 0
+  if ('continuity' in updates) data.continuity = updates.continuity === true
+  if (Object.keys(data).length === 0) return
+  await ref.update(data)
+}
+
+/** Allowed fields when updating a MultiSegmentWorkout (no meta settings). */
+export type MultiSegmentUpdate = {
+  workoutName?: string | null
+  workoutDescription?: string | null
+  segments?: WorkoutSegment[]
+  autoProgress?: boolean
+  timerModes?: number[]
+}
+
+/** Update a MultiSegmentWorkout document (segments and options). */
+export async function updateWorkoutMultiSegment(
+  userId: string,
+  workoutId: string,
+  updates: MultiSegmentUpdate
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(workoutId)
+  const data: Record<string, unknown> = {}
+  if ('workoutName' in updates) data.workoutName = updates.workoutName ?? null
+  if ('workoutDescription' in updates) data.workoutDescription = updates.workoutDescription ?? null
+  if ('segments' in updates && Array.isArray(updates.segments)) {
+    data.segments = updates.segments.map((seg) => ({
+      workoutId: seg.workoutId,
+      workoutName: seg.workoutName ?? null,
+      workoutDescription: seg.workoutDescription ?? null,
+      workoutImage: seg.workoutImage ?? null,
+      workoutShareId: seg.workoutShareId ?? null,
+      workoutSchedule: seg.workoutSchedule ?? null,
+      prelude: typeof seg.prelude === 'number' ? seg.prelude : -1,
+      segue: seg.segue === true,
+      warnings: Array.isArray(seg.warnings) ? seg.warnings : [],
+      metronome: typeof seg.metronome === 'number' ? seg.metronome : 0,
+      direction: seg.direction === true,
+      restDirection: typeof seg.restDirection === 'number' ? seg.restDirection : 0,
+      warningStrategy: typeof seg.warningStrategy === 'number' ? seg.warningStrategy : 0,
+      continuity: seg.continuity === true,
+    }))
+  }
+  if ('autoProgress' in updates) data.autoProgress = updates.autoProgress === true
+  if ('timerModes' in updates) data.timerModes = Array.isArray(updates.timerModes) ? updates.timerModes : []
+  if (Object.keys(data).length === 0) return
   await ref.update(data)
 }
 

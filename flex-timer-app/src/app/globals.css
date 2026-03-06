@@ -1,3 +1,12 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  --gymnext: #6B21A8;
+  --gymnext-light: #7C3AED;
+  --gymnext-dark: #581C87;
+  --gymnext-muted: #A78BFA;
+  --gymnext-bg: #EDE9FE;
+  --gymnext-page: #F5F3FF;
+}

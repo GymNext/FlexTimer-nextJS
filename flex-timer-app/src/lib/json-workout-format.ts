@@ -70,6 +70,15 @@ export function getTimerModeColor(value: unknown): string {
   return 'rgb(92, 96, 104)'
 }
 
+/** Purple for multi-segment / compound workouts. */
+const MULTI_SEGMENT_BAR_COLOR = 'rgb(107, 33, 168)'
+
+/** Bar color for a workout/entry: purple for multi-segment, otherwise timer mode color. */
+export function getWorkoutBarColor(entry: WorkoutEntryLike): string {
+  if (entry.segments && entry.segments.length > 0) return MULTI_SEGMENT_BAR_COLOR
+  return getTimerModeColor(entry.timerMode ?? entry.timerModes)
+}
+
 /** Whether to use white text on the timer mode color bar (for contrast). */
 export function getTimerModeBarTextDark(value: unknown): boolean {
   const mode = typeof value === 'number' ? value : Array.isArray(value) && value.length > 0 && typeof value[0] === 'number' ? value[0] : null
@@ -178,6 +187,17 @@ export function timerModeToDisplayString(value: unknown): string {
   if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'number')
     return TIMER_MODE_DISPLAY[value[0]] ?? strings.unknown_text
   return strings.unknown_text
+}
+
+/** Parse workoutSchedule JSON and return timerMode (number) or undefined. */
+function getTimerModeFromSchedule(scheduleStr: string | null | undefined): number | undefined {
+  if (scheduleStr == null || typeof scheduleStr !== 'string') return undefined
+  try {
+    const s = JSON.parse(scheduleStr) as Record<string, unknown>
+    return typeof s.timerMode === 'number' ? s.timerMode : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** Build a short schedule description from workoutSchedule JSON (UIHelper._description equivalent). */
@@ -291,14 +311,28 @@ export function getWorkoutDisplayName(entry: WorkoutEntryLike): string {
   if (entry.workoutName != null && entry.workoutName !== '') return entry.workoutName
   const segments = entry.segments
   if (segments && segments.length > 0) {
-    const parts = segments.map((seg) => {
+    // Multi-segment: use segment title if set, else timer mode label (Warmup, Standard, Cooldown, etc.)
+    const parts = segments.map((seg, i) => {
       if (seg.workoutName != null && seg.workoutName !== '') return seg.workoutName
-      return getWorkoutDisplayDescription(seg) || scheduleToDisplayDescription(seg.workoutSchedule)
+      const modeLabel = timerModeToDisplayString(
+        seg.timerMode ?? getTimerModeFromSchedule(seg.workoutSchedule)
+      )
+      return modeLabel !== strings.unknown_text ? modeLabel : `Segment ${i + 1}`
     })
-    return parts.filter(Boolean).join(', ') || strings.compound_text
+    return parts.join(', ') || strings.compound_text
   }
   const desc = scheduleToDisplayDescription(entry.workoutSchedule, entry.direction)
   return desc || timerModeToDisplayString(entry.timerMode ?? entry.timerModes)
+}
+
+/** Display name for a single segment in lists: segment title if set, else schedule description (workout type), else "Segment N". */
+export function getSegmentDisplayName(
+  seg: { workoutName?: string | null; workoutSchedule?: string | null; direction?: boolean },
+  index: number
+): string {
+  if (seg.workoutName != null && seg.workoutName.trim() !== '') return seg.workoutName.trim()
+  const desc = scheduleToDisplayDescription(seg.workoutSchedule, seg.direction)
+  return desc || `Segment ${index + 1}`
 }
 
 /** Display description: workoutDescription if set, else timer mode label or compound_text. (UIHelper.workoutDescription) */
@@ -306,6 +340,12 @@ export function getWorkoutDisplayDescription(entry: WorkoutEntryLike): string {
   if (entry.workoutDescription != null && entry.workoutDescription !== '') return entry.workoutDescription
   if (entry.segments && entry.segments.length > 0) return strings.compound_text
   return timerModeToDisplayString(entry.timerMode ?? entry.timerModes)
+}
+
+/** Schedule-only description (duration, rounds, etc.) from workoutSchedule JSON. Use for body/details. */
+export function getScheduleDisplayDescription(entry: WorkoutEntryLike): string {
+  if (entry.segments && entry.segments.length > 0) return strings.compound_text
+  return scheduleToDisplayDescription(entry.workoutSchedule, entry.direction)
 }
 
 /** Collection-like shape for display helpers (UIHelper.workoutCollectionName / workoutCollectionDescription). */
