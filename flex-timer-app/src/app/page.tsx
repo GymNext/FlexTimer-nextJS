@@ -411,6 +411,8 @@ function UserAppLayout({
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
   const [selectedFavoriteWorkout, setSelectedFavoriteWorkout] = useState<Workout | null>(null)
   const [reorderFavoritesError, setReorderFavoritesError] = useState<string | null>(null)
+  const [reorderCollectionsError, setReorderCollectionsError] = useState<string | null>(null)
+  const [reorderPlansError, setReorderPlansError] = useState<string | null>(null)
   const [collectionDetail, setCollectionDetail] = useState<{
     collection: WorkoutCollection
     workouts: Workout[]
@@ -787,25 +789,19 @@ function UserAppLayout({
     }
   }
 
-  async function handleReorderCollections(index: number, direction: 'up' | 'down') {
-    const userIds = collectionsExcludingFavorites.map((c) => c.id)
-    const targetIndex = direction === 'up' ? index - 1 : index + 1
-    if (targetIndex < 0 || targetIndex >= userIds.length) return
-    const newUserIds = [...userIds]
-    ;[newUserIds[index], newUserIds[targetIndex]] = [newUserIds[targetIndex], newUserIds[index]]
-    const fullIds = sortedCollections.map((c) => c.id)
-    const newFullIds = fullIds.map((id) =>
-      id === 'favorite' ? id : newUserIds.shift()!
-    )
+  async function handleReorderCollections(collectionIds: string[]) {
+    const fullIds = favoritesCollection ? [favoritesCollection.id, ...collectionIds] : collectionIds
     try {
       await authedFetch('/api/app/collections', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ collectionIds: newFullIds }),
+        body: JSON.stringify({ collectionIds: fullIds }),
       })
       await reloadOverview()
     } catch (e) {
       console.error('[collections reorder]', e)
+      setReorderCollectionsError(e instanceof Error ? e.message : 'Failed to save order')
+      await reloadOverview()
     }
   }
 
@@ -876,20 +872,18 @@ function UserAppLayout({
     await reloadOverview()
   }
 
-  async function handleReorderPlans(index: number, direction: 'up' | 'down') {
-    const ids = sortedPlans.map((p) => p.id)
-    const targetIndex = direction === 'up' ? index - 1 : index + 1
-    if (targetIndex < 0 || targetIndex >= ids.length) return
-    ;[ids[index], ids[targetIndex]] = [ids[targetIndex], ids[index]]
+  async function handleReorderPlans(planIds: string[]) {
     try {
       await authedFetch('/api/app/plans', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ planIds: ids }),
+        body: JSON.stringify({ planIds }),
       })
       await reloadOverview()
     } catch (e) {
       console.error('[plans reorder]', e)
+      setReorderPlansError(e instanceof Error ? e.message : 'Failed to save order')
+      await reloadOverview()
     }
   }
 
@@ -1106,6 +1100,8 @@ function UserAppLayout({
               openCollectionDetail={openCollectionDetail}
               onReorderWorkout={handleReorderCollectionWorkout}
               onReorderCollections={handleReorderCollections}
+              reorderCollectionsError={reorderCollectionsError}
+              onDismissReorderCollectionsError={() => setReorderCollectionsError(null)}
               onRemoveWorkoutFromCollection={handleRemoveWorkoutFromCollection}
               onCreateCollection={handleCreateCollection}
               onUpdateCollection={handleUpdateCollection}
@@ -1147,6 +1143,8 @@ function UserAppLayout({
               plansCount={overview?.counts?.plans ?? 0}
               subscriptionTier={overview?.subscriptionLimits?.tier ?? 'basic'}
               onReorderPlans={handleReorderPlans}
+              reorderPlansError={reorderPlansError}
+              onDismissReorderPlansError={() => setReorderPlansError(null)}
               favoriteWorkouts={favoriteWorkouts}
               collectionsExcludingFavorites={collectionsExcludingFavorites}
               workoutsById={overview?.workouts ? new Map(overview.workouts.map((w) => [w.id, w])) : new Map()}
@@ -2101,11 +2099,11 @@ function FavoritesSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Edit workout</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Change the name and description.</p>
+              <p className="text-xs text-gray-500 mt-0.5">Workout name is optional. Description is optional.</p>
             </div>
             <form onSubmit={handleEditSubmit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="fav-edit-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
+                <label htmlFor="fav-edit-name" className="block text-xs font-medium text-gray-700 mb-1">Name (optional)</label>
                 <input
                   id="fav-edit-name"
                   type="text"
@@ -2624,6 +2622,8 @@ function CollectionsSection({
   openCollectionDetail,
   onReorderWorkout,
   onReorderCollections,
+  reorderCollectionsError,
+  onDismissReorderCollectionsError,
   onRemoveWorkoutFromCollection,
   onCreateCollection,
   onUpdateCollection,
@@ -2647,7 +2647,9 @@ function CollectionsSection({
     index: number,
     direction: 'up' | 'down'
   ) => void
-  onReorderCollections?: (index: number, direction: 'up' | 'down') => void
+  onReorderCollections?: (collectionIds: string[]) => void
+  reorderCollectionsError?: string | null
+  onDismissReorderCollectionsError?: () => void
   onRemoveWorkoutFromCollection: (collectionId: string, workoutId: string) => Promise<void>
   onCreateCollection: (name: string, description: string | null) => Promise<WorkoutCollection>
   onUpdateCollection: (collectionId: string, name: string, description: string | null) => Promise<void>
@@ -2738,6 +2740,51 @@ function CollectionsSection({
   const [collectionBookmarkSaving, setCollectionBookmarkSaving] = useState(false)
 
   const [collectionCreateDialogOpen, setCollectionCreateDialogOpen] = useState(false)
+
+  const [draggedCollectionIndex, setDraggedCollectionIndex] = useState<number | null>(null)
+  const [dropIndicatorBeforeIndex, setDropIndicatorBeforeIndex] = useState<number | null>(null)
+  const [optimisticOrderedIds, setOptimisticOrderedIds] = useState<string[] | null>(null)
+
+  /** Reorder: remove item at fromIndex, insert so it ends up at toIndex. */
+  function reorderIds(ids: string[], fromIndex: number, toIndex: number): string[] {
+    if (fromIndex === toIndex) return ids
+    const list = [...ids]
+    const [removed] = list.splice(fromIndex, 1)
+    const insertAt = toIndex > fromIndex + 1 ? toIndex - 1 : toIndex
+    list.splice(Math.max(0, Math.min(insertAt, list.length)), 0, removed)
+    return list
+  }
+
+  const orderedCollections = useMemo(() => {
+    if (!optimisticOrderedIds?.length || !collections.length) return collections
+    const idOrder = new Map(optimisticOrderedIds.map((id, i) => [id, i]))
+    return [...collections].sort((a, b) => {
+      const ai = idOrder.get(a.id) ?? 1e9
+      const bi = idOrder.get(b.id) ?? 1e9
+      return ai - bi
+    })
+  }, [collections, optimisticOrderedIds])
+
+  useEffect(() => {
+    setOptimisticOrderedIds(null)
+  }, [collections])
+
+  useEffect(() => {
+    if (reorderCollectionsError) setOptimisticOrderedIds(null)
+  }, [reorderCollectionsError])
+
+  function handleCollectionDrop(draggedId: string, toIndex: number) {
+    if (!onReorderCollections) return
+    const currentIds = optimisticOrderedIds ?? collections.map((c) => c.id)
+    const fromIndex = currentIds.indexOf(draggedId)
+    if (fromIndex === -1) return
+    const toIndexClamped = Math.max(0, Math.min(toIndex, currentIds.length))
+    const newIds = reorderIds(currentIds, fromIndex, toIndexClamped)
+    setOptimisticOrderedIds(newIds)
+    setDraggedCollectionIndex(null)
+    setDropIndicatorBeforeIndex(null)
+    onReorderCollections(newIds)
+  }
 
   const [editOpen, setEditOpen] = useState(false)
   const [editCollection, setEditCollection] = useState<WorkoutCollection | null>(null)
@@ -2872,19 +2919,66 @@ function CollectionsSection({
             Create collection
           </button>
         </div>
+        {reorderCollectionsError && onDismissReorderCollectionsError && (
+          <div className="px-4 py-2 flex items-center justify-between gap-2 bg-red-50 border-b border-red-200">
+            <p className="text-xs text-red-800">{reorderCollectionsError}</p>
+            <button
+              type="button"
+              onClick={onDismissReorderCollectionsError}
+              className="text-red-600 hover:text-red-800 text-xs font-medium shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {collections.length === 0 ? (
           <p className="px-4 py-6 text-sm text-gray-500">
             You do not have any collections yet.
           </p>
         ) : (
-          <ul className="divide-y divide-gray-200">
-            {collections.map((c, index) => {
+          <ul
+            className=""
+            onDragOver={(e) => {
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'move'
+            }}
+            onDrop={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              const draggedId = e.dataTransfer.getData('text/plain')
+              if (!draggedId || !onReorderCollections) return
+              const currentIds = optimisticOrderedIds ?? collections.map((c) => c.id)
+              const toIndex = dropIndicatorBeforeIndex ?? currentIds.length
+              handleCollectionDrop(draggedId, toIndex)
+            }}
+          >
+            {orderedCollections.map((c, index) => {
               const isSelected = collectionDetail?.collection.id === c.id
               return (
+              <Fragment key={c.id}>
+                {dropIndicatorBeforeIndex === index && (
+                  <li
+                    className="flex items-center px-3 py-1 list-none border-t-0"
+                    aria-hidden
+                    onDragOver={(ev) => {
+                      ev.preventDefault()
+                      ev.stopPropagation()
+                      ev.dataTransfer.dropEffect = 'move'
+                    }}
+                    onDrop={(ev) => {
+                      ev.preventDefault()
+                      ev.stopPropagation()
+                      const id = ev.dataTransfer.getData('text/plain')
+                      if (id && onReorderCollections) handleCollectionDrop(id, index)
+                    }}
+                  >
+                    <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
+                  </li>
+                )}
                 <li
-                  key={c.id}
                   role="button"
                   tabIndex={0}
+                  data-index={index}
                   onClick={() => openCollectionDetail(c.id)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
@@ -2892,12 +2986,56 @@ function CollectionsSection({
                       openCollectionDetail(c.id)
                     }
                   }}
-                  className={`px-4 py-3 flex items-center gap-3 cursor-pointer border-l-8 ${
-                    isSelected
-                      ? 'bg-white border-amber-700'
-                      : 'bg-white border-gray-300 hover:bg-gray-100'
-                  }`}
+                  onDragOver={(e) => {
+                    e.preventDefault()
+                    e.dataTransfer.dropEffect = 'move'
+                    if (draggedCollectionIndex === null || !onReorderCollections) return
+                    const rect = e.currentTarget.getBoundingClientRect()
+                    const midY = rect.top + rect.height / 2
+                    const insertBefore = e.clientY < midY ? index : index + 1
+                    if (insertBefore === draggedCollectionIndex) {
+                      setDropIndicatorBeforeIndex(null)
+                      return
+                    }
+                    setDropIndicatorBeforeIndex(insertBefore)
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    const draggedId = e.dataTransfer.getData('text/plain')
+                    if (!draggedId || !onReorderCollections) return
+                    const currentIds = optimisticOrderedIds ?? collections.map((c) => c.id)
+                    const rect = e.currentTarget.getBoundingClientRect()
+                    const midY = rect.top + rect.height / 2
+                    const toIndex = dropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
+                    handleCollectionDrop(draggedId, Math.max(0, Math.min(toIndex, currentIds.length)))
+                  }}
+                  className={`px-4 py-3 flex items-center gap-3 cursor-pointer border-l-8 bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${
+                    isSelected ? '' : 'hover:bg-gray-100'
+                  } ${draggedCollectionIndex === index ? 'opacity-50' : ''}`}
+                  style={{
+                    borderLeftColor: isSelected ? '#b45309' : '#d1d5db',
+                  }}
                 >
+                  <span
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.effectAllowed = 'move'
+                      e.dataTransfer.setData('text/plain', c.id)
+                      setDraggedCollectionIndex(index)
+                      setDropIndicatorBeforeIndex(null)
+                    }}
+                    onDragEnd={() => {
+                      setDraggedCollectionIndex(null)
+                      setDropIndicatorBeforeIndex(null)
+                    }}
+                    className="w-6 shrink-0 flex items-center justify-center text-gray-400 cursor-grab active:cursor-grabbing touch-none"
+                    aria-hidden
+                    title="Drag to reorder"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    ⋮⋮
+                  </span>
                   <span className="w-5 shrink-0 flex items-center justify-center" aria-hidden>
                     {isSelected && (
                       <span className="text-amber-700" aria-label="Active collection">
@@ -2930,32 +3068,30 @@ function CollectionsSection({
                     >
                       Edit
                     </button>
-                    {onReorderCollections && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => onReorderCollections(index, 'up')}
-                          disabled={index === 0}
-                          className="h-7 w-7 inline-flex items-center justify-center rounded border border-gymnext-muted/50 text-gray-700 hover:bg-gymnext-background disabled:opacity-40"
-                          aria-label="Move up"
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onReorderCollections(index, 'down')}
-                          disabled={index === collections.length - 1}
-                          className="h-7 w-7 inline-flex items-center justify-center rounded border border-gymnext-muted/50 text-gray-700 hover:bg-gymnext-background disabled:opacity-40"
-                          aria-label="Move down"
-                        >
-                          ↓
-                        </button>
-                      </>
-                    )}
                   </div>
                 </li>
+              </Fragment>
               )
             })}
+            {dropIndicatorBeforeIndex === orderedCollections.length && (
+              <li
+                className="flex items-center px-3 py-1 list-none border-t-0"
+                aria-hidden
+                onDragOver={(ev) => {
+                  ev.preventDefault()
+                  ev.stopPropagation()
+                  ev.dataTransfer.dropEffect = 'move'
+                }}
+                onDrop={(ev) => {
+                  ev.preventDefault()
+                  ev.stopPropagation()
+                  const id = ev.dataTransfer.getData('text/plain')
+                  if (id && onReorderCollections) handleCollectionDrop(id, orderedCollections.length)
+                }}
+              >
+                <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
+              </li>
+            )}
           </ul>
         )}
       </div>
@@ -3214,11 +3350,11 @@ function CollectionsSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Create new collection</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Give your collection a name and optional description.</p>
+              <p className="text-xs text-gray-500 mt-0.5">Collection name is required. Description is optional.</p>
             </div>
             <form onSubmit={handleCreateSubmit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="coll-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
+                <label htmlFor="coll-name" className="block text-xs font-medium text-gray-700 mb-1">Name (required)</label>
                 <input
                   id="coll-name"
                   type="text"
@@ -3516,11 +3652,11 @@ function CollectionsSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Edit workout</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Change the name and description.</p>
+              <p className="text-xs text-gray-500 mt-0.5">Workout name is optional. Description is optional.</p>
             </div>
             <form onSubmit={handleEditMetaSubmit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="coll-edit-workout-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
+                <label htmlFor="coll-edit-workout-name" className="block text-xs font-medium text-gray-700 mb-1">Name (optional)</label>
                 <input
                   id="coll-edit-workout-name"
                   type="text"
@@ -3575,11 +3711,11 @@ function CollectionsSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Edit collection</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Change the name and optional description.</p>
+              <p className="text-xs text-gray-500 mt-0.5">Collection name is required. Description is optional.</p>
             </div>
             <form onSubmit={handleEditSubmit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="edit-coll-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
+                <label htmlFor="edit-coll-name" className="block text-xs font-medium text-gray-700 mb-1">Name (required)</label>
                 <input
                   id="edit-coll-name"
                   type="text"
@@ -3652,6 +3788,8 @@ function PlansSection({
   plansCount,
   subscriptionTier,
   onReorderPlans,
+  reorderPlansError,
+  onDismissReorderPlansError,
   favoriteWorkouts,
   collectionsExcludingFavorites,
   workoutsById,
@@ -3682,7 +3820,9 @@ function PlansSection({
   maxPlans?: number
   plansCount?: number
   subscriptionTier?: SubscriptionTier
-  onReorderPlans?: (index: number, direction: 'up' | 'down') => void
+  onReorderPlans?: (planIds: string[]) => void
+  reorderPlansError?: string | null
+  onDismissReorderPlansError?: () => void
   favoriteWorkouts?: Workout[]
   collectionsExcludingFavorites?: WorkoutCollection[]
   workoutsById?: Map<string, Workout>
@@ -3740,6 +3880,50 @@ function PlansSection({
   const [editScheduleOptions, setEditScheduleOptions] = useState<Record<string, string | number>>({})
   const [editScheduleBusy, setEditScheduleBusy] = useState(false)
   const [editScheduleError, setEditScheduleError] = useState<string | null>(null)
+
+  const [draggedPlanIndex, setDraggedPlanIndex] = useState<number | null>(null)
+  const [dropIndicatorBeforeIndex, setDropIndicatorBeforeIndex] = useState<number | null>(null)
+  const [optimisticOrderedIds, setOptimisticOrderedIds] = useState<string[] | null>(null)
+
+  /** Reorder: remove item at fromIndex, insert so it ends up at toIndex. */
+  function reorderIds(ids: string[], fromIndex: number, toIndex: number): string[] {
+    if (fromIndex === toIndex) return ids
+    const list = [...ids]
+    const [removed] = list.splice(fromIndex, 1)
+    const insertAt = toIndex > fromIndex + 1 ? toIndex - 1 : toIndex
+    list.splice(Math.max(0, Math.min(insertAt, list.length)), 0, removed)
+    return list
+  }
+
+  const orderedPlans = useMemo(() => {
+    if (!optimisticOrderedIds?.length || !plans.length) return plans
+    const idOrder = new Map(optimisticOrderedIds.map((id, i) => [id, i]))
+    return [...plans].sort((a, b) => {
+      const ai = idOrder.get(a.id) ?? 1e9
+      const bi = idOrder.get(b.id) ?? 1e9
+      return ai - bi
+    })
+  }, [plans, optimisticOrderedIds])
+
+  useEffect(() => {
+    setOptimisticOrderedIds(null)
+  }, [plans])
+  useEffect(() => {
+    if (reorderPlansError) setOptimisticOrderedIds(null)
+  }, [reorderPlansError])
+
+  function handlePlanDrop(draggedId: string, toIndex: number) {
+    if (!onReorderPlans) return
+    const currentIds = optimisticOrderedIds ?? plans.map((p) => p.id)
+    const fromIndex = currentIds.indexOf(draggedId)
+    if (fromIndex === -1) return
+    const toIndexClamped = Math.max(0, Math.min(toIndex, currentIds.length))
+    const newIds = reorderIds(currentIds, fromIndex, toIndexClamped)
+    setOptimisticOrderedIds(newIds)
+    setDraggedPlanIndex(null)
+    setDropIndicatorBeforeIndex(null)
+    onReorderPlans(newIds)
+  }
 
   const selectedPlan =
     selectedPlanId === null
@@ -4066,75 +4250,161 @@ function PlansSection({
               Create plan
             </button>
           </div>
+          {reorderPlansError && onDismissReorderPlansError && (
+            <div className="px-4 py-2 flex items-center justify-between gap-2 bg-red-50 border-b border-red-200">
+              <p className="text-xs text-red-800">{reorderPlansError}</p>
+              <button
+                type="button"
+                onClick={onDismissReorderPlansError}
+                className="text-red-600 hover:text-red-800 text-xs font-medium shrink-0"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
           {plans.length === 0 ? (
             <p className="px-4 py-6 text-sm text-gray-500">
               You do not have any plans yet. Create one to get started.
             </p>
           ) : (
-            <ul className="divide-y divide-gray-200">
-              {plans.map((p, index) => {
+            <ul
+              className=""
+              onDragOver={(e) => {
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+              }}
+              onDrop={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                const draggedId = e.dataTransfer.getData('text/plain')
+                if (!draggedId || !onReorderPlans) return
+                const currentIds = optimisticOrderedIds ?? plans.map((p) => p.id)
+                const toIndex = dropIndicatorBeforeIndex ?? currentIds.length
+                handlePlanDrop(draggedId, toIndex)
+              }}
+            >
+              {orderedPlans.map((p, index) => {
                 const isSelected = selectedPlan?.id === p.id
                 return (
-                <li
-                  key={p.id}
-                  className={`pl-1 pr-4 py-3 flex items-center gap-3 cursor-pointer border-l-8 ${
-                    isSelected
-                      ? 'bg-white border-gymnext'
-                      : 'bg-white border-gray-300 hover:bg-gray-100'
-                  }`}
-                  style={isSelected ? { borderLeftColor: '#6B21A8' } : undefined}
-                  onClick={() => setSelectedPlanId(isSelected ? null : p.id)}
-                >
-                  <span className="w-5 shrink-0 flex items-center justify-center" aria-hidden>
-                    {isSelected && (
-                      <span style={{ color: '#6B21A8' }} aria-label="Active plan">
-                        ✓
-                      </span>
-                    )}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-gray-900 truncate">
-                      {p.workoutPlanName}
-                    </p>
-                    <p className="text-xs text-gray-500 truncate">
-                      {p.workoutPlanDescription || 'No description'}
-                    </p>
-                  </div>
-                  <div className="inline-flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      type="button"
-                      onClick={() => openEditPlan(p)}
-                      className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
-                      aria-label="Edit plan"
+                <Fragment key={p.id}>
+                  {dropIndicatorBeforeIndex === index && (
+                    <li
+                      className="flex items-center px-3 py-1 list-none border-t-0"
+                      aria-hidden
+                      onDragOver={(ev) => {
+                        ev.preventDefault()
+                        ev.stopPropagation()
+                        ev.dataTransfer.dropEffect = 'move'
+                      }}
+                      onDrop={(ev) => {
+                        ev.preventDefault()
+                        ev.stopPropagation()
+                        const id = ev.dataTransfer.getData('text/plain')
+                        if (id && onReorderPlans) handlePlanDrop(id, index)
+                      }}
                     >
-                      Edit
-                    </button>
-                    {onReorderPlans && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => onReorderPlans(index, 'up')}
-                          disabled={index === 0}
-                          className="h-7 w-7 inline-flex items-center justify-center rounded border border-gymnext-muted/50 text-gray-700 hover:bg-gymnext-background disabled:opacity-40"
-                          aria-label="Move up"
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onReorderPlans(index, 'down')}
-                          disabled={index === plans.length - 1}
-                          className="h-7 w-7 inline-flex items-center justify-center rounded border border-gymnext-muted/50 text-gray-700 hover:bg-gymnext-background disabled:opacity-40"
-                          aria-label="Move down"
-                        >
-                          ↓
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </li>
+                      <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
+                    </li>
+                  )}
+                  <li
+                    data-index={index}
+                    className={`pl-1 pr-4 py-3 flex items-center gap-3 cursor-pointer border-l-8 bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${
+                      isSelected ? '' : 'hover:bg-gray-100'
+                    } ${draggedPlanIndex === index ? 'opacity-50' : ''}`}
+                    style={{ borderLeftColor: isSelected ? '#6B21A8' : '#d1d5db' }}
+                    onClick={() => setSelectedPlanId(isSelected ? null : p.id)}
+                    onDragOver={(e) => {
+                      e.preventDefault()
+                      e.dataTransfer.dropEffect = 'move'
+                      if (draggedPlanIndex === null || !onReorderPlans) return
+                      const rect = e.currentTarget.getBoundingClientRect()
+                      const midY = rect.top + rect.height / 2
+                      const insertBefore = e.clientY < midY ? index : index + 1
+                      if (insertBefore === draggedPlanIndex) {
+                        setDropIndicatorBeforeIndex(null)
+                        return
+                      }
+                      setDropIndicatorBeforeIndex(insertBefore)
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const draggedId = e.dataTransfer.getData('text/plain')
+                      if (!draggedId || !onReorderPlans) return
+                      const currentIds = optimisticOrderedIds ?? plans.map((plan) => plan.id)
+                      const rect = e.currentTarget.getBoundingClientRect()
+                      const midY = rect.top + rect.height / 2
+                      const toIndex = dropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
+                      handlePlanDrop(draggedId, Math.max(0, Math.min(toIndex, currentIds.length)))
+                    }}
+                  >
+                    <span
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.effectAllowed = 'move'
+                        e.dataTransfer.setData('text/plain', p.id)
+                        setDraggedPlanIndex(index)
+                        setDropIndicatorBeforeIndex(null)
+                      }}
+                      onDragEnd={() => {
+                        setDraggedPlanIndex(null)
+                        setDropIndicatorBeforeIndex(null)
+                      }}
+                      className="w-6 shrink-0 flex items-center justify-center text-gray-400 cursor-grab active:cursor-grabbing touch-none"
+                      aria-hidden
+                      title="Drag to reorder"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      ⋮⋮
+                    </span>
+                    <span className="w-5 shrink-0 flex items-center justify-center" aria-hidden>
+                      {isSelected && (
+                        <span style={{ color: '#6B21A8' }} aria-label="Active plan">
+                          ✓
+                        </span>
+                      )}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-gray-900 truncate">
+                        {p.workoutPlanName}
+                      </p>
+                      <p className="text-xs text-gray-500 truncate">
+                        {p.workoutPlanDescription || 'No description'}
+                      </p>
+                    </div>
+                    <div className="inline-flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        onClick={() => openEditPlan(p)}
+                        className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                        aria-label="Edit plan"
+                      >
+                        Edit
+                      </button>
+                    </div>
+                  </li>
+                </Fragment>
               )
               })}
+              {dropIndicatorBeforeIndex === orderedPlans.length && (
+                <li
+                  className="flex items-center px-3 py-1 list-none border-t-0"
+                  aria-hidden
+                  onDragOver={(ev) => {
+                    ev.preventDefault()
+                    ev.stopPropagation()
+                    ev.dataTransfer.dropEffect = 'move'
+                  }}
+                  onDrop={(ev) => {
+                    ev.preventDefault()
+                    ev.stopPropagation()
+                    const id = ev.dataTransfer.getData('text/plain')
+                    if (id && onReorderPlans) handlePlanDrop(id, orderedPlans.length)
+                  }}
+                >
+                  <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
+                </li>
+              )}
             </ul>
           )}
         </div>
@@ -4765,11 +5035,11 @@ function PlansSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Create new plan</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Give your plan a name and optional description.</p>
+              <p className="text-xs text-gray-500 mt-0.5">Plan name is required. Description is optional.</p>
             </div>
             <form onSubmit={handleCreatePlanSubmit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="plan-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
+                <label htmlFor="plan-name" className="block text-xs font-medium text-gray-700 mb-1">Name (required)</label>
                 <input
                   id="plan-name"
                   type="text"
@@ -4893,11 +5163,11 @@ function PlansSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Edit plan</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Change the name and optional description.</p>
+              <p className="text-xs text-gray-500 mt-0.5">Plan name is required. Description is optional.</p>
             </div>
             <form onSubmit={handleEditPlanSubmit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="edit-plan-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
+                <label htmlFor="edit-plan-name" className="block text-xs font-medium text-gray-700 mb-1">Name (required)</label>
                 <input
                   id="edit-plan-name"
                   type="text"
@@ -4953,11 +5223,11 @@ function PlansSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Edit workout</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Change the name and description for this planned workout.</p>
+              <p className="text-xs text-gray-500 mt-0.5">Workout name is optional. Description is optional.</p>
             </div>
             <form onSubmit={handleSavePlannedEdit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="edit-planned-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
+                <label htmlFor="edit-planned-name" className="block text-xs font-medium text-gray-700 mb-1">Name (optional)</label>
                 <input
                   id="edit-planned-name"
                   type="text"
@@ -4965,7 +5235,6 @@ function PlansSection({
                   onChange={(e) => setEditPlannedName(e.target.value)}
                   className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
                   placeholder="Workout name"
-                  required
                 />
               </div>
               <div>
@@ -4991,7 +5260,7 @@ function PlansSection({
                 </button>
                 <button
                   type="submit"
-                  disabled={editPlannedBusy || !editPlannedName.trim()}
+                  disabled={editPlannedBusy}
                   className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
                   style={{ backgroundColor: '#6B21A8' }}
                 >

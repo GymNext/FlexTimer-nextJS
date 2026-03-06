@@ -93,8 +93,12 @@ export async function PATCH(
 
     // Update name/description when provided.
     if (typeof body.workoutPlanName === 'string') {
+      const name = body.workoutPlanName.trim()
+      if (!name) {
+        return NextResponse.json({ error: 'Plan name is required' }, { status: 400 })
+      }
       await updatePlanMetadata(uid, planId, {
-        name: body.workoutPlanName,
+        name,
         description: body.workoutPlanDescription,
       })
       const updated = await getPlanById(uid, planId)

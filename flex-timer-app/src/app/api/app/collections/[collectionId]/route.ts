@@ -97,8 +97,12 @@ export async function PATCH(
 
     // Update name/description when provided.
     if (typeof body.workoutCollectionName === 'string') {
+      const name = body.workoutCollectionName.trim()
+      if (!name) {
+        return NextResponse.json({ error: 'Collection name is required' }, { status: 400 })
+      }
       await updateCollectionMetadata(uid, collectionId, {
-        name: body.workoutCollectionName,
+        name,
         description: body.workoutCollectionDescription,
       })
       const updated = await getCollectionById(uid, collectionId)
