@@ -42,3 +42,29 @@ export async function requireAdminAuth(
 export function getAdminUserIds(): Set<string> {
   return new Set(ADMIN_USER_IDS)
 }
+
+/**
+ * Verifies the Firebase ID token from the request for a regular signed-in user (non-admin).
+ * Use in user-facing API routes: pass the Bearer token from Authorization header.
+ * Returns { uid } if the token is valid, or { error, status } if not.
+ */
+export async function requireUserAuth(
+  authHeader: string | null
+): Promise<{ uid: string; error?: undefined } | { error: string; status: 401 | 500 }> {
+  if (!adminAuth) {
+    return { error: 'Server: Firebase Admin not configured', status: 500 }
+  }
+
+  if (!authHeader?.startsWith('Bearer ')) {
+    return { error: 'Missing or invalid Authorization header', status: 401 }
+  }
+
+  const token = authHeader.slice(7)
+  try {
+    const decoded = await adminAuth.verifyIdToken(token)
+    return { uid: decoded.uid }
+  } catch (e) {
+    console.error('[requireUserAuth] Token verification failed:', e)
+    return { error: 'Invalid or expired token', status: 401 }
+  }
+}

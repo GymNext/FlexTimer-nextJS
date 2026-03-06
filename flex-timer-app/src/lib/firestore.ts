@@ -474,6 +474,27 @@ export async function addWorkoutToCollection(
   await ref.update({ workoutIds: [...coll.workoutIds, workoutId] })
 }
 
+/**
+ * Replace the workoutIds array for a collection.
+ * Used for reordering workouts within favorites and user-created collections.
+ */
+export async function updateCollectionWorkoutIds(
+  userId: string,
+  collectionId: string,
+  workoutIds: string[]
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const uniqueIds = [...new Set(workoutIds)].filter(
+    (id): id is string => typeof id === 'string' && id.trim() !== ''
+  )
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutCollections)
+    .doc(collectionId)
+  await ref.update({ workoutIds: uniqueIds })
+}
+
 const FIRESTORE_BATCH_SIZE = 500
 
 /** Soft-delete a plan: set deletedAt to now. */
@@ -777,6 +798,38 @@ export async function deletePlannedWorkout(userId: string, plannedWorkoutId: str
     .collection(PLANNED_WORKOUTS_COLLECTION)
     .doc(plannedWorkoutId)
   await ref.delete()
+}
+
+/**
+ * Update basic metadata on a workout (name / description only).
+ * Does not touch timer configuration, schedule JSON, or any meta settings.
+ */
+export async function updateWorkoutMetadata(
+  userId: string,
+  workoutId: string,
+  updates: { workoutName?: string | null; workoutDescription?: string | null }
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const data: Record<string, unknown> = {}
+  if ('workoutName' in updates) {
+    data.workoutName =
+      updates.workoutName != null && updates.workoutName.trim() !== ''
+        ? updates.workoutName.trim()
+        : null
+  }
+  if ('workoutDescription' in updates) {
+    data.workoutDescription =
+      updates.workoutDescription != null && updates.workoutDescription.trim() !== ''
+        ? updates.workoutDescription.trim()
+        : null
+  }
+  if (Object.keys(data).length === 0) return
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(workoutId)
+  await ref.update(data)
 }
 
 function mapPlanDayEntry(e: Record<string, unknown>): PlanDayEntry {
