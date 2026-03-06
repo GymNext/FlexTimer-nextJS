@@ -410,6 +410,7 @@ function UserAppLayout({
   const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null)
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
   const [selectedFavoriteWorkout, setSelectedFavoriteWorkout] = useState<Workout | null>(null)
+  const [reorderFavoritesError, setReorderFavoritesError] = useState<string | null>(null)
   const [collectionDetail, setCollectionDetail] = useState<{
     collection: WorkoutCollection
     workouts: Workout[]
@@ -483,21 +484,19 @@ function UserAppLayout({
     return fetch(input, { ...init, headers })
   }
 
-  async function handleReorderFavorites(index: number, direction: 'up' | 'down') {
+  async function handleReorderFavoritesToOrder(workoutIds: string[]) {
     if (!favoritesCollection) return
-    const ids = [...favoritesCollection.workoutIds]
-    const targetIndex = direction === 'up' ? index - 1 : index + 1
-    if (targetIndex < 0 || targetIndex >= ids.length) return
-    ;[ids[index], ids[targetIndex]] = [ids[targetIndex], ids[index]]
     try {
       await authedFetch(`/api/app/collections/${encodeURIComponent(favoritesCollection.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workoutIds: ids }),
+        body: JSON.stringify({ workoutIds }),
       })
       await reloadOverview()
     } catch (e) {
       console.error('[favorites reorder]', e)
+      setReorderFavoritesError(e instanceof Error ? e.message : 'Failed to save order')
+      await reloadOverview()
     }
   }
 
@@ -514,6 +513,21 @@ function UserAppLayout({
       setSelectedFavoriteWorkout(null)
     } catch (e) {
       console.error('[favorites remove]', e)
+    }
+  }
+
+  async function handleSoftDeleteWorkout(workoutId: string) {
+    try {
+      await authedFetch(`/api/app/workouts/${encodeURIComponent(workoutId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      await reloadOverview()
+      setSelectedFavoriteWorkout(null)
+    } catch (e) {
+      console.error('[soft delete workout]', e)
+      throw e
     }
   }
 
@@ -1061,8 +1075,11 @@ function UserAppLayout({
               onReloadCollectionDetail={reloadCollectionDetail}
               selectedWorkout={selectedFavoriteWorkout}
               onSelectWorkout={setSelectedFavoriteWorkout}
-              onReorder={handleReorderFavorites}
+              onReorderToOrder={handleReorderFavoritesToOrder}
+              reorderError={reorderFavoritesError}
+              onDismissReorderError={() => setReorderFavoritesError(null)}
               onRemoveFromFavorites={handleRemoveFromFavorites}
+              onSoftDeleteWorkout={handleSoftDeleteWorkout}
               onSave={handleSaveFavoritePayload}
               createDialogOpen={createFavoriteDialogOpen}
               onOpenCreateDialog={() => setCreateFavoriteDialogOpen(true)}
@@ -1375,8 +1392,11 @@ function FavoritesSection({
   onReloadCollectionDetail,
   selectedWorkout,
   onSelectWorkout,
-  onReorder,
+  onReorderToOrder,
+  reorderError,
+  onDismissReorderError,
   onRemoveFromFavorites,
+  onSoftDeleteWorkout,
   onSave,
   createDialogOpen,
   onOpenCreateDialog,
@@ -1393,8 +1413,11 @@ function FavoritesSection({
   onReloadCollectionDetail?: () => Promise<void>
   selectedWorkout: Workout | null
   onSelectWorkout: (workout: Workout | null) => void
-  onReorder: (index: number, direction: 'up' | 'down') => void
+  onReorderToOrder: (workoutIds: string[]) => void
+  reorderError?: string | null
+  onDismissReorderError?: () => void
   onRemoveFromFavorites: (workoutId: string) => Promise<void>
+  onSoftDeleteWorkout?: (workoutId: string) => Promise<void>
   onSave: (workoutId: string, data: Record<string, unknown>) => Promise<void>
   createDialogOpen: boolean
   onOpenCreateDialog: () => void
@@ -1414,6 +1437,8 @@ function FavoritesSection({
 
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false)
+  const [deleteWorkoutConfirmOpen, setDeleteWorkoutConfirmOpen] = useState(false)
+  const [deleteWorkoutBusy, setDeleteWorkoutBusy] = useState(false)
 
   const [bookmarkDialogOpen, setBookmarkDialogOpen] = useState(false)
   const [bookmarkSelectedIds, setBookmarkSelectedIds] = useState<Set<string>>(new Set())
@@ -1425,7 +1450,51 @@ function FavoritesSection({
     | { type: 'switch'; workout: Workout | null }
     | { type: 'openEdit'; workout: Workout }
   const [pendingUnsavedAction, setPendingUnsavedAction] = useState<PendingUnsavedAction | null>(null)
+  const [draggedFavoriteIndex, setDraggedFavoriteIndex] = useState<number | null>(null)
+  const [dropIndicatorBeforeIndex, setDropIndicatorBeforeIndex] = useState<number | null>(null)
+  const [optimisticOrderedIds, setOptimisticOrderedIds] = useState<string[] | null>(null)
   const detailPanelRef = useRef<{ save: () => Promise<void> }>(null)
+
+  /** Reorder: remove item at fromIndex, insert so it ends up at toIndex (0 = first, length = last). */
+  function reorderIds(ids: string[], fromIndex: number, toIndex: number): string[] {
+    if (fromIndex === toIndex) return ids
+    const list = [...ids]
+    const [removed] = list.splice(fromIndex, 1)
+    const insertAt = toIndex > fromIndex + 1 ? toIndex - 1 : toIndex
+    list.splice(Math.max(0, Math.min(insertAt, list.length)), 0, removed)
+    return list
+  }
+
+  const orderedWorkouts = useMemo(() => {
+    if (!optimisticOrderedIds?.length || !favoritesCollection) return favoriteWorkouts
+    const idOrder = new Map(optimisticOrderedIds.map((id, i) => [id, i]))
+    return [...favoriteWorkouts].sort((a, b) => {
+      const ai = idOrder.get(a.id) ?? 1e9
+      const bi = idOrder.get(b.id) ?? 1e9
+      return ai - bi
+    })
+  }, [favoriteWorkouts, optimisticOrderedIds, favoritesCollection])
+
+  useEffect(() => {
+    setOptimisticOrderedIds(null)
+  }, [favoritesCollection?.workoutIds])
+
+  useEffect(() => {
+    if (reorderError) setOptimisticOrderedIds(null)
+  }, [reorderError])
+
+  function handleFavoriteDrop(draggedId: string, toIndex: number) {
+    if (!favoritesCollection) return
+    const currentIds = optimisticOrderedIds ?? favoritesCollection.workoutIds
+    const fromIndex = currentIds.indexOf(draggedId)
+    if (fromIndex === -1) return
+    const toIndexClamped = Math.max(0, Math.min(toIndex, currentIds.length))
+    const newIds = reorderIds(currentIds, fromIndex, toIndexClamped)
+    setOptimisticOrderedIds(newIds)
+    setDraggedFavoriteIndex(null)
+    setDropIndicatorBeforeIndex(null)
+    onReorderToOrder(newIds)
+  }
 
   const maxFav = maxFavorites ?? UNLIMITED
   const count = favoritesCount ?? 0
@@ -1487,6 +1556,18 @@ function FavoritesSection({
             </button>
           )}
         </div>
+        {reorderError && (
+          <div className="px-4 py-2 flex items-center justify-between gap-2 bg-red-50 border-b border-red-200">
+            <p className="text-xs text-red-800">{reorderError}</p>
+            <button
+              type="button"
+              onClick={onDismissReorderError}
+              className="text-red-600 hover:text-red-800 text-xs font-medium shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {!favoritesCollection ? (
           <p className="px-4 py-6 text-sm text-gray-500">
             No favorites collection found. Mark workouts as favorites in the
@@ -1497,8 +1578,23 @@ function FavoritesSection({
             No workouts in favorites yet. Create one or add from the mobile app.
           </p>
         ) : (
-          <ul className="divide-y divide-gray-200 max-h-[60vh] overflow-y-auto">
-            {favoriteWorkouts.map((w, index) => {
+          <ul
+            className="divide-y divide-gray-200 max-h-[60vh] overflow-y-auto"
+            onDragOver={(e) => {
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'move'
+            }}
+            onDrop={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              const draggedId = e.dataTransfer.getData('text/plain')
+              if (!draggedId || !favoritesCollection) return
+              const currentIds = optimisticOrderedIds ?? favoritesCollection.workoutIds
+              const toIndex = dropIndicatorBeforeIndex ?? currentIds.length
+              handleFavoriteDrop(draggedId, toIndex)
+            }}
+          >
+            {orderedWorkouts.map((w, index) => {
               const barColor = getWorkoutBarColor(w)
               const isSelected = selectedWorkout?.id === w.id
               const nextSelection = isSelected ? null : w
@@ -1513,25 +1609,93 @@ function FavoritesSection({
                   onSelectWorkout(nextSelection)
                 }
               }
+              const isDragging = draggedFavoriteIndex === index
+              function handleDragStart(e: React.DragEvent) {
+                e.dataTransfer.effectAllowed = 'move'
+                e.dataTransfer.setData('text/plain', w.id)
+                setDraggedFavoriteIndex(index)
+                setDropIndicatorBeforeIndex(null)
+              }
+              function handleDragEnd() {
+                setDraggedFavoriteIndex(null)
+                setDropIndicatorBeforeIndex(null)
+              }
+              function handleDragOver(e: React.DragEvent) {
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                if (draggedFavoriteIndex === null) return
+                const rect = e.currentTarget.getBoundingClientRect()
+                const midY = rect.top + rect.height / 2
+                const insertBefore = e.clientY < midY ? index : index + 1
+                if (insertBefore === draggedFavoriteIndex) {
+                  setDropIndicatorBeforeIndex(null)
+                  return
+                }
+                setDropIndicatorBeforeIndex(insertBefore)
+              }
+              function handleDrop(e: React.DragEvent) {
+                e.preventDefault()
+                e.stopPropagation()
+                const draggedId = e.dataTransfer.getData('text/plain')
+                if (!draggedId) return
+                const currentIds = optimisticOrderedIds ?? favoritesCollection!.workoutIds
+                const rect = e.currentTarget.getBoundingClientRect()
+                const midY = rect.top + rect.height / 2
+                const toIndex = dropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
+                handleFavoriteDrop(draggedId, toIndex)
+              }
               return (
+              <Fragment key={w.id}>
+                {dropIndicatorBeforeIndex === index && (
+                  <li
+                    className="flex items-center px-3 py-1 list-none"
+                    aria-hidden
+                    onDragOver={(ev) => {
+                      ev.preventDefault()
+                      ev.stopPropagation()
+                      ev.dataTransfer.dropEffect = 'move'
+                    }}
+                    onDrop={(ev) => {
+                      ev.preventDefault()
+                      ev.stopPropagation()
+                      const id = ev.dataTransfer.getData('text/plain')
+                      if (id) handleFavoriteDrop(id, index)
+                    }}
+                  >
+                    <div
+                      className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]"
+                    />
+                  </li>
+                )}
               <li
-                key={w.id}
-                className={`pl-1 pr-4 py-3 flex items-center gap-3 cursor-pointer border-l-8 ${
-                  isSelected
-                    ? 'bg-gymnext-background'
-                    : 'hover:bg-gray-100'
+                data-index={index}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+                className={`pl-1 pr-4 py-3 flex items-center gap-3 border-l-8 hover:bg-gray-100 ${
+                  isDragging ? 'opacity-50' : ''
                 }`}
                 style={{ borderLeftColor: barColor }}
-                onClick={handleSelectWorkoutClick}
               >
-                <span className="w-5 shrink-0 flex items-center justify-center" aria-hidden>
-                  {isSelected && (
-                    <span style={{ color: barColor }} aria-label="Active workout">
-                      ✓
-                    </span>
-                  )}
+                <span
+                  draggable
+                  onDragStart={handleDragStart}
+                  onDragEnd={handleDragEnd}
+                  className="w-6 shrink-0 flex items-center justify-center text-gray-400 cursor-grab active:cursor-grabbing touch-none"
+                  aria-hidden
+                  title="Drag to reorder"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  ⋮⋮
                 </span>
-                <div className="min-w-0 flex-1">
+                {isSelected && (
+                  <span className="shrink-0 text-[#6B21A8]" aria-label="Current workout">
+                    ✓
+                  </span>
+                )}
+                <div
+                  className="min-w-0 flex-1 cursor-pointer"
+                  onClick={handleSelectWorkoutClick}
+                >
                   <p className="text-sm font-medium text-gray-900 truncate">
                     {getWorkoutDisplayName(w) || w.workoutId}
                   </p>
@@ -1540,7 +1704,7 @@ function FavoritesSection({
                   </p>
                 </div>
                 <div
-                  className="inline-flex items-center gap-1 shrink-0"
+                  className="shrink-0 cursor-default"
                   onClick={(e) => e.stopPropagation()}
                 >
                   <button
@@ -1558,26 +1722,32 @@ function FavoritesSection({
                   >
                     Edit
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => onReorder(index, 'up')}
-                    className="h-7 w-7 inline-flex items-center justify-center rounded border border-gymnext-muted/50 text-gray-700 hover:bg-gymnext-background"
-                    aria-label="Move up"
-                  >
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onReorder(index, 'down')}
-                    className="h-7 w-7 inline-flex items-center justify-center rounded border border-gymnext-muted/50 text-gray-700 hover:bg-gymnext-background"
-                    aria-label="Move down"
-                  >
-                    ↓
-                  </button>
                 </div>
               </li>
+              </Fragment>
             )
             })}
+            {dropIndicatorBeforeIndex === orderedWorkouts.length && (
+              <li
+                className="flex items-center px-3 py-1 list-none"
+                aria-hidden
+                onDragOver={(ev) => {
+                  ev.preventDefault()
+                  ev.stopPropagation()
+                  ev.dataTransfer.dropEffect = 'move'
+                }}
+                onDrop={(ev) => {
+                  ev.preventDefault()
+                  ev.stopPropagation()
+                  const id = ev.dataTransfer.getData('text/plain')
+                  if (id) handleFavoriteDrop(id, orderedWorkouts.length)
+                }}
+              >
+                <div
+                  className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]"
+                />
+              </li>
+            )}
           </ul>
         )}
       </div>
@@ -1631,7 +1801,7 @@ function FavoritesSection({
                       </button>
                       <button
                         type="button"
-                        className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
+                        className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
                         onClick={() => {
                           setMoreMenuOpen(false)
                           setRemoveConfirmOpen(true)
@@ -1639,6 +1809,20 @@ function FavoritesSection({
                       >
                         Remove from favorites
                       </button>
+                      <div className="my-1 border-t border-gray-200" aria-hidden />
+                      {onSoftDeleteWorkout && (
+                        <button
+                          type="button"
+                          className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50"
+                          disabled={deleteWorkoutBusy}
+                          onClick={() => {
+                            setMoreMenuOpen(false)
+                            setDeleteWorkoutConfirmOpen(true)
+                          }}
+                        >
+                          Delete workout
+                        </button>
+                      )}
                     </div>
                   </>
                 )}
@@ -1794,6 +1978,47 @@ function FavoritesSection({
                 className="rounded px-3 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700"
               >
                 Remove from favorites
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteWorkoutConfirmOpen && selectedWorkout && onSoftDeleteWorkout && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !deleteWorkoutBusy && setDeleteWorkoutConfirmOpen(false)}
+          />
+          <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg p-4">
+            <p className="text-sm text-gray-800">
+              Delete this workout? It can be recovered from deleted items.
+            </p>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                type="button"
+                disabled={deleteWorkoutBusy}
+                onClick={() => setDeleteWorkoutConfirmOpen(false)}
+                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deleteWorkoutBusy}
+                onClick={async () => {
+                  setDeleteWorkoutBusy(true)
+                  try {
+                    await onSoftDeleteWorkout(selectedWorkout.id)
+                    setDeleteWorkoutConfirmOpen(false)
+                  } finally {
+                    setDeleteWorkoutBusy(false)
+                  }
+                }}
+                className="rounded px-3 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+              >
+                {deleteWorkoutBusy ? 'Deleting…' : 'Delete workout'}
               </button>
             </div>
           </div>
