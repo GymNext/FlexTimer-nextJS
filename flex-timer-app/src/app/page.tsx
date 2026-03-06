@@ -2,6 +2,7 @@
 'use client'
 
 import { useEffect, useMemo, useState, Fragment, forwardRef, useImperativeHandle, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import Image from 'next/image'
 import headerIcon from './icon.png'
@@ -762,25 +763,12 @@ function UserAppLayout({
     }
   }
 
-  async function handleReorderCollectionWorkout(
-    collectionId: string,
-    index: number,
-    direction: 'up' | 'down'
-  ) {
-    const detail =
-      collectionDetail && collectionDetail.collection.id === collectionId
-        ? collectionDetail
-        : null
-    if (!detail) return
-    const ids = [...detail.collection.workoutIds]
-    const targetIndex = direction === 'up' ? index - 1 : index + 1
-    if (targetIndex < 0 || targetIndex >= ids.length) return
-    ;[ids[index], ids[targetIndex]] = [ids[targetIndex], ids[index]]
+  async function handleReorderCollectionWorkout(collectionId: string, workoutIds: string[]) {
     try {
       await authedFetch(`/api/app/collections/${encodeURIComponent(collectionId)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workoutIds: ids }),
+        body: JSON.stringify({ workoutIds }),
       })
       await reloadOverview()
       await reloadCollectionDetail()
@@ -1103,6 +1091,7 @@ function UserAppLayout({
               reorderCollectionsError={reorderCollectionsError}
               onDismissReorderCollectionsError={() => setReorderCollectionsError(null)}
               onRemoveWorkoutFromCollection={handleRemoveWorkoutFromCollection}
+              onSoftDeleteWorkout={handleSoftDeleteWorkout}
               onCreateCollection={handleCreateCollection}
               onUpdateCollection={handleUpdateCollection}
               onDeleteCollection={handleDeleteCollection}
@@ -1701,26 +1690,6 @@ function FavoritesSection({
                     {getWorkoutDisplayDescription(w) || '—'}
                   </p>
                 </div>
-                <div
-                  className="shrink-0 cursor-default"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (hasUnsavedChanges) {
-                        setPendingUnsavedAction({ type: 'openEdit', workout: w })
-                        setUnsavedConfirmOpen(true)
-                      } else {
-                        openEdit(w)
-                      }
-                    }}
-                    className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
-                    aria-label="Edit workout"
-                  >
-                    Edit
-                  </button>
-                </div>
               </li>
               </Fragment>
             )
@@ -1779,7 +1748,22 @@ function FavoritesSection({
                       aria-hidden
                       onClick={() => setMoreMenuOpen(false)}
                     />
-                    <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                    <div className="absolute right-0 top-full mt-1 z-50 w-[185px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                      <button
+                        type="button"
+                        className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        onClick={() => {
+                          setMoreMenuOpen(false)
+                          if (hasUnsavedChanges) {
+                            setPendingUnsavedAction({ type: 'openEdit', workout: selectedWorkout })
+                            setUnsavedConfirmOpen(true)
+                          } else {
+                            openEdit(selectedWorkout)
+                          }
+                        }}
+                      >
+                        Edit workout
+                      </button>
                       <button
                         type="button"
                         className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
@@ -2099,7 +2083,6 @@ function FavoritesSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Edit workout</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Workout name is optional. Description is optional.</p>
             </div>
             <form onSubmit={handleEditSubmit} className="p-4 space-y-4">
               <div>
@@ -2625,6 +2608,7 @@ function CollectionsSection({
   reorderCollectionsError,
   onDismissReorderCollectionsError,
   onRemoveWorkoutFromCollection,
+  onSoftDeleteWorkout,
   onCreateCollection,
   onUpdateCollection,
   onDeleteCollection,
@@ -2642,15 +2626,12 @@ function CollectionsSection({
   collectionLoading: boolean
   collectionError: string | null
   openCollectionDetail: (collectionId: string) => void
-  onReorderWorkout: (
-    collectionId: string,
-    index: number,
-    direction: 'up' | 'down'
-  ) => void
+  onReorderWorkout: (collectionId: string, workoutIds: string[]) => void
   onReorderCollections?: (collectionIds: string[]) => void
   reorderCollectionsError?: string | null
   onDismissReorderCollectionsError?: () => void
   onRemoveWorkoutFromCollection: (collectionId: string, workoutId: string) => Promise<void>
+  onSoftDeleteWorkout?: (workoutId: string) => Promise<void>
   onCreateCollection: (name: string, description: string | null) => Promise<WorkoutCollection>
   onUpdateCollection: (collectionId: string, name: string, description: string | null) => Promise<void>
   onDeleteCollection: (collectionId: string) => Promise<void>
@@ -2688,6 +2669,7 @@ function CollectionsSection({
     | { type: 'createWorkout' }
     | { type: 'updateBookmarks'; workout: Workout }
     | { type: 'removeFromCollection'; workout: Workout }
+    | { type: 'deleteWorkoutFromCollection'; workout: Workout }
     | { type: 'createCollection' }
     | { type: 'editCollection'; collection: WorkoutCollection }
     | { type: 'editWorkoutMeta'; workout: Workout }
@@ -2717,6 +2699,9 @@ function CollectionsSection({
       case 'removeFromCollection':
         setRemoveFromCollectionConfirmWorkout(pendingUnsavedAction.workout)
         break
+      case 'deleteWorkoutFromCollection':
+        setDeleteWorkoutConfirmWorkout(pendingUnsavedAction.workout)
+        break
       case 'createCollection':
         setCreateOpen(true)
         break
@@ -2731,8 +2716,11 @@ function CollectionsSection({
     setHasUnsavedChanges(false)
   }
 
-  const [expandedWorkoutMenuOpen, setExpandedWorkoutMenuOpen] = useState(false)
+  const [collectionWorkoutMenuOpenId, setCollectionWorkoutMenuOpenId] = useState<string | null>(null)
+  const [collectionWorkoutMenuAnchorRect, setCollectionWorkoutMenuAnchorRect] = useState<{ top: number; left: number; right: number; bottom: number } | null>(null)
   const [removeFromCollectionConfirmWorkout, setRemoveFromCollectionConfirmWorkout] = useState<Workout | null>(null)
+  const [deleteWorkoutConfirmWorkout, setDeleteWorkoutConfirmWorkout] = useState<Workout | null>(null)
+  const [deleteWorkoutBusy, setDeleteWorkoutBusy] = useState(false)
 
   const [collectionBookmarkDialogOpen, setCollectionBookmarkDialogOpen] = useState(false)
   const [collectionBookmarkWorkout, setCollectionBookmarkWorkout] = useState<Workout | null>(null)
@@ -2744,6 +2732,10 @@ function CollectionsSection({
   const [draggedCollectionIndex, setDraggedCollectionIndex] = useState<number | null>(null)
   const [dropIndicatorBeforeIndex, setDropIndicatorBeforeIndex] = useState<number | null>(null)
   const [optimisticOrderedIds, setOptimisticOrderedIds] = useState<string[] | null>(null)
+
+  const [draggedWorkoutIndex, setDraggedWorkoutIndex] = useState<number | null>(null)
+  const [workoutDropIndicatorBeforeIndex, setWorkoutDropIndicatorBeforeIndex] = useState<number | null>(null)
+  const [optimisticWorkoutIds, setOptimisticWorkoutIds] = useState<string[] | null>(null)
 
   /** Reorder: remove item at fromIndex, insert so it ends up at toIndex. */
   function reorderIds(ids: string[], fromIndex: number, toIndex: number): string[] {
@@ -2772,6 +2764,32 @@ function CollectionsSection({
   useEffect(() => {
     if (reorderCollectionsError) setOptimisticOrderedIds(null)
   }, [reorderCollectionsError])
+
+  const orderedWorkoutsInCollection = useMemo(() => {
+    if (!collectionDetail || !optimisticWorkoutIds?.length) return collectionDetail?.workouts ?? []
+    const idOrder = new Map(optimisticWorkoutIds.map((id, i) => [id, i]))
+    return [...collectionDetail.workouts].sort((a, b) => {
+      const ai = idOrder.get(a.id) ?? 1e9
+      const bi = idOrder.get(b.id) ?? 1e9
+      return ai - bi
+    })
+  }, [collectionDetail?.workouts, collectionDetail?.collection.workoutIds, optimisticWorkoutIds])
+
+  useEffect(() => {
+    setOptimisticWorkoutIds(null)
+  }, [collectionDetail?.collection.id, (collectionDetail?.collection.workoutIds ?? []).join(',')])
+
+  function handleWorkoutDrop(collectionId: string, draggedId: string, toIndex: number) {
+    const currentIds = optimisticWorkoutIds ?? collectionDetail?.collection.workoutIds ?? []
+    const fromIndex = currentIds.indexOf(draggedId)
+    if (fromIndex === -1) return
+    const toIndexClamped = Math.max(0, Math.min(toIndex, currentIds.length))
+    const newIds = reorderIds(currentIds, fromIndex, toIndexClamped)
+    setOptimisticWorkoutIds(newIds)
+    setDraggedWorkoutIndex(null)
+    setWorkoutDropIndicatorBeforeIndex(null)
+    onReorderWorkout(collectionId, newIds)
+  }
 
   function handleCollectionDrop(draggedId: string, toIndex: number) {
     if (!onReorderCollections) return
@@ -3051,24 +3069,6 @@ function CollectionsSection({
                       {c.workoutIds.length} workouts
                     </p>
                   </div>
-                  <div className="inline-flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        if (hasUnsavedChanges) {
-                          setPendingUnsavedAction({ type: 'editCollection', collection: c })
-                          setUnsavedConfirmOpen(true)
-                        } else {
-                          openEdit(c)
-                        }
-                      }}
-                      className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
-                      aria-label="Edit collection"
-                    >
-                      Edit
-                    </button>
-                  </div>
                 </li>
               </Fragment>
               )
@@ -3139,7 +3139,23 @@ function CollectionsSection({
                       aria-hidden
                       onClick={() => setCollectionMoreMenuOpen(false)}
                     />
-                    <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                    <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                      <button
+                        type="button"
+                        className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        onClick={() => {
+                          setCollectionMoreMenuOpen(false)
+                          if (hasUnsavedChanges) {
+                            setPendingUnsavedAction({ type: 'editCollection', collection: collectionDetail.collection })
+                            setUnsavedConfirmOpen(true)
+                          } else {
+                            openEdit(collectionDetail.collection)
+                          }
+                        }}
+                      >
+                        Edit collection
+                      </button>
+                      <div className="my-1 border-t border-gray-200" aria-hidden />
                       <button
                         type="button"
                         className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
@@ -3160,164 +3176,265 @@ function CollectionsSection({
                 This collection has no workouts yet.
               </p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <tbody className="divide-y divide-gray-200 bg-white">
-                    {collectionDetail.workouts.map((w, index) => {
-                      const barColor = getWorkoutBarColor(w)
-                      const isExpanded = expandedWorkoutId === w.id
-                      return (
-                      <Fragment key={w.id}>
-                      <tr className="hover:bg-gymnext-background/50">
-                        <td
-                          className="pl-3 pr-3 py-2 border-l-8 cursor-pointer align-top"
-                          style={{ borderLeftColor: barColor }}
-                          onClick={() => handleExpandWorkoutClick(isExpanded ? null : w.id)}
+              <ul
+                className=""
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  const draggedId = e.dataTransfer.getData('text/plain')
+                  if (!draggedId) return
+                  const currentIds = optimisticWorkoutIds ?? collectionDetail.collection.workoutIds
+                  const toIndex = workoutDropIndicatorBeforeIndex ?? currentIds.length
+                  handleWorkoutDrop(collectionDetail.collection.id, draggedId, toIndex)
+                }}
+              >
+                {orderedWorkoutsInCollection.map((w, index) => {
+                  const barColor = getWorkoutBarColor(w)
+                  const isExpanded = expandedWorkoutId === w.id
+                  const isDragging = draggedWorkoutIndex === index
+                  return (
+                  <Fragment key={w.id}>
+                    {workoutDropIndicatorBeforeIndex === index && (
+                      <li
+                        className="flex items-center px-3 py-1 list-none border-t-0"
+                        aria-hidden
+                        onDragOver={(ev) => {
+                          ev.preventDefault()
+                          ev.stopPropagation()
+                          ev.dataTransfer.dropEffect = 'move'
+                        }}
+                        onDrop={(ev) => {
+                          ev.preventDefault()
+                          ev.stopPropagation()
+                          const id = ev.dataTransfer.getData('text/plain')
+                          if (id) handleWorkoutDrop(collectionDetail.collection.id, id, index)
+                        }}
+                      >
+                        <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
+                      </li>
+                    )}
+                    <li
+                      className={`pl-1 pr-3 py-2 flex items-center gap-3 border-l-8 bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${isDragging ? 'opacity-50' : ''} hover:bg-gymnext-background/50`}
+                      style={{ borderLeftColor: barColor }}
+                      data-index={index}
+                      onDragOver={(e) => {
+                        e.preventDefault()
+                        e.dataTransfer.dropEffect = 'move'
+                        if (draggedWorkoutIndex === null) return
+                        const rect = e.currentTarget.getBoundingClientRect()
+                        const midY = rect.top + rect.height / 2
+                        const insertBefore = e.clientY < midY ? index : index + 1
+                        if (insertBefore === draggedWorkoutIndex) {
+                          setWorkoutDropIndicatorBeforeIndex(null)
+                          return
+                        }
+                        setWorkoutDropIndicatorBeforeIndex(insertBefore)
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        const draggedId = e.dataTransfer.getData('text/plain')
+                        if (!draggedId) return
+                        const currentIds = optimisticWorkoutIds ?? collectionDetail.collection.workoutIds
+                        const rect = e.currentTarget.getBoundingClientRect()
+                        const midY = rect.top + rect.height / 2
+                        const toIndex = workoutDropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
+                        handleWorkoutDrop(collectionDetail.collection.id, draggedId, Math.max(0, Math.min(toIndex, currentIds.length)))
+                      }}
+                    >
+                      <span
+                        draggable
+                        onDragStart={(e) => {
+                          e.dataTransfer.effectAllowed = 'move'
+                          e.dataTransfer.setData('text/plain', w.id)
+                          setDraggedWorkoutIndex(index)
+                          setWorkoutDropIndicatorBeforeIndex(null)
+                        }}
+                        onDragEnd={() => {
+                          setDraggedWorkoutIndex(null)
+                          setWorkoutDropIndicatorBeforeIndex(null)
+                        }}
+                        className="w-6 shrink-0 flex items-center justify-center text-gray-400 cursor-grab active:cursor-grabbing touch-none"
+                        aria-hidden
+                        title="Drag to reorder"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        ⋮⋮
+                      </span>
+                      <div
+                        className="min-w-0 flex-1 cursor-pointer py-0.5"
+                        onClick={() => handleExpandWorkoutClick(isExpanded ? null : w.id)}
+                      >
+                        <div className="text-sm font-medium text-gray-900">
+                          {getWorkoutDisplayName(w) || w.workoutId}
+                        </div>
+                        <div className="text-sm text-gray-600 mt-0.5">
+                          {getWorkoutDisplayDescription(w) || '—'}
+                        </div>
+                      </div>
+                      <div className="shrink-0 relative" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect()
+                            if (collectionWorkoutMenuOpenId === w.id) {
+                              setCollectionWorkoutMenuOpenId(null)
+                              setCollectionWorkoutMenuAnchorRect(null)
+                            } else {
+                              setCollectionWorkoutMenuOpenId(w.id)
+                              setCollectionWorkoutMenuAnchorRect({ top: rect.top, left: rect.left, right: rect.right, bottom: rect.bottom })
+                            }
+                          }}
+                          className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                          aria-label="More options"
+                          aria-expanded={collectionWorkoutMenuOpenId === w.id}
                         >
-                          <div className="text-sm font-medium text-gray-900">
-                            {getWorkoutDisplayName(w) || w.workoutId}
-                          </div>
-                          <div className="text-sm text-gray-600 mt-0.5">
-                            {getWorkoutDisplayDescription(w) || '—'}
-                          </div>
-                        </td>
-                        <td className="px-3 py-2 text-sm text-right" onClick={(e) => e.stopPropagation()}>
-                          <div className="inline-flex items-center gap-1">
-                            <button
-                              type="button"
+                          ⋯
+                        </button>
+                        {collectionWorkoutMenuOpenId === w.id && collectionWorkoutMenuAnchorRect && typeof document !== 'undefined' && createPortal(
+                          <>
+                            <div
+                              className="fixed inset-0 z-[100]"
+                              aria-hidden
                               onClick={() => {
-                                if (hasUnsavedChanges) {
-                                  setPendingUnsavedAction({ type: 'editWorkoutMeta', workout: w })
-                                  setUnsavedConfirmOpen(true)
-                                } else {
-                                  openEditMeta(w)
-                                }
+                                setCollectionWorkoutMenuOpenId(null)
+                                setCollectionWorkoutMenuAnchorRect(null)
                               }}
-                              className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
-                              aria-label="Edit workout"
+                            />
+                            <div
+                              className="fixed z-[101] w-[185px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+                              style={{
+                                top: collectionWorkoutMenuAnchorRect.bottom + 4,
+                                right: typeof window !== 'undefined' ? window.innerWidth - collectionWorkoutMenuAnchorRect.right : 0,
+                              }}
                             >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onReorderWorkout(
-                                  collectionDetail.collection.id,
-                                  index,
-                                  'up'
-                                )
-                              }
-                              className="h-7 w-7 inline-flex items-center justify-center rounded border border-gymnext-muted/50 text-gymnext-dark hover:bg-gymnext-background"
-                              aria-label="Move up"
-                            >
-                              ↑
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onReorderWorkout(
-                                  collectionDetail.collection.id,
-                                  index,
-                                  'down'
-                                )
-                              }
-                              className="h-7 w-7 inline-flex items-center justify-center rounded border border-gymnext-muted/50 text-gymnext-dark hover:bg-gymnext-background"
-                              aria-label="Move down"
-                            >
-                              ↓
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                      {isExpanded && (
-                        <tr>
-                          <td colSpan={2} className="p-0 bg-gray-50/80">
-                            <div className="border-t border-gray-200 relative">
-                              <div className="absolute top-2 right-2 z-10">
-                                <div className="relative">
-                                  <button
-                                    type="button"
-                                    onClick={() => setExpandedWorkoutMenuOpen((open) => !open)}
-                                    className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
-                                    aria-label="More options"
-                                    aria-expanded={expandedWorkoutMenuOpen}
-                                  >
-                                    ⋯
-                                  </button>
-                                  {expandedWorkoutMenuOpen && (
-                                    <>
-                                      <div
-                                        className="fixed inset-0 z-40"
-                                        aria-hidden
-                                        onClick={() => setExpandedWorkoutMenuOpen(false)}
-                                      />
-                                      <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
-                                        <button
-                                          type="button"
-                                          className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                                          onClick={() => {
-                                            setExpandedWorkoutMenuOpen(false)
-                                            if (hasUnsavedChanges) {
-                                              setPendingUnsavedAction({ type: 'updateBookmarks', workout: w })
-                                              setUnsavedConfirmOpen(true)
-                                            } else {
-                                              setCollectionBookmarkWorkout(w)
-                                              setCollectionBookmarkSelectedIds(
-                                                new Set(
-                                                  allCollections.filter((c) =>
-                                                    c.workoutIds.includes(w.id)
-                                                  ).map((c) => c.id)
-                                                )
-                                              )
-                                              setCollectionBookmarkDialogOpen(true)
-                                            }
-                                          }}
-                                        >
-                                          Update bookmarks
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
-                                          onClick={() => {
-                                            setExpandedWorkoutMenuOpen(false)
-                                            if (hasUnsavedChanges) {
-                                              setPendingUnsavedAction({ type: 'removeFromCollection', workout: w })
-                                              setUnsavedConfirmOpen(true)
-                                            } else {
-                                              setRemoveFromCollectionConfirmWorkout(w)
-                                            }
-                                          }}
-                                        >
-                                          Remove from Collection
-                                        </button>
-                                      </div>
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                              <div className="p-4 pt-10 max-h-[60vh] overflow-y-auto">
-                                <FavoritesDetailPanel
-                                  workout={w}
-                                  scheduleOnly
-                                  ref={collectionDetailPanelRef}
-                                  onDirtyChange={setHasUnsavedChanges}
-                                  onSave={async (workoutId, data) => {
-                                    await onSaveWorkout(workoutId, data)
-                                    setExpandedWorkoutId(null)
+                              <button
+                                type="button"
+                                className="w-full text-left px-3 py-2 text-sm text-gray-900 hover:bg-gray-100"
+                                onClick={() => {
+                                  setCollectionWorkoutMenuOpenId(null)
+                                  setCollectionWorkoutMenuAnchorRect(null)
+                                  if (hasUnsavedChanges) {
+                                    setPendingUnsavedAction({ type: 'editWorkoutMeta', workout: w })
+                                    setUnsavedConfirmOpen(true)
+                                  } else {
+                                    openEditMeta(w)
+                                  }
+                                }}
+                              >
+                                Edit workout
+                              </button>
+                              <button
+                                type="button"
+                                className="w-full text-left px-3 py-2 text-sm text-gray-900 hover:bg-gray-100"
+                                onClick={() => {
+                                  setCollectionWorkoutMenuOpenId(null)
+                                  setCollectionWorkoutMenuAnchorRect(null)
+                                  if (hasUnsavedChanges) {
+                                    setPendingUnsavedAction({ type: 'updateBookmarks', workout: w })
+                                    setUnsavedConfirmOpen(true)
+                                  } else {
+                                    setCollectionBookmarkWorkout(w)
+                                    setCollectionBookmarkSelectedIds(
+                                      new Set(
+                                        allCollections.filter((c) =>
+                                          c.workoutIds.includes(w.id)
+                                        ).map((c) => c.id)
+                                      )
+                                    )
+                                    setCollectionBookmarkDialogOpen(true)
+                                  }
+                                }}
+                              >
+                                Update bookmarks
+                              </button>
+                              <button
+                                type="button"
+                                className="w-full text-left px-3 py-2 text-sm text-gray-900 hover:bg-gray-100"
+                                onClick={() => {
+                                  setCollectionWorkoutMenuOpenId(null)
+                                  setCollectionWorkoutMenuAnchorRect(null)
+                                  if (hasUnsavedChanges) {
+                                    setPendingUnsavedAction({ type: 'removeFromCollection', workout: w })
+                                    setUnsavedConfirmOpen(true)
+                                  } else {
+                                    setRemoveFromCollectionConfirmWorkout(w)
+                                  }
+                                }}
+                              >
+                                Remove from collection
+                              </button>
+                              <div className="my-1 border-t border-gray-200" aria-hidden />
+                              {onSoftDeleteWorkout && (
+                                <button
+                                  type="button"
+                                  className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
+                                  onClick={() => {
+                                    setCollectionWorkoutMenuOpenId(null)
+                                    setCollectionWorkoutMenuAnchorRect(null)
+                                    if (hasUnsavedChanges) {
+                                      setPendingUnsavedAction({ type: 'deleteWorkoutFromCollection', workout: w })
+                                      setUnsavedConfirmOpen(true)
+                                    } else {
+                                      setDeleteWorkoutConfirmWorkout(w)
+                                    }
                                   }}
-                                  onClose={() => setExpandedWorkoutId(null)}
-                                />
-                              </div>
+                                >
+                                  Delete workout
+                                </button>
+                              )}
                             </div>
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                    )
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                          </>,
+                          document.body
+                        )}
+                      </div>
+                    </li>
+                    {isExpanded && (
+                      <li className="border-t border-gray-200 bg-gray-50/80 list-none">
+                        <div className="relative">
+                          <div className="p-4 max-h-[60vh] overflow-y-auto">
+                            <FavoritesDetailPanel
+                              workout={w}
+                              scheduleOnly
+                              ref={collectionDetailPanelRef}
+                              onDirtyChange={setHasUnsavedChanges}
+                              onSave={async (workoutId, data) => {
+                                await onSaveWorkout(workoutId, data)
+                                setExpandedWorkoutId(null)
+                              }}
+                              onClose={() => setExpandedWorkoutId(null)}
+                            />
+                          </div>
+                        </div>
+                      </li>
+                    )}
+                  </Fragment>
+                  )
+                })}
+                {workoutDropIndicatorBeforeIndex === orderedWorkoutsInCollection.length && (
+                  <li
+                    className="flex items-center px-3 py-1 list-none border-t-0"
+                    aria-hidden
+                    onDragOver={(ev) => {
+                      ev.preventDefault()
+                      ev.stopPropagation()
+                      ev.dataTransfer.dropEffect = 'move'
+                    }}
+                    onDrop={(ev) => {
+                      ev.preventDefault()
+                      ev.stopPropagation()
+                      const id = ev.dataTransfer.getData('text/plain')
+                      if (id) handleWorkoutDrop(collectionDetail.collection.id, id, orderedWorkoutsInCollection.length)
+                    }}
+                  >
+                    <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
+                  </li>
+                )}
+              </ul>
             )}
             <div className="flex justify-end pt-3">
               <button
@@ -3350,11 +3467,10 @@ function CollectionsSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Create new collection</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Collection name is required. Description is optional.</p>
             </div>
             <form onSubmit={handleCreateSubmit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="coll-name" className="block text-xs font-medium text-gray-700 mb-1">Name (required)</label>
+                <label htmlFor="coll-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
                 <input
                   id="coll-name"
                   type="text"
@@ -3642,6 +3758,48 @@ function CollectionsSection({
         </div>
       )}
 
+      {deleteWorkoutConfirmWorkout && onSoftDeleteWorkout && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !deleteWorkoutBusy && setDeleteWorkoutConfirmWorkout(null)}
+          />
+          <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg p-4">
+            <p className="text-sm text-gray-800">
+              Delete this workout? It can be recovered from deleted items.
+            </p>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                type="button"
+                disabled={deleteWorkoutBusy}
+                onClick={() => setDeleteWorkoutConfirmWorkout(null)}
+                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deleteWorkoutBusy}
+                onClick={async () => {
+                  setDeleteWorkoutBusy(true)
+                  try {
+                    await onSoftDeleteWorkout(deleteWorkoutConfirmWorkout.id)
+                    setDeleteWorkoutConfirmWorkout(null)
+                    setExpandedWorkoutId(null)
+                  } finally {
+                    setDeleteWorkoutBusy(false)
+                  }
+                }}
+                className="rounded px-3 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+              >
+                {deleteWorkoutBusy ? 'Deleting…' : 'Delete workout'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {editMetaWorkout && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
@@ -3652,7 +3810,6 @@ function CollectionsSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Edit workout</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Workout name is optional. Description is optional.</p>
             </div>
             <form onSubmit={handleEditMetaSubmit} className="p-4 space-y-4">
               <div>
@@ -3711,11 +3868,10 @@ function CollectionsSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Edit collection</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Collection name is required. Description is optional.</p>
             </div>
             <form onSubmit={handleEditSubmit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="edit-coll-name" className="block text-xs font-medium text-gray-700 mb-1">Name (required)</label>
+                <label htmlFor="edit-coll-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
                 <input
                   id="edit-coll-name"
                   type="text"
@@ -4372,16 +4528,6 @@ function PlansSection({
                         {p.workoutPlanDescription || 'No description'}
                       </p>
                     </div>
-                    <div className="inline-flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        type="button"
-                        onClick={() => openEditPlan(p)}
-                        className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
-                        aria-label="Edit plan"
-                      >
-                        Edit
-                      </button>
-                    </div>
                   </li>
                 </Fragment>
               )
@@ -4442,7 +4588,18 @@ function PlansSection({
                     aria-hidden
                     onClick={() => setPlanMoreMenuOpen(false)}
                   />
-                  <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                  <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                    <button
+                      type="button"
+                      className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                      onClick={() => {
+                        setPlanMoreMenuOpen(false)
+                        openEditPlan(selectedPlan)
+                      }}
+                    >
+                      Edit plan
+                    </button>
+                    <div className="my-1 border-t border-gray-200" aria-hidden />
                     <button
                       type="button"
                       className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
@@ -4458,39 +4615,8 @@ function PlansSection({
               )}
             </div>
           </div>
-          <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex flex-wrap items-center gap-2">
-            <div className="inline-flex rounded border border-gymnext-muted/50 bg-white p-0.5">
-                {(['1day', '3day', 'week'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setPlanViewMode(mode)}
-                    className={`rounded px-2.5 py-1 text-xs font-medium ${
-                      planViewMode === mode
-                        ? 'text-white'
-                        : 'text-gray-600 hover:bg-gymnext-background'
-                    }`}
-                    style={
-                      planViewMode === mode
-                        ? { backgroundColor: '#6B21A8' }
-                        : undefined
-                    }
-                  >
-                    {mode === 'week' ? 'week' : mode === '3day' ? '3 day' : '1 day'}
-                  </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setCreateDate(todayYmd)
-                  setCreateOpen(true)
-                }}
-                disabled={!selectedPlan}
-                className="rounded bg-gymnext px-3 py-1.5 text-xs font-medium text-white hover:bg-gymnext-dark disabled:opacity-50"
-              >
-                Add planned workout
-              </button>
+          <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex flex-col gap-2">
+            <div className="flex flex-wrap items-center justify-center gap-2">
               <button
                 type="button"
                 onClick={() => setWeekStart(addDays(weekStart, -planDayCount))}
@@ -4517,6 +4643,7 @@ function PlansSection({
               >
                 Next →
               </button>
+            </div>
           </div>
           {plansLoading && (
             <p className="px-4 py-6 text-sm text-gray-500">
@@ -4738,6 +4865,31 @@ function PlansSection({
                   </div>
                 )
               })}
+            </div>
+          )}
+          {selectedPlan && !plansLoading && (
+            <div className="flex justify-center py-3 border-b border-gymnext-muted/30 bg-gymnext-background">
+              <div className="inline-flex rounded border border-gymnext-muted/50 bg-white p-0.5">
+                {(['1day', '3day', 'week'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setPlanViewMode(mode)}
+                    className={`rounded px-2.5 py-1 text-xs font-medium ${
+                      planViewMode === mode
+                        ? 'text-white'
+                        : 'text-gray-600 hover:bg-gymnext-background'
+                    }`}
+                    style={
+                      planViewMode === mode
+                        ? { backgroundColor: '#6B21A8' }
+                        : undefined
+                    }
+                  >
+                    {mode === 'week' ? 'week' : mode === '3day' ? '3 day' : '1 day'}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
             </>
@@ -5035,11 +5187,10 @@ function PlansSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Create new plan</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Plan name is required. Description is optional.</p>
             </div>
             <form onSubmit={handleCreatePlanSubmit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="plan-name" className="block text-xs font-medium text-gray-700 mb-1">Name (required)</label>
+                <label htmlFor="plan-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
                 <input
                   id="plan-name"
                   type="text"
@@ -5163,11 +5314,10 @@ function PlansSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Edit plan</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Plan name is required. Description is optional.</p>
             </div>
             <form onSubmit={handleEditPlanSubmit} className="p-4 space-y-4">
               <div>
-                <label htmlFor="edit-plan-name" className="block text-xs font-medium text-gray-700 mb-1">Name (required)</label>
+                <label htmlFor="edit-plan-name" className="block text-xs font-medium text-gray-700 mb-1">Name</label>
                 <input
                   id="edit-plan-name"
                   type="text"
@@ -5223,7 +5373,6 @@ function PlansSection({
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h3 className="text-sm font-semibold text-gray-800">Edit workout</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Workout name is optional. Description is optional.</p>
             </div>
             <form onSubmit={handleSavePlannedEdit} className="p-4 space-y-4">
               <div>
