@@ -84,6 +84,12 @@ export async function PATCH(
     if (plan.deletedAt) {
       return NextResponse.json({ error: 'Plan is already deleted' }, { status: 400 })
     }
+    if (planId === 'personal') {
+      return NextResponse.json(
+        { error: 'The personal plan cannot be deleted' },
+        { status: 403 }
+      )
+    }
     await setPlanDeletedAt(userId, planId)
     return NextResponse.json({ ok: true })
   } catch (err) {
@@ -129,6 +135,12 @@ export async function DELETE(
       return NextResponse.json(
         { error: 'Plan must be soft-deleted before permanent deletion' },
         { status: 400 }
+      )
+    }
+    if (planId === 'personal') {
+      return NextResponse.json(
+        { error: 'The personal plan cannot be deleted' },
+        { status: 403 }
       )
     }
     await deletePlan(userId, planId)

@@ -116,6 +116,12 @@ export async function PATCH(
     if (plan.deletedAt) {
       return NextResponse.json({ error: 'Plan is already deleted' }, { status: 400 })
     }
+    if (planId === 'personal') {
+      return NextResponse.json(
+        { error: 'The personal plan cannot be deleted' },
+        { status: 403 }
+      )
+    }
     await setPlanDeletedAt(uid, planId)
     return NextResponse.json({ ok: true })
   } catch (err) {
@@ -157,6 +163,12 @@ export async function DELETE(
     const plan = await getPlanById(uid, planId)
     if (!plan) {
       return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
+    }
+    if (planId === 'personal') {
+      return NextResponse.json(
+        { error: 'The personal plan cannot be deleted' },
+        { status: 403 }
+      )
     }
     if (!plan.deletedAt) {
       return NextResponse.json(

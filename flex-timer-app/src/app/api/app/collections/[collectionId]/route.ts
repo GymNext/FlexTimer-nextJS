@@ -10,6 +10,7 @@ import {
   updateCollectionMetadata,
   updateCollectionWorkoutIds,
 } from '@/lib/firestore'
+import { getSubscriptionLimits } from '@/lib/subscription-limits'
 
 type RouteParams = Promise<{ collectionId: string }>
 
@@ -44,8 +45,19 @@ export async function GET(
     if (!collection || collection.deletedAt) {
       return NextResponse.json({ error: 'Collection not found' }, { status: 404 })
     }
-    const workouts = await getWorkoutsByIds(uid, collection.workoutIds)
-    return NextResponse.json({ collection, workouts })
+    const allFetched = await getWorkoutsByIds(uid, collection.workoutIds ?? [])
+    const nonDeleted = allFetched.filter((w) => !w.deletedAt)
+    const nonDeletedIds = new Set(nonDeleted.map((w) => w.id))
+    const cleanedWorkoutIds = (collection.workoutIds ?? []).filter((id) => nonDeletedIds.has(id))
+    if (cleanedWorkoutIds.length !== (collection.workoutIds ?? []).length) {
+      await updateCollectionWorkoutIds(uid, collectionId, cleanedWorkoutIds)
+      const updated = await getCollectionById(uid, collectionId)
+      return NextResponse.json({
+        collection: updated ?? collection,
+        workouts: nonDeleted,
+      })
+    }
+    return NextResponse.json({ collection, workouts: nonDeleted })
   } catch (err) {
     console.error('[app collection GET]', err)
     return NextResponse.json(
@@ -115,6 +127,20 @@ export async function PATCH(
       const workoutIds = body.workoutIds.filter(
         (id): id is string => typeof id === 'string' && id.trim() !== ''
       )
+      if (collectionId === 'favorite') {
+        const limits = await getSubscriptionLimits(uid)
+        const workouts = await getWorkoutsByIds(uid, workoutIds)
+        const nonDeletedCount = workouts.filter((w) => !w.deletedAt).length
+        if (nonDeletedCount > limits.maxFavorites) {
+          return NextResponse.json(
+            {
+              error: `Your plan allows up to ${limits.maxFavorites} favorites. Upgrade to add more.`,
+              code: 'SUBSCRIPTION_LIMIT_FAVORITES',
+            },
+            { status: 403 }
+          )
+        }
+      }
       await updateCollectionWorkoutIds(uid, collectionId, workoutIds)
       const updated = await getCollectionById(uid, collectionId)
       const workouts = updated ? await getWorkoutsByIds(uid, updated.workoutIds) : []

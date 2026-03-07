@@ -7,6 +7,7 @@ import {
   getUserWorkouts,
 } from '@/lib/firestore'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
+import type { SubscriptionLimits } from '@/lib/subscription-limits-constants'
 
 /**
  * GET /api/app/overview
@@ -29,12 +30,15 @@ export async function GET(request: NextRequest) {
   const { uid } = authResult
 
   try {
-    const [allWorkouts, allWorkoutPlans, allWorkoutCollections, subscriptionLimits] =
+    const [allWorkouts, allWorkoutPlans, allWorkoutCollections, subscriptionLimitsResult] =
       await Promise.all([
         getUserWorkouts(uid),
         getUserWorkoutPlans(uid),
         getUserWorkoutCollections(uid),
-        getSubscriptionLimits(uid),
+        getSubscriptionLimits(uid).catch((err) => {
+          console.error('[app overview] getSubscriptionLimits failed:', err)
+          return null
+        }),
       ])
 
     const workouts = allWorkouts.filter((w) => !w.deletedAt)
@@ -42,9 +46,18 @@ export async function GET(request: NextRequest) {
     const workoutCollections = allWorkoutCollections.filter((c) => !c.deletedAt)
 
     const favoritesCollection = workoutCollections.find((c) => c.id === 'favorite')
-    const favoritesCount = favoritesCollection?.workoutIds?.length ?? 0
+    const nonDeletedWorkoutIds = new Set(workouts.map((w) => w.id))
+    const favoritesCount =
+      favoritesCollection?.workoutIds?.filter((id) => nonDeletedWorkoutIds.has(id)).length ?? 0
     const collectionsCount = workoutCollections.filter((c) => c.id !== 'favorite').length
     const plansCount = workoutPlans.length
+
+    const subscriptionLimits: SubscriptionLimits = subscriptionLimitsResult ?? {
+      tier: 'basic',
+      maxFavorites: 5,
+      maxCollections: 1,
+      maxPlans: 1,
+    }
 
     return NextResponse.json({
       workouts,

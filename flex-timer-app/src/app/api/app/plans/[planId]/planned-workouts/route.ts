@@ -89,6 +89,10 @@ export async function POST(
       typeof body.sourceWorkoutId === 'string' && body.sourceWorkoutId !== ''
         ? body.sourceWorkoutId
         : null
+    const clientToday =
+      typeof body.clientToday === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.clientToday)
+        ? body.clientToday
+        : null
     const workout =
       body.workout != null && typeof body.workout === 'object'
         ? (body.workout as Record<string, unknown>)
@@ -101,7 +105,7 @@ export async function POST(
       return NextResponse.json({ error: 'workout.timerMode required (number)' }, { status: 400 })
     }
 
-    const today = new Date().toISOString().slice(0, 10)
+    const today = clientToday ?? new Date().toISOString().slice(0, 10)
     if (day < today) {
       return NextResponse.json(
         { error: 'Cannot add workouts to past dates.' },

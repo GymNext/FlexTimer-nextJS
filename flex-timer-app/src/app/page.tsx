@@ -422,19 +422,20 @@ function UserAppLayout({
   const [collectionError, setCollectionError] = useState<string | null>(null)
 
   const [plannedWorkouts, setPlannedWorkouts] = useState<PlannedWorkout[]>([])
+  const [optimisticPlannedWorkouts, setOptimisticPlannedWorkouts] = useState<PlannedWorkout[] | null>(null)
   const [plansLoading, setPlansLoading] = useState(false)
   const [plansError, setPlansError] = useState<string | null>(null)
-  const [weekStart, setWeekStart] = useState<string>(() => toYYYYMMDD(new Date()))
+  const [weekStart, setWeekStart] = useState<string>(() => getLocalYYYYMMDD(new Date()))
   const [planViewMode, setPlanViewMode] = useState<'week' | '3day' | '1day'>('1day')
 
   useEffect(() => {
-    const today = toYYYYMMDD(new Date())
+    const today = getLocalYYYYMMDD(new Date())
     if (planViewMode === '1day') {
       setWeekStart(today)
     } else if (planViewMode === '3day') {
       setWeekStart(addDays(today, -1))
     } else {
-      setWeekStart(getMondayOfWeek(new Date()))
+      setWeekStart(getMondayOfWeekLocal(new Date()))
     }
   }, [planViewMode])
 
@@ -443,6 +444,10 @@ function UserAppLayout({
     () => addDays(weekStart, planDayCount - 1),
     [weekStart, planDayCount]
   )
+
+  useEffect(() => {
+    setOptimisticPlannedWorkouts(null)
+  }, [selectedPlanId, weekStart, planDayCount])
 
   const sortedCollections = useMemo(
     () =>
@@ -907,23 +912,26 @@ function UserAppLayout({
       }
       const data = (await res.json()) as { plannedWorkouts: PlannedWorkout[] }
       setPlannedWorkouts(data.plannedWorkouts ?? [])
+      setOptimisticPlannedWorkouts(null)
     } catch (e) {
       setPlansError(
         e instanceof Error ? e.message : 'Failed to load planned workouts'
       )
       setPlannedWorkouts([])
+      setOptimisticPlannedWorkouts(null)
     } finally {
       setPlansLoading(false)
     }
   }
 
   const byDay = useMemo(() => {
+    const source = optimisticPlannedWorkouts ?? plannedWorkouts
     const map: Record<string, PlannedWorkout[]> = {}
     const weekDays = Array.from({ length: planDayCount }, (_, i) =>
       addDays(weekStart, i)
     )
     weekDays.forEach((d) => (map[d] = []))
-    plannedWorkouts.forEach((pw) => {
+    source.forEach((pw) => {
       const key = pw.day.slice(0, 10)
       if (!map[key]) map[key] = []
       map[key].push(pw)
@@ -932,7 +940,7 @@ function UserAppLayout({
       if (map[d]) map[d].sort((a, b) => a.ordinal - b.ordinal)
     })
     return map
-  }, [plannedWorkouts, weekStart, planDayCount])
+  }, [optimisticPlannedWorkouts, plannedWorkouts, weekStart, planDayCount])
 
   async function handleReorderPlannedWithinDay(
     dayKey: string,
@@ -965,6 +973,47 @@ function UserAppLayout({
     } catch (e) {
       console.error('[planned reorder]', e)
     }
+  }
+
+  function handlePlannedWorkoutDrop(dayKey: string, fromIndex: number, toIndex: number) {
+    const items = [...(byDay[dayKey] ?? [])]
+    if (fromIndex < 0 || fromIndex >= items.length || toIndex < 0 || toIndex > items.length) return
+    // toIndex is the gap (0=before first, 1=between 0 and 1, ..., n=after last). Ignore drop in gap above or below current row.
+    if (toIndex === fromIndex) return
+    if (toIndex === fromIndex + 1) return
+    const [removed] = items.splice(fromIndex, 1)
+    // insertAt in reduced list: if moving up (toIndex < fromIndex) use toIndex; if moving down (toIndex > fromIndex+1) use toIndex-1
+    const insertAt = toIndex > fromIndex + 1 ? toIndex - 1 : toIndex
+    items.splice(Math.max(0, Math.min(insertAt, items.length)), 0, removed!)
+    // Update ordinals so byDay's sort preserves the new order when we set state
+    items.forEach((pw, idx) => {
+      pw.ordinal = idx
+    })
+    const weekDays = Array.from({ length: planDayCount }, (_, i) => addDays(weekStart, i))
+    const fullList = weekDays.flatMap((d) => (d === dayKey ? items : (byDay[d] ?? [])))
+    setOptimisticPlannedWorkouts(fullList)
+    const planId = selectedPlanId
+    if (!planId) return
+    Promise.all(
+      items.map((pw, idx) =>
+        authedFetch(
+          `/api/app/plans/${encodeURIComponent(pw.planId)}/planned-workouts/${encodeURIComponent(pw.id)}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ordinal: idx }),
+          }
+        )
+      )
+    )
+      .then(() => {
+        setPlannedWorkouts(fullList)
+        setOptimisticPlannedWorkouts(null)
+      })
+      .catch((e) => {
+        console.error('[planned drop reorder]', e)
+        setOptimisticPlannedWorkouts(null)
+      })
   }
 
   async function handleDeletePlanned(pw: PlannedWorkout) {
@@ -1099,6 +1148,7 @@ function UserAppLayout({
               maxCollections={overview?.subscriptionLimits?.maxCollections ?? UNLIMITED}
               collectionsCount={overview?.counts?.collections ?? 0}
               maxFavorites={overview?.subscriptionLimits?.maxFavorites ?? UNLIMITED}
+              favoritesCount={overview?.counts?.favorites ?? 0}
               createWorkoutInCollection={doCreateWorkoutInCollection}
             />
           )}
@@ -1120,6 +1170,7 @@ function UserAppLayout({
               plansLoading={plansLoading}
               plansError={plansError}
               onReorderPlanned={handleReorderPlannedWithinDay}
+              onPlannedWorkoutDrop={handlePlannedWorkoutDrop}
               onDeletePlanned={handleDeletePlanned}
               user={user}
               reloadPlanned={() => {
@@ -1442,12 +1493,13 @@ function FavoritesSection({
   const [optimisticOrderedIds, setOptimisticOrderedIds] = useState<string[] | null>(null)
   const detailPanelRef = useRef<{ save: () => Promise<void> }>(null)
 
-  /** Reorder: remove item at fromIndex, insert so it ends up at toIndex (0 = first, length = last). */
+  /** Reorder: toIndex = gap index (0=before first, 1=before second, ..., n=after last).
+   *  After removing from fromIndex, insert at toIndex when moving up, toIndex-1 when moving down. */
   function reorderIds(ids: string[], fromIndex: number, toIndex: number): string[] {
     if (fromIndex === toIndex) return ids
     const list = [...ids]
     const [removed] = list.splice(fromIndex, 1)
-    const insertAt = toIndex > fromIndex + 1 ? toIndex - 1 : toIndex
+    const insertAt = toIndex > fromIndex ? toIndex - 1 : toIndex
     list.splice(Math.max(0, Math.min(insertAt, list.length)), 0, removed)
     return list
   }
@@ -1492,7 +1544,7 @@ function FavoritesSection({
         ? ` (${favoriteWorkouts.length})`
         : ''
       : favoritesCollection
-        ? ` (${count} / ${maxFav})`
+        ? ` (${count}/${maxFav})`
         : ''
 
   function openEdit(w: Workout) {
@@ -1614,18 +1666,20 @@ function FavoritesSection({
                 const rect = e.currentTarget.getBoundingClientRect()
                 const midY = rect.top + rect.height / 2
                 const insertBefore = e.clientY < midY ? index : index + 1
-                if (insertBefore === draggedFavoriteIndex) {
-                  setDropIndicatorBeforeIndex(null)
-                  return
-                }
                 setDropIndicatorBeforeIndex(insertBefore)
               }
               function handleDrop(e: React.DragEvent) {
                 e.preventDefault()
                 e.stopPropagation()
                 const draggedId = e.dataTransfer.getData('text/plain')
-                if (!draggedId) return
+                if (!draggedId) {
+                  return
+                }
                 const currentIds = optimisticOrderedIds ?? favoritesCollection!.workoutIds
+                const fromIndex = currentIds.indexOf(draggedId)
+                if (fromIndex === -1) {
+                  return
+                }
                 const rect = e.currentTarget.getBoundingClientRect()
                 const midY = rect.top + rect.height / 2
                 const toIndex = dropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
@@ -1646,7 +1700,8 @@ function FavoritesSection({
                       ev.preventDefault()
                       ev.stopPropagation()
                       const id = ev.dataTransfer.getData('text/plain')
-                      if (id) handleFavoriteDrop(id, index)
+                      if (!id) return
+                      handleFavoriteDrop(id, index)
                     }}
                   >
                     <div
@@ -2616,6 +2671,7 @@ function CollectionsSection({
   maxCollections,
   collectionsCount,
   maxFavorites,
+  favoritesCount,
   createWorkoutInCollection,
 }: {
   collections: WorkoutCollection[]
@@ -2639,6 +2695,7 @@ function CollectionsSection({
   maxCollections?: number
   collectionsCount?: number
   maxFavorites?: number
+  favoritesCount?: number
   createWorkoutInCollection?: (
     collectionId: string,
     payload: {
@@ -2737,12 +2794,12 @@ function CollectionsSection({
   const [workoutDropIndicatorBeforeIndex, setWorkoutDropIndicatorBeforeIndex] = useState<number | null>(null)
   const [optimisticWorkoutIds, setOptimisticWorkoutIds] = useState<string[] | null>(null)
 
-  /** Reorder: remove item at fromIndex, insert so it ends up at toIndex. */
+  /** Reorder: toIndex = gap index (0..n). Insert at toIndex when moving up, toIndex-1 when moving down. */
   function reorderIds(ids: string[], fromIndex: number, toIndex: number): string[] {
     if (fromIndex === toIndex) return ids
     const list = [...ids]
     const [removed] = list.splice(fromIndex, 1)
-    const insertAt = toIndex > fromIndex + 1 ? toIndex - 1 : toIndex
+    const insertAt = toIndex > fromIndex ? toIndex - 1 : toIndex
     list.splice(Math.max(0, Math.min(insertAt, list.length)), 0, removed)
     return list
   }
@@ -2815,12 +2872,10 @@ function CollectionsSection({
   const count = collectionsCount ?? 0
   const atCollectionsLimit = maxColl < UNLIMITED && count >= maxColl
   const collectionsLabel =
-    maxColl >= UNLIMITED ? `(${collections.length})` : `(${count} / ${maxColl})`
+    maxColl >= UNLIMITED ? `(${collections.length})` : `(${count}/${maxColl})`
 
-  const favoritesCollectionFromAll = allCollections.find((c) => c.id === 'favorite')
   const maxFav = maxFavorites ?? UNLIMITED
-  const atFavoritesLimit =
-    maxFav < UNLIMITED && (favoritesCollectionFromAll?.workoutIds.length ?? 0) >= maxFav
+  const atFavoritesLimit = maxFav < UNLIMITED && (favoritesCount ?? 0) >= maxFav
 
   async function handleCreateSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -3011,10 +3066,6 @@ function CollectionsSection({
                     const rect = e.currentTarget.getBoundingClientRect()
                     const midY = rect.top + rect.height / 2
                     const insertBefore = e.clientY < midY ? index : index + 1
-                    if (insertBefore === draggedCollectionIndex) {
-                      setDropIndicatorBeforeIndex(null)
-                      return
-                    }
                     setDropIndicatorBeforeIndex(insertBefore)
                   }}
                   onDrop={(e) => {
@@ -3023,6 +3074,8 @@ function CollectionsSection({
                     const draggedId = e.dataTransfer.getData('text/plain')
                     if (!draggedId || !onReorderCollections) return
                     const currentIds = optimisticOrderedIds ?? collections.map((c) => c.id)
+                    const fromIndex = currentIds.indexOf(draggedId)
+                    if (fromIndex === -1) return
                     const rect = e.currentTarget.getBoundingClientRect()
                     const midY = rect.top + rect.height / 2
                     const toIndex = dropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
@@ -3228,10 +3281,6 @@ function CollectionsSection({
                         const rect = e.currentTarget.getBoundingClientRect()
                         const midY = rect.top + rect.height / 2
                         const insertBefore = e.clientY < midY ? index : index + 1
-                        if (insertBefore === draggedWorkoutIndex) {
-                          setWorkoutDropIndicatorBeforeIndex(null)
-                          return
-                        }
                         setWorkoutDropIndicatorBeforeIndex(insertBefore)
                       }}
                       onDrop={(e) => {
@@ -3240,6 +3289,8 @@ function CollectionsSection({
                         const draggedId = e.dataTransfer.getData('text/plain')
                         if (!draggedId) return
                         const currentIds = optimisticWorkoutIds ?? collectionDetail.collection.workoutIds
+                        const fromIndex = currentIds.indexOf(draggedId)
+                        if (fromIndex === -1) return
                         const rect = e.currentTarget.getBoundingClientRect()
                         const midY = rect.top + rect.height / 2
                         const toIndex = workoutDropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
@@ -3934,6 +3985,7 @@ function PlansSection({
   plansLoading,
   plansError,
   onReorderPlanned,
+  onPlannedWorkoutDrop,
   onDeletePlanned,
   user,
   reloadPlanned,
@@ -3967,6 +4019,7 @@ function PlansSection({
     index: number,
     direction: 'up' | 'down'
   ) => void
+  onPlannedWorkoutDrop: (dayKey: string, fromIndex: number, toIndex: number) => void
   onDeletePlanned: (pw: PlannedWorkout) => void
   user: User
   reloadPlanned: () => void
@@ -4009,7 +4062,7 @@ function PlansSection({
   const [createPlanDescription, setCreatePlanDescription] = useState('')
   const [createPlanBusy, setCreatePlanBusy] = useState(false)
   const [createPlanError, setCreatePlanError] = useState<string | null>(null)
-  const todayYmd = toYYYYMMDD(new Date())
+  const todayYmd = getLocalYYYYMMDD(new Date())
   const [createDate, setCreateDate] = useState<string>(() => todayYmd)
   const [createMode, setCreateMode] = useState<number>(1)
   const [createOptions, setCreateOptions] = useState<
@@ -4020,10 +4073,14 @@ function PlansSection({
 
   const [planMoreMenuOpen, setPlanMoreMenuOpen] = useState(false)
   const [planDeleteConfirmOpen, setPlanDeleteConfirmOpen] = useState(false)
+  const [expandedPlannedWorkoutId, setExpandedPlannedWorkoutId] = useState<string | null>(null)
+  const [draggedPlanned, setDraggedPlanned] = useState<{ dateKey: string; index: number } | null>(null)
+  const [plannedDropIndicator, setPlannedDropIndicator] = useState<{ dateKey: string; beforeIndex: number } | null>(null)
   const [plannedWorkoutMenuId, setPlannedWorkoutMenuId] = useState<string | null>(null)
+  const [plannedWorkoutMenuAnchorRect, setPlannedWorkoutMenuAnchorRect] = useState<DOMRect | null>(null)
   const [copyPlannedWorkout, setCopyPlannedWorkout] = useState<PlannedWorkout | null>(null)
   const [copyTargetPlanId, setCopyTargetPlanId] = useState<string>('')
-  const [copyTargetDay, setCopyTargetDay] = useState<string>(() => toYYYYMMDD(new Date()))
+  const [copyTargetDay, setCopyTargetDay] = useState<string>(() => getLocalYYYYMMDD(new Date()))
   const [copyBusy, setCopyBusy] = useState(false)
   const [copyError, setCopyError] = useState<string | null>(null)
   const [movePlannedWorkout, setMovePlannedWorkout] = useState<PlannedWorkout | null>(null)
@@ -4041,12 +4098,12 @@ function PlansSection({
   const [dropIndicatorBeforeIndex, setDropIndicatorBeforeIndex] = useState<number | null>(null)
   const [optimisticOrderedIds, setOptimisticOrderedIds] = useState<string[] | null>(null)
 
-  /** Reorder: remove item at fromIndex, insert so it ends up at toIndex. */
+  /** Reorder: toIndex = gap index (0..n). Insert at toIndex when moving up, toIndex-1 when moving down. */
   function reorderIds(ids: string[], fromIndex: number, toIndex: number): string[] {
     if (fromIndex === toIndex) return ids
     const list = [...ids]
     const [removed] = list.splice(fromIndex, 1)
-    const insertAt = toIndex > fromIndex + 1 ? toIndex - 1 : toIndex
+    const insertAt = toIndex > fromIndex ? toIndex - 1 : toIndex
     list.splice(Math.max(0, Math.min(insertAt, list.length)), 0, removed)
     return list
   }
@@ -4089,7 +4146,7 @@ function PlansSection({
   const maxP = maxPlans ?? UNLIMITED
   const planCount = plansCount ?? 0
   const atPlansLimit = maxP < UNLIMITED && planCount >= maxP
-  const plansLabel = maxP >= UNLIMITED ? `(${plans.length})` : `(${planCount} / ${maxP})`
+  const plansLabel = maxP >= UNLIMITED ? `(${plans.length})` : `(${planCount}/${maxP})`
 
   const tier = subscriptionTier ?? 'basic'
   const isPro = tier === 'pro'
@@ -4187,6 +4244,7 @@ function PlansSection({
         throw new Error(data.error || 'Failed to update workout schedule')
       }
       setEditSchedulePlannedWorkout(null)
+      setExpandedPlannedWorkoutId(null)
       reloadPlanned()
     } catch (e) {
       setEditScheduleError(e instanceof Error ? e.message : 'Failed to update workout schedule')
@@ -4317,6 +4375,8 @@ function PlansSection({
     setCreateBusy(true)
     setCreateError(null)
     try {
+      const dayKey = createDate.slice(0, 10)
+      const ordinal = (byDay[dayKey] ?? []).length
       const res = await authedFetch(
         `/api/app/plans/${encodeURIComponent(selectedPlan.id)}/planned-workouts`,
         {
@@ -4324,9 +4384,10 @@ function PlansSection({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             day: createDate,
-            ordinal: 0,
+            ordinal,
             workout: workoutToPlanDayEntry(workout),
             sourceWorkoutId: workout.id,
+            clientToday: todayYmd,
           }),
         }
       )
@@ -4356,6 +4417,8 @@ function PlansSection({
     setCreateBusy(true)
     try {
       const workout = buildWorkoutFromCreateForm(createMode, createOptions)
+      const dayKey = createDate.slice(0, 10)
+      const ordinal = (byDay[dayKey] ?? []).length
       const res = await authedFetch(
         `/api/app/plans/${encodeURIComponent(
           selectedPlan.id
@@ -4365,8 +4428,9 @@ function PlansSection({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             day: createDate,
-            ordinal: 0,
+            ordinal,
             workout,
+            clientToday: todayYmd,
           }),
         }
       )
@@ -4476,10 +4540,6 @@ function PlansSection({
                       const rect = e.currentTarget.getBoundingClientRect()
                       const midY = rect.top + rect.height / 2
                       const insertBefore = e.clientY < midY ? index : index + 1
-                      if (insertBefore === draggedPlanIndex) {
-                        setDropIndicatorBeforeIndex(null)
-                        return
-                      }
                       setDropIndicatorBeforeIndex(insertBefore)
                     }}
                     onDrop={(e) => {
@@ -4488,6 +4548,8 @@ function PlansSection({
                       const draggedId = e.dataTransfer.getData('text/plain')
                       if (!draggedId || !onReorderPlans) return
                       const currentIds = optimisticOrderedIds ?? plans.map((plan) => plan.id)
+                      const fromIndex = currentIds.indexOf(draggedId)
+                      if (fromIndex === -1) return
                       const rect = e.currentTarget.getBoundingClientRect()
                       const midY = rect.top + rect.height / 2
                       const toIndex = dropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
@@ -4599,17 +4661,21 @@ function PlansSection({
                     >
                       Edit plan
                     </button>
-                    <div className="my-1 border-t border-gray-200" aria-hidden />
-                    <button
-                      type="button"
-                      className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
-                      onClick={() => {
-                        setPlanMoreMenuOpen(false)
-                        setPlanDeleteConfirmOpen(true)
-                      }}
-                    >
-                      Delete plan
-                    </button>
+                    {selectedPlan.id !== 'personal' && (
+                      <>
+                        <div className="my-1 border-t border-gray-200" aria-hidden />
+                        <button
+                          type="button"
+                          className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
+                          onClick={() => {
+                            setPlanMoreMenuOpen(false)
+                            setPlanDeleteConfirmOpen(true)
+                          }}
+                        >
+                          Delete plan
+                        </button>
+                      </>
+                    )}
                   </div>
                 </>
               )}
@@ -4625,16 +4691,24 @@ function PlansSection({
                 ← Prev
               </button>
               <span className="text-xs text-gray-600">
-                {new Date(weekStart + 'T12:00:00').toLocaleDateString(
-                  undefined,
-                  { month: 'short', day: 'numeric', year: 'numeric' }
-                )}{' '}
-                –{' '}
-                {new Date(weekEnd + 'T12:00:00').toLocaleDateString(undefined, {
-                  month: 'short',
-                  day: 'numeric',
-                  year: 'numeric',
-                })}
+                {planViewMode === '1day'
+                  ? new Date(weekStart + 'T12:00:00').toLocaleDateString(undefined, {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                    })
+                  : <>
+                      {new Date(weekStart + 'T12:00:00').toLocaleDateString(
+                        undefined,
+                        { month: 'short', day: 'numeric', year: 'numeric' }
+                      )}{' '}
+                      –{' '}
+                      {new Date(weekEnd + 'T12:00:00').toLocaleDateString(undefined, {
+                        month: 'short',
+                        day: 'numeric',
+                        year: 'numeric',
+                      })}
+                    </>}
               </span>
               <button
                 type="button"
@@ -4656,15 +4730,7 @@ function PlansSection({
             </div>
           )}
           {selectedPlan && !plansLoading && (
-            <div
-              className={`grid grid-cols-1 divide-y md:divide-y-0 md:divide-x divide-gray-200 ${
-                planDayCount === 1
-                  ? 'md:grid-cols-1'
-                  : planDayCount === 3
-                    ? 'md:grid-cols-3'
-                    : 'md:grid-cols-7'
-              }`}
-            >
+            <div className="grid grid-cols-1 divide-y divide-gray-200">
               {Array.from({ length: planDayCount }, (_, i) => {
                 const dateKey = addDays(weekStart, i)
                 const items = byDay[dateKey] ?? []
@@ -4674,64 +4740,249 @@ function PlansSection({
                 })
                 return (
                   <div key={dateKey} className="min-h-[140px] flex flex-col">
-                    <div className="px-3 py-2 bg-gymnext-background border-b border-gymnext-muted/30 text-center">
-                      <div className="text-[11px] font-medium uppercase text-gray-700">
-                        {dayName}
+                    <div className="px-3 py-2 bg-gymnext-background border-b border-gymnext-muted/30 flex items-center gap-2">
+                      <div className="flex-1 min-w-0" aria-hidden />
+                      <div className="text-center shrink-0">
+                        <div className="text-[11px] font-medium uppercase text-gray-700">
+                          {dayName}
+                        </div>
+                        <div className="text-xs font-medium text-gray-900">
+                          {dayDate.toLocaleDateString(undefined, {
+                            month: 'short',
+                            day: 'numeric',
+                          })}
+                        </div>
                       </div>
-                      <div className="text-xs font-medium text-gray-900">
-                        {dayDate.toLocaleDateString(undefined, {
-                          month: 'short',
-                          day: 'numeric',
-                        })}
+                      <div className="flex-1 min-w-0 flex justify-end">
+                        {dateKey >= todayYmd && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCreateDate(dateKey)
+                              setAddWorkoutSource('choice')
+                              setExpandedCollectionId(null)
+                              setCreateError(null)
+                              setCreateOpen(true)
+                            }}
+                            className="shrink-0 rounded px-2 py-1 text-[11px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+                            style={{ backgroundColor: '#6B21A8' }}
+                          >
+                            Add workout
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <div className="p-2 flex-1 space-y-2">
+                    <div className="p-2 flex-1 space-y-0">
                       {items.length === 0 && dateKey < todayYmd && (
-                        <p className="text-[11px] text-gray-400 italic">
+                        <p className="text-[11px] text-gray-400 italic px-1 py-2">
                           Rest day
                         </p>
                       )}
-                      {items.length > 0 &&
-                        items.map((pw, index) => {
+                      {items.length > 0 && (
+                        <ul
+                          className=""
+                          onDragOver={(e) => {
+                            e.preventDefault()
+                            e.dataTransfer.dropEffect = 'move'
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            const raw = e.dataTransfer.getData('text/plain')
+                            if (!raw) return
+                            let dateKeyDrag: string
+                            let fromIndex: number
+                            try {
+                              const parsed = JSON.parse(raw) as { dateKey: string; index: number }
+                              dateKeyDrag = parsed.dateKey
+                              fromIndex = parsed.index
+                            } catch {
+                              return
+                            }
+                            if (dateKeyDrag !== dateKey) {
+                              setDraggedPlanned(null)
+                              setPlannedDropIndicator(null)
+                              return
+                            }
+                            const toIndex =
+                              plannedDropIndicator?.dateKey === dateKey
+                                ? plannedDropIndicator.beforeIndex
+                                : items.length
+                            setDraggedPlanned(null)
+                            setPlannedDropIndicator(null)
+                            onPlannedWorkoutDrop(dateKey, fromIndex, toIndex)
+                          }}
+                        >
+                          {items.map((pw, index) => {
                           const w = pw.workout
                           const barColor = getWorkoutBarColor(w)
                           const isPast = dateKey < todayYmd
+                          const isDragging =
+                            draggedPlanned?.dateKey === dateKey && draggedPlanned?.index === index
                           return (
-                            <div
-                              key={pw.id}
-                              className="rounded border border-gymnext-muted/30 bg-white shadow-sm relative"
-                            >
-                              <div
-                                className="px-2 py-1.5 flex items-center justify-between gap-2"
-                                style={{ backgroundColor: barColor, color: '#fff' }}
+                            <Fragment key={pw.id}>
+                              {/* Drop zone above this row: overlaps row above so no visible gap when not dragging */}
+                              <li
+                                className={`flex items-center list-none border-t-0 -mt-1 pt-1 ${plannedDropIndicator?.dateKey === dateKey && plannedDropIndicator.beforeIndex === index ? 'px-3 pb-1 relative z-10' : 'px-3'}`}
+                                aria-hidden
+                                onDragOver={(ev) => {
+                                  if (isPast) return
+                                  ev.preventDefault()
+                                  ev.stopPropagation()
+                                  ev.dataTransfer.dropEffect = 'move'
+                                  if (draggedPlanned && draggedPlanned.dateKey === dateKey) {
+                                    setPlannedDropIndicator({ dateKey, beforeIndex: index })
+                                  }
+                                }}
+                                onDrop={(ev) => {
+                                  ev.preventDefault()
+                                  ev.stopPropagation()
+                                  const raw = ev.dataTransfer.getData('text/plain')
+                                  if (!raw) return
+                                  try {
+                                    const parsed = JSON.parse(raw) as { dateKey: string; index: number }
+                                    if (parsed.dateKey !== dateKey) return
+                                    const toIndex = index
+                                    setDraggedPlanned(null)
+                                    setPlannedDropIndicator(null)
+                                    onPlannedWorkoutDrop(dateKey, parsed.index, toIndex)
+                                  } catch {
+                                    setDraggedPlanned(null)
+                                    setPlannedDropIndicator(null)
+                                  }
+                                }}
                               >
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-xs font-medium truncate">
+                                <div className={`flex-1 min-w-0 rounded-full ${plannedDropIndicator?.dateKey === dateKey && plannedDropIndicator.beforeIndex === index ? 'h-1 bg-[#6B21A8]' : 'min-h-0 h-0 overflow-hidden'}`} />
+                              </li>
+                              <li
+                                className={`pl-1 pr-3 py-2 flex items-center gap-3 border-l-8 bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${isDragging ? 'opacity-50' : ''} hover:bg-gymnext-background/50`}
+                                style={{ borderLeftColor: barColor }}
+                                data-index={index}
+                                onDragOver={(e) => {
+                                  if (isPast) return
+                                  e.preventDefault()
+                                  e.dataTransfer.dropEffect = 'move'
+                                  if (draggedPlanned === null) return
+                                  if (draggedPlanned.dateKey !== dateKey) return
+                                  const rect = e.currentTarget.getBoundingClientRect()
+                                  const midY = rect.top + rect.height / 2
+                                  const insertBefore = e.clientY < midY ? index : index + 1
+                                  setPlannedDropIndicator({ dateKey, beforeIndex: insertBefore })
+                                }}
+                                onDrop={(e) => {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                  const raw = e.dataTransfer.getData('text/plain')
+                                  if (!raw) return
+                                  try {
+                                    const parsed = JSON.parse(raw) as { dateKey: string; index: number }
+                                    if (parsed.dateKey !== dateKey) {
+                                      setDraggedPlanned(null)
+                                      setPlannedDropIndicator(null)
+                                      return
+                                    }
+                                    const rect = e.currentTarget.getBoundingClientRect()
+                                    const midY = rect.top + rect.height / 2
+                                    const toIndex = plannedDropIndicator?.dateKey === dateKey
+                                      ? plannedDropIndicator.beforeIndex
+                                      : e.clientY < midY ? index : index + 1
+                                    setDraggedPlanned(null)
+                                    setPlannedDropIndicator(null)
+                                    onPlannedWorkoutDrop(dateKey, parsed.index, toIndex)
+                                  } catch {
+                                    setDraggedPlanned(null)
+                                    setPlannedDropIndicator(null)
+                                  }
+                                }}
+                              >
+                                {!isPast ? (
+                                  <span
+                                    draggable
+                                    onDragStart={(e) => {
+                                      e.dataTransfer.effectAllowed = 'move'
+                                      e.dataTransfer.setData(
+                                        'text/plain',
+                                        JSON.stringify({ dateKey, index })
+                                      )
+                                      setDraggedPlanned({ dateKey, index })
+                                      setPlannedDropIndicator(null)
+                                    }}
+                                    onDragEnd={() => {
+                                      setDraggedPlanned(null)
+                                      setPlannedDropIndicator(null)
+                                    }}
+                                    className="w-6 shrink-0 flex items-center justify-center text-gray-400 cursor-grab active:cursor-grabbing touch-none text-[10px]"
+                                    aria-hidden
+                                    title="Drag to reorder"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    ⋮⋮
+                                  </span>
+                                ) : (
+                                  <span
+                                    className="w-6 shrink-0 flex items-center justify-center text-gray-400 text-[10px] select-none"
+                                    aria-hidden
+                                  >
+                                    ⋮⋮
+                                  </span>
+                                )}
+                                <div
+                                  className="min-w-0 flex-1 py-0.5 cursor-pointer"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    if (isPast) return
+                                    if (expandedPlannedWorkoutId === pw.id) {
+                                      setExpandedPlannedWorkoutId(null)
+                                      setEditSchedulePlannedWorkout(null)
+                                    } else {
+                                      setExpandedPlannedWorkoutId(pw.id)
+                                      openEditSchedulePlanned(pw)
+                                    }
+                                  }}
+                                >
+                                  <div className="text-sm font-medium text-gray-900">
                                     {getWorkoutDisplayName(w) || 'Workout'}
-                                  </p>
-                                  <p className="text-[11px] opacity-90 truncate">
-                                    {(w.workoutDescription ?? (getWorkoutDisplayDescription(w) || '')).trim() || '—'}
-                                  </p>
+                                  </div>
+                                  <div className="text-sm text-gray-600 mt-0.5">
+                                    {((w.workoutDescription ?? getWorkoutDisplayDescription(w)) || '').trim() || '—'}
+                                  </div>
                                 </div>
                                 <div className="shrink-0 relative" onClick={(e) => e.stopPropagation()}>
                                   <button
                                     type="button"
-                                    onClick={() => setPlannedWorkoutMenuId((id) => (id === pw.id ? null : pw.id))}
-                                    className="h-6 w-6 inline-flex items-center justify-center rounded hover:bg-white/20 text-[14px] font-medium leading-none"
-                                    style={{ color: 'inherit' }}
+                                    onClick={(e) => {
+                                      const rect = e.currentTarget.getBoundingClientRect()
+                                      if (plannedWorkoutMenuId === pw.id) {
+                                        setPlannedWorkoutMenuId(null)
+                                        setPlannedWorkoutMenuAnchorRect(null)
+                                      } else {
+                                        setPlannedWorkoutMenuId(pw.id)
+                                        setPlannedWorkoutMenuAnchorRect(rect)
+                                      }
+                                    }}
+                                    className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
                                     aria-label="More options"
                                     aria-expanded={plannedWorkoutMenuId === pw.id}
                                   >
                                     ⋯
                                   </button>
-                                  {plannedWorkoutMenuId === pw.id && (
+                                  {plannedWorkoutMenuId === pw.id && plannedWorkoutMenuAnchorRect && typeof document !== 'undefined' && createPortal(
                                     <>
                                       <div
-                                        className="fixed inset-0 z-40"
+                                        className="fixed inset-0 z-[100]"
                                         aria-hidden
-                                        onClick={() => setPlannedWorkoutMenuId(null)}
+                                        onClick={() => {
+                                          setPlannedWorkoutMenuId(null)
+                                          setPlannedWorkoutMenuAnchorRect(null)
+                                        }}
                                       />
-                                      <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                                      <div
+                                        className="fixed z-[101] w-[185px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+                                        style={{
+                                          top: plannedWorkoutMenuAnchorRect.bottom + 4,
+                                          right: typeof window !== 'undefined' ? window.innerWidth - plannedWorkoutMenuAnchorRect.right : 0,
+                                        }}
+                                      >
                                         {!isPast && (
                                           <>
                                         <button
@@ -4739,20 +4990,11 @@ function PlansSection({
                                           className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
                                           onClick={() => {
                                             setPlannedWorkoutMenuId(null)
+                                            setPlannedWorkoutMenuAnchorRect(null)
                                             openEditPlanned(pw)
                                           }}
                                         >
-                                          Edit
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                                          onClick={() => {
-                                            setPlannedWorkoutMenuId(null)
-                                            openEditSchedulePlanned(pw)
-                                          }}
-                                        >
-                                          Modify workout details
+                                          Edit workout
                                         </button>
                                         </>
                                         )}
@@ -4761,6 +5003,7 @@ function PlansSection({
                                           className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
                                           onClick={() => {
                                             setPlannedWorkoutMenuId(null)
+                                            setPlannedWorkoutMenuAnchorRect(null)
                                             setCopyPlannedWorkout(pw)
                                             setCopyTargetPlanId(plans[0]?.id ?? '')
                                             setCopyTargetDay(todayYmd)
@@ -4776,6 +5019,7 @@ function PlansSection({
                                           className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
                                           onClick={() => {
                                             setPlannedWorkoutMenuId(null)
+                                            setPlannedWorkoutMenuAnchorRect(null)
                                             setMovePlannedWorkout(pw)
                                             setMoveTargetDay((pw.day || '').slice(0, 10))
                                             setMoveError(null)
@@ -4789,6 +5033,7 @@ function PlansSection({
                                           className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
                                           onClick={() => {
                                             setPlannedWorkoutMenuId(null)
+                                            setPlannedWorkoutMenuAnchorRect(null)
                                             setDeletePlannedConfirmWorkout(pw)
                                           }}
                                         >
@@ -4797,69 +5042,87 @@ function PlansSection({
                                         </>
                                         )}
                                       </div>
-                                    </>
+                                    </>,
+                                    document.body
                                   )}
                                 </div>
-                              </div>
-                              {!isPast && (
-                              <div className="px-2 py-1 flex items-center justify-center gap-1 border-b border-gray-100">
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    onReorderPlanned(dateKey, index, 'up')
-                                  }}
-                                  className="h-6 w-6 inline-flex items-center justify-center rounded border border-gymnext-muted/50 text-gray-600 hover:bg-gymnext-background text-[10px]"
-                                  aria-label="Move up"
-                                >
-                                  ↑
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    onReorderPlanned(dateKey, index, 'down')
-                                  }}
-                                  className="h-6 w-6 inline-flex items-center justify-center rounded border border-gymnext-muted/50 text-gray-600 hover:bg-gymnext-background text-[10px]"
-                                  aria-label="Move down"
-                                >
-                                  ↓
-                                </button>
-                              </div>
+                              </li>
+                              {expandedPlannedWorkoutId === pw.id && (
+                                <li className="border-t border-gray-200 bg-gray-50/80 list-none">
+                                  <div className="p-4">
+                                    <h4 className="text-sm font-semibold text-gray-800 mb-2">Edit workout schedule</h4>
+                                    <form onSubmit={handleSaveEditSchedule} className="space-y-4">
+                                      <CreateWorkoutOptions
+                                        mode={editScheduleMode}
+                                        options={editScheduleOptions}
+                                        onChange={setEditScheduleOptions}
+                                        parseDurationInput={parseDurationInput}
+                                      />
+                                      {editScheduleError && <p className="text-xs text-red-600">{editScheduleError}</p>}
+                                      <div className="flex justify-end gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setExpandedPlannedWorkoutId(null)
+                                            setEditSchedulePlannedWorkout(null)
+                                            setEditScheduleError(null)
+                                          }}
+                                          disabled={editScheduleBusy}
+                                          className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                                        >
+                                          Cancel
+                                        </button>
+                                        <button
+                                          type="submit"
+                                          disabled={editScheduleBusy || !hasValidDurationForMode(editScheduleMode, editScheduleOptions, parseDurationInput)}
+                                          className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
+                                          style={{ backgroundColor: '#6B21A8' }}
+                                        >
+                                          {editScheduleBusy ? 'Saving…' : 'Save'}
+                                        </button>
+                                      </div>
+                                    </form>
+                                  </div>
+                                </li>
                               )}
-                              {isPast ? (
-                                <div className="w-full text-left px-2 py-1.5 block">
-                                  <p className="text-[11px] text-gray-600 line-clamp-2">
-                                    {getScheduleDisplayDescription(w) || '—'}
-                                  </p>
-                                </div>
-                              ) : (
-                              <button
-                                type="button"
-                                onClick={() => openEditSchedulePlanned(pw)}
-                                className="w-full text-left px-2 py-1.5 block hover:bg-gray-50 focus:bg-gray-50 focus:outline-none"
-                              >
-                                <p className="text-[11px] text-gray-600 line-clamp-2">
-                                  {getScheduleDisplayDescription(w) || '—'}
-                                </p>
-                              </button>
-                              )}
-                            </div>
+                            </Fragment>
                           )
                         })}
-                      {dateKey >= todayYmd && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setCreateDate(dateKey)
-                            setAddWorkoutSource('choice')
-                            setExpandedCollectionId(null)
-                            setCreateOpen(true)
-                          }}
-                          className="text-[11px] text-gymnext-dark hover:text-gymnext hover:underline text-left"
-                        >
-                          Add workout
-                        </button>
+                              {/* Drop zone after last row: overlaps row above so no visible gap when not dragging */}
+                              <li
+                                className={`flex items-center list-none border-t-0 -mt-1 pt-1 ${plannedDropIndicator?.dateKey === dateKey && plannedDropIndicator.beforeIndex === items.length ? 'px-3 pb-1 relative z-10' : 'px-3'}`}
+                                aria-hidden
+                                onDragOver={(ev) => {
+                                  if (dateKey >= todayYmd) {
+                                    ev.preventDefault()
+                                    ev.stopPropagation()
+                                    ev.dataTransfer.dropEffect = 'move'
+                                    if (draggedPlanned && draggedPlanned.dateKey === dateKey) {
+                                      setPlannedDropIndicator({ dateKey, beforeIndex: items.length })
+                                    }
+                                  }
+                                }}
+                                onDrop={(ev) => {
+                                  ev.preventDefault()
+                                  ev.stopPropagation()
+                                  const raw = ev.dataTransfer.getData('text/plain')
+                                  if (!raw) return
+                                  try {
+                                    const parsed = JSON.parse(raw) as { dateKey: string; index: number }
+                                    if (parsed.dateKey !== dateKey) return
+                                    const toIndex = items.length
+                                    setDraggedPlanned(null)
+                                    setPlannedDropIndicator(null)
+                                    onPlannedWorkoutDrop(dateKey, parsed.index, toIndex)
+                                  } catch {
+                                    setDraggedPlanned(null)
+                                    setPlannedDropIndicator(null)
+                                  }
+                                }}
+                              >
+                                <div className={`flex-1 min-w-0 rounded-full ${plannedDropIndicator?.dateKey === dateKey && plannedDropIndicator.beforeIndex === items.length ? 'h-1 bg-[#6B21A8]' : 'min-h-0 h-0 overflow-hidden'}`} />
+                              </li>
+                        </ul>
                       )}
                     </div>
                   </div>
@@ -4917,6 +5180,11 @@ function PlansSection({
               </p>
             </div>
             <div className="p-4 space-y-4 overflow-y-auto min-h-0">
+              {(addWorkoutSource === 'favorites' || addWorkoutSource === 'collection' || addWorkoutSource === 'createNew') && (createError || plannedDateRestrictionMessage) && (
+                <div className="text-xs text-red-600 rounded border border-red-200 bg-red-50 px-3 py-2">
+                  {createError ?? plannedDateRestrictionMessage}
+                </div>
+              )}
               {addWorkoutSource === 'choice' && (
                 <>
                   <div className="space-y-2">
@@ -4995,7 +5263,13 @@ function PlansSection({
                                   : 'border-gray-200 hover:bg-gray-50'
                               }`}
                               style={{
-                                ...(isSelected ? { borderColor: '#6B21A8' } : {}),
+                                ...(isSelected
+                                  ? {
+                                      borderTopColor: '#6B21A8',
+                                      borderRightColor: '#6B21A8',
+                                      borderBottomColor: '#6B21A8',
+                                    }
+                                  : {}),
                                 borderLeftWidth: 4,
                                 borderLeftColor: barColor,
                               }}
@@ -5011,16 +5285,18 @@ function PlansSection({
                     )}
                   </ul>
                   {selectedWorkoutForPlan && (
-                    <div className="flex justify-end pt-2 border-t border-gray-200 mt-2">
-                      <button
-                        type="button"
-                        onClick={() => addPlannedFromWorkout(selectedWorkoutForPlan)}
-                        disabled={createBusy}
-                        className="rounded px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
-                        style={{ backgroundColor: '#6B21A8' }}
-                      >
-                        {createBusy ? 'Adding…' : 'Confirm'}
-                      </button>
+                    <div className="pt-2 border-t border-gray-200 mt-2 space-y-2">
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => addPlannedFromWorkout(selectedWorkoutForPlan)}
+                          disabled={createBusy}
+                          className="rounded px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                          style={{ backgroundColor: '#6B21A8' }}
+                        >
+                          {createBusy ? 'Adding…' : 'Confirm'}
+                        </button>
+                      </div>
                     </div>
                   )}
                 </>
@@ -5074,7 +5350,13 @@ function PlansSection({
                                               : 'border-gray-200 bg-white hover:bg-gray-50'
                                           }`}
                                           style={{
-                                            ...(isSelected ? { borderColor: '#6B21A8' } : {}),
+                                            ...(isSelected
+                                              ? {
+                                                  borderTopColor: '#6B21A8',
+                                                  borderRightColor: '#6B21A8',
+                                                  borderBottomColor: '#6B21A8',
+                                                }
+                                              : {}),
                                             borderLeftWidth: 4,
                                             borderLeftColor: barColor,
                                           }}
@@ -5096,16 +5378,18 @@ function PlansSection({
                     )}
                   </ul>
                   {selectedWorkoutForPlan && (
-                    <div className="flex justify-end pt-2 border-t border-gray-200 mt-2">
-                      <button
-                        type="button"
-                        onClick={() => addPlannedFromWorkout(selectedWorkoutForPlan)}
-                        disabled={createBusy}
-                        className="rounded px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
-                        style={{ backgroundColor: '#6B21A8' }}
-                      >
-                        {createBusy ? 'Adding…' : 'Confirm'}
-                      </button>
+                    <div className="pt-2 border-t border-gray-200 mt-2 space-y-2">
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => addPlannedFromWorkout(selectedWorkoutForPlan)}
+                          disabled={createBusy}
+                          className="rounded px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                          style={{ backgroundColor: '#6B21A8' }}
+                        >
+                          {createBusy ? 'Adding…' : 'Confirm'}
+                        </button>
+                      </div>
                     </div>
                   )}
                 </>
@@ -5148,9 +5432,6 @@ function PlansSection({
                     onChange={setCreateOptions}
                     parseDurationInput={parseDurationInput}
                   />
-                  {createError && (
-                    <div className="text-xs text-red-600">{createError}</div>
-                  )}
                   <div className="flex justify-end gap-2 pt-1">
                     <button
                       type="button"
@@ -5421,7 +5702,7 @@ function PlansSection({
         </div>
       )}
 
-      {editSchedulePlannedWorkout && (
+      {editSchedulePlannedWorkout && !expandedPlannedWorkoutId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
             className="absolute inset-0 bg-black/50"
@@ -5580,8 +5861,26 @@ function PlansSection({
 
 // --- Shared helpers for plans ---
 
+/** Returns YYYY-MM-DD in UTC (for consistent date math with addDays / API). */
 function toYYYYMMDD(d: Date): string {
   return d.toISOString().slice(0, 10)
+}
+
+/** Returns YYYY-MM-DD in the user's local timezone (for "today" and past/future comparisons). */
+function getLocalYYYYMMDD(d: Date): string {
+  const y = d.getFullYear()
+  const m = d.getMonth() + 1
+  const day = d.getDate()
+  return `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+/** Returns the Monday of the given week in the user's local timezone (YYYY-MM-DD). */
+function getMondayOfWeekLocal(date: Date): string {
+  const d = new Date(date)
+  const day = d.getDay()
+  const diff = day === 0 ? -6 : 1 - day
+  d.setDate(d.getDate() + diff)
+  return getLocalYYYYMMDD(d)
 }
 
 function getMondayOfWeek(date: Date): string {
@@ -5592,10 +5891,12 @@ function getMondayOfWeek(date: Date): string {
   return toYYYYMMDD(d)
 }
 
+/** Add days to a YYYY-MM-DD string, interpreting and returning dates in the user's local timezone (so grid dates match "today"). */
 function addDays(ymd: string, days: number): string {
-  const d = new Date(ymd + 'T12:00:00.000Z')
-  d.setUTCDate(d.getUTCDate() + days)
-  return toYYYYMMDD(d)
+  const [y, m, day] = ymd.split('-').map(Number)
+  const d = new Date(y, m - 1, day)
+  d.setDate(d.getDate() + days)
+  return getLocalYYYYMMDD(d)
 }
 
 const DAY_NAMES = [

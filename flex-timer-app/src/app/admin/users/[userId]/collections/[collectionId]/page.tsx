@@ -201,7 +201,7 @@ export default function AdminCollectionDetailPage() {
 
   const buildWorkoutFromCreateForm = useCallback((): { timerMode: number; workoutSchedule: string; direction: boolean } => {
     const schedule: Record<string, unknown> = { timerMode: createMode }
-    const dir = createOptions.direction === true || createOptions.direction === 'true'
+    const dir = String(createOptions.direction ?? '') === 'true'
     const num = (key: string) => {
       const v = createOptions[key]
       if (typeof v === 'number') return v

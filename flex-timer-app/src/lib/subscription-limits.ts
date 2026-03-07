@@ -65,23 +65,29 @@ function parseTimestamp(v: unknown): number | null {
 
 /**
  * Resolve the user's subscription tier from RevenueCat (and user doc fallback), then return limits.
+ * On any failure (network, Firestore, etc.) returns basic limits so the app does not 500.
  */
 export async function getSubscriptionLimits(userId: string): Promise<SubscriptionLimits> {
-  const [revenueCat, userDoc] = await Promise.all([
-    getRevenueCatCustomer(userId),
-    getUserDocument(userId),
-  ])
+  try {
+    const [revenueCat, userDoc] = await Promise.all([
+      getRevenueCatCustomer(userId),
+      getUserDocument(userId),
+    ])
 
-  const hasPro = revenueCat?.activeEntitlementIds?.some(
-    (id) => id === 'pro' || id === 'pro_plus'
-  )
-  const hasClassic = revenueCat?.activeEntitlementIds?.some((id) => id === 'classic')
+    const hasPro = revenueCat?.activeEntitlementIds?.some(
+      (id) => id === 'pro' || id === 'pro_plus'
+    )
+    const hasClassic = revenueCat?.activeEntitlementIds?.some((id) => id === 'classic')
 
-  if (hasPro) return LIMITS_PRO
-  if (hasClassic) return LIMITS_CLASSIC
-  if (revenueCat != null && (revenueCat.activeEntitlementIds.length > 0 || revenueCat.activeProductIds.length > 0)) {
+    if (hasPro) return LIMITS_PRO
+    if (hasClassic) return LIMITS_CLASSIC
+    if (revenueCat != null && (revenueCat.activeEntitlementIds.length > 0 || revenueCat.activeProductIds.length > 0)) {
+      return LIMITS_BASIC
+    }
+    const fallbackTier = getTierFallback(userDoc)
+    return fallbackTier === 'classic' ? LIMITS_CLASSIC : LIMITS_BASIC
+  } catch (err) {
+    console.error('[getSubscriptionLimits]', userId, err)
     return LIMITS_BASIC
   }
-  const fallbackTier = getTierFallback(userDoc)
-  return fallbackTier === 'classic' ? LIMITS_CLASSIC : LIMITS_BASIC
 }

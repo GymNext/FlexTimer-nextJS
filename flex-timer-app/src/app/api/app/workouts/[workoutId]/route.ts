@@ -5,7 +5,9 @@ import {
   clearWorkoutDeletedAt,
   deleteWorkout,
   getWorkoutById,
+  getUserWorkoutCollections,
   setWorkoutDeletedAt,
+  updateCollectionWorkoutIds,
   updateWorkoutMetadata,
   updateWorkoutSingleSegment,
   updateWorkoutMultiSegment,
@@ -187,6 +189,13 @@ export async function PATCH(
     }
 
     await setWorkoutDeletedAt(uid, workoutId)
+    const collections = await getUserWorkoutCollections(uid)
+    for (const c of collections) {
+      if (c.deletedAt) continue
+      if (!(c.workoutIds ?? []).includes(workoutId)) continue
+      const cleaned = (c.workoutIds ?? []).filter((id) => id !== workoutId)
+      await updateCollectionWorkoutIds(uid, c.id, cleaned)
+    }
     return NextResponse.json({ ok: true })
   } catch (err) {
     console.error('[app workout PATCH]', err)

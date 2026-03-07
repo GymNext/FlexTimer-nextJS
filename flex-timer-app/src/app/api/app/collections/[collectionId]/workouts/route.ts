@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUserAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
-import { addWorkoutToCollection, createWorkout, getCollectionById } from '@/lib/firestore'
+import { addWorkoutToCollection, createWorkout, getCollectionById, getWorkoutsByIds } from '@/lib/firestore'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
 
 type RouteParams = Promise<{ collectionId: string }>
@@ -45,7 +45,8 @@ export async function POST(
 
     if (collectionId === 'favorite') {
       const limits = await getSubscriptionLimits(uid)
-      const currentCount = collection.workoutIds?.length ?? 0
+      const favoriteWorkouts = await getWorkoutsByIds(uid, collection.workoutIds ?? [])
+      const currentCount = favoriteWorkouts.filter((w) => !w.deletedAt).length
       if (currentCount >= limits.maxFavorites) {
         return NextResponse.json(
           {
