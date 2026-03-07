@@ -421,10 +421,15 @@ export async function deleteCollection(userId: string, collectionId: string): Pr
   await ref.delete()
 }
 
-/** Create a SingleSegmentWorkout in users/<userId>/workouts. data: { timerMode, workoutSchedule (string), direction? }. */
+/** Create a SingleSegmentWorkout in users/<userId>/workouts. data: { timerMode, workoutSchedule (string), direction?, restDirection? }. */
 export async function createWorkout(
   userId: string,
-  data: { timerMode: number; workoutSchedule: string; direction?: boolean }
+  data: {
+    timerMode: number
+    workoutSchedule: string
+    direction?: boolean
+    restDirection?: number
+  }
 ): Promise<Workout> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const id = randomUUID()
@@ -433,6 +438,8 @@ export async function createWorkout(
     .doc(userId)
     .collection(USER_COLLECTIONS.workouts)
     .doc(id)
+  const restDirection =
+    typeof data.restDirection === 'number' ? data.restDirection : 0
   await ref.set({
     type: 'SingleSegmentWorkout',
     userId,
@@ -448,9 +455,34 @@ export async function createWorkout(
     segue: false,
     warnings: [],
     metronome: 0,
-    restDirection: 0,
+    restDirection,
     warningStrategy: 0,
     continuity: false,
+  })
+  const created = await getWorkoutById(userId, id)
+  if (!created) throw new Error('Failed to read created workout')
+  return created
+}
+
+/** Create an empty MultiSegmentWorkout in users/<userId>/workouts. */
+export async function createMultiSegmentWorkout(userId: string): Promise<Workout> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const id = randomUUID()
+  const ref = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(id)
+  await ref.set({
+    type: 'MultiSegmentWorkout',
+    userId,
+    workoutId: id,
+    workoutShareId: '',
+    workoutName: null,
+    workoutDescription: null,
+    workoutImage: null,
+    autoProgress: false,
+    segments: [],
   })
   const created = await getWorkoutById(userId, id)
   if (!created) throw new Error('Failed to read created workout')
@@ -842,7 +874,7 @@ export async function createPlannedWorkout(
         ? params.sourceWorkoutId
         : null,
     userId,
-    workout: params.workout,
+    workout: stripUndefined(params.workout),
   })
   const created = await getPlannedWorkout(userId, id)
   if (!created) throw new Error('Failed to read created planned workout')
@@ -895,6 +927,26 @@ export async function updatePlannedWorkoutWorkoutMetadata(
   await ref.update(data)
 }
 
+/** Remove undefined values from an object (and nested objects) so Firestore update() does not receive undefined. */
+function stripUndefined<T extends Record<string, unknown>>(obj: T): T {
+  const out = {} as Record<string, unknown>
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined) continue
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+      out[k] = stripUndefined(v as Record<string, unknown>)
+    } else if (Array.isArray(v)) {
+      out[k] = v.map((item) =>
+        item !== null && typeof item === 'object' && !Array.isArray(item)
+          ? stripUndefined(item as Record<string, unknown>)
+          : item
+      )
+    } else {
+      out[k] = v
+    }
+  }
+  return out as T
+}
+
 /** Replace the entire embedded workout object on a planned workout (e.g. after editing schedule). */
 export async function updatePlannedWorkoutWorkout(
   userId: string,
@@ -907,7 +959,7 @@ export async function updatePlannedWorkoutWorkout(
     .doc(userId)
     .collection(PLANNED_WORKOUTS_COLLECTION)
     .doc(plannedWorkoutId)
-  await ref.update({ workout })
+  await ref.update({ workout: stripUndefined(workout) })
 }
 
 /** Permanently delete a planned workout document from users/<userId>/plannedWorkouts/<plannedWorkoutId>. */

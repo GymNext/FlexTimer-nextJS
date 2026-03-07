@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState, Fragment, forwardRef, useImperativeHandle
 import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import Image from 'next/image'
+import toast from 'react-hot-toast'
 import headerIcon from './icon.png'
 import {
   GoogleAuthProvider,
@@ -43,6 +44,15 @@ interface OverviewData {
   workoutPlans: WorkoutPlan[]
   workoutCollections: WorkoutCollection[]
   subscriptionLimits?: SubscriptionLimits
+  /** Timer Defaults from user settings (e.g. direction = count up/down, restDirection, warmup/cooldown). */
+  timerDefaults?: {
+    direction?: boolean
+    restDirection?: number
+    warmupDuration?: number
+    warmupDirection?: boolean
+    cooldownDuration?: number
+    cooldownDirection?: boolean
+  }
   counts?: { favorites: number; collections: number; plans: number }
 }
 
@@ -519,6 +529,7 @@ function UserAppLayout({
       })
       await reloadOverview()
       setSelectedFavoriteWorkout(null)
+      toast.success('Removed from favorites')
     } catch (e) {
       console.error('[favorites remove]', e)
     }
@@ -533,6 +544,18 @@ function UserAppLayout({
       })
       await reloadOverview()
       setSelectedFavoriteWorkout(null)
+      if (collectionDetail?.collection.workoutIds.includes(workoutId)) {
+        const collectionId = collectionDetail.collection.id
+        const ids = collectionDetail.collection.workoutIds.filter((id) => id !== workoutId)
+        await authedFetch(`/api/app/collections/${encodeURIComponent(collectionId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workoutIds: ids }),
+        })
+        await reloadOverview()
+        await reloadCollectionDetail()
+      }
+      toast.success('Workout deleted')
     } catch (e) {
       console.error('[soft delete workout]', e)
       throw e
@@ -555,7 +578,14 @@ function UserAppLayout({
   const [createFavoriteDialogOpen, setCreateFavoriteDialogOpen] = useState(false)
 
   async function doCreateFavoriteWorkout(payload: {
-    workout: { timerMode: number; workoutSchedule: string; direction?: boolean }
+    workout:
+      | { type: 'MultiSegmentWorkout' }
+      | {
+          timerMode: number
+          workoutSchedule: string
+          direction?: boolean
+          restDirection?: number
+        }
   }) {
     if (!favoritesCollection) throw new Error('No favorites collection')
     const res = await authedFetch(
@@ -576,7 +606,14 @@ function UserAppLayout({
   async function doCreateWorkoutInCollection(
     collectionId: string,
     payload: {
-      workout: { timerMode: number; workoutSchedule: string; direction?: boolean }
+      workout:
+        | { type: 'MultiSegmentWorkout' }
+        | {
+            timerMode: number
+            workoutSchedule: string
+            direction?: boolean
+            restDirection?: number
+          }
     }
   ) {
     const res = await authedFetch(
@@ -645,6 +682,7 @@ function UserAppLayout({
     setSelectedFavoriteWorkout((prev) =>
       prev?.id === workoutId ? updated : prev
     )
+    toast.success('Workout saved')
   }
 
   async function openCollectionDetail(collectionId: string) {
@@ -724,6 +762,7 @@ function UserAppLayout({
     ) {
       await reloadCollectionDetail()
     }
+    toast.success('Workout saved')
   }
 
   async function handleRemoveWorkoutFromCollection(collectionId: string, workoutId: string) {
@@ -756,6 +795,7 @@ function UserAppLayout({
         }
         setCollectionDetail(data)
         setSelectedCollectionId(collectionId)
+        toast.success('Removed from collection')
       } catch (e) {
         setCollectionError(
           e instanceof Error ? e.message : 'Failed to load collection'
@@ -822,6 +862,7 @@ function UserAppLayout({
     if (collectionDetail?.collection.id === collectionId) {
       await reloadCollectionDetail()
     }
+    toast.success('Collection updated')
   }
 
   async function handleDeleteCollection(collectionId: string) {
@@ -837,6 +878,7 @@ function UserAppLayout({
       await reloadOverview()
       setSelectedCollectionId(null)
       setCollectionDetail(null)
+      toast.success('Collection deleted')
     } catch (e) {
       console.error('[collection delete]', e)
     }
@@ -1121,6 +1163,8 @@ function UserAppLayout({
                 setCreateFavoriteDialogOpen(false)
                 reloadOverview()
               }}
+              timerDefaultDirection={overview?.timerDefaults?.direction}
+              timerDefaultRestDirection={overview?.timerDefaults?.restDirection}
               maxFavorites={overview?.subscriptionLimits?.maxFavorites ?? UNLIMITED}
               favoritesCount={overview?.counts?.favorites ?? 0}
             />
@@ -1150,6 +1194,8 @@ function UserAppLayout({
               maxFavorites={overview?.subscriptionLimits?.maxFavorites ?? UNLIMITED}
               favoritesCount={overview?.counts?.favorites ?? 0}
               createWorkoutInCollection={doCreateWorkoutInCollection}
+              timerDefaultDirection={overview?.timerDefaults?.direction}
+              timerDefaultRestDirection={overview?.timerDefaults?.restDirection}
             />
           )}
           {activeTab === 'plans' && (
@@ -1188,6 +1234,7 @@ function UserAppLayout({
               favoriteWorkouts={favoriteWorkouts}
               collectionsExcludingFavorites={collectionsExcludingFavorites}
               workoutsById={overview?.workouts ? new Map(overview.workouts.map((w) => [w.id, w])) : new Map()}
+              timerDefaults={overview?.timerDefaults}
             />
           )}
         </>
@@ -1228,55 +1275,104 @@ function CreateWorkoutDialog({
   createWorkout,
   onSaveWorkout,
   onCreated,
+  timerDefaultDirection,
+  timerDefaultRestDirection,
+  timerModeOptions,
   title = 'Create new favorite workout',
 }: {
   onClose: () => void
   createWorkout: (payload: {
-    workout: { timerMode: number; workoutSchedule: string; direction?: boolean }
+    workout:
+      | { type: 'MultiSegmentWorkout' }
+      | {
+          timerMode: number
+          workoutSchedule: string
+          direction?: boolean
+          restDirection?: number
+        }
   }) => Promise<Workout>
   onSaveWorkout: (workoutId: string, data: Record<string, unknown>) => Promise<void>
   onCreated: (workout: Workout) => void
+  timerDefaultDirection?: boolean
+  timerDefaultRestDirection?: number
+  /** When provided, use this list for workout type (e.g. favorites: only Standard, Round, Tabata, etc.). */
+  timerModeOptions?: { value: number; label: string }[]
   title?: string
 }) {
+  const modeOptions = timerModeOptions ?? CREATABLE_TIMER_MODES
+  const isMultiSegment = (m: number) => m === 100
   const [step, setStep] = useState(1)
   const [mode, setMode] = useState(1)
-  const [options, setOptions] = useState<Record<string, string | number>>({})
+  const [options, setOptions] = useState<Record<string, string | number>>(() =>
+    getDefaultOptionsForMode(1, timerDefaultDirection, timerDefaultRestDirection)
+  )
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const built = useMemo(
-    () => buildWorkoutFromCreateForm(mode, options) as { workoutSchedule: string; direction: boolean },
-    [mode, options]
-  )
+  const built = useMemo(() => {
+    if (isMultiSegment(mode)) return { workoutSchedule: '', direction: false }
+    return buildWorkoutFromCreateForm(mode, options) as { workoutSchedule: string; direction: boolean }
+  }, [mode, options])
 
   async function handleCreate() {
-    if (!hasValidDurationForMode(mode, options, parseDurationInput)) {
-      setError('Warmup, Cooldown, and Rest require a duration greater than 0:00.')
+    if (!isMultiSegment(mode) && !hasValidDurationForMode(mode, options, parseDurationInput)) {
+      setError(
+        mode === 2
+          ? 'Round duration must be greater than 0.'
+          : mode === 4
+            ? 'Work duration and Rest duration must be greater than 0.'
+            : mode === 5
+              ? 'Interval and Number of intervals must be greater than 0.'
+              : mode === 12
+                ? 'Number of sets must be greater than 0. Rest duration must be greater than 0. Work ratio and rest ratio must be greater than 0.'
+                : 'Warmup, Cooldown, and Rest require a duration greater than 0:00.'
+      )
       return
     }
     setError(null)
     setBusy(true)
     try {
-      const created = await createWorkout({
-        workout: {
-          timerMode: mode,
-          workoutSchedule: built.workoutSchedule,
-          direction: built.direction,
-        },
-      })
-      if (name.trim() || description.trim()) {
-        await onSaveWorkout(created.id, {
+      if (isMultiSegment(mode)) {
+        const created = await createWorkout({ workout: { type: 'MultiSegmentWorkout' } })
+        if (name.trim() || description.trim()) {
+          await onSaveWorkout(created.id, {
+            workoutName: name.trim() || null,
+            workoutDescription: description.trim() || null,
+          })
+        }
+        onCreated({
+          ...created,
+          workoutName: name.trim() || null,
+          workoutDescription: description.trim() || null,
+        })
+      } else {
+        const created = await createWorkout({
+          workout: {
+            timerMode: mode,
+            workoutSchedule: built.workoutSchedule,
+            direction: built.direction,
+            restDirection:
+              (mode === 2 || mode === 4 || mode === 12) && typeof options.restDirection === 'number'
+                ? options.restDirection
+                : (timerDefaultRestDirection === 2 || timerDefaultRestDirection === 3
+                    ? timerDefaultRestDirection
+                    : 1),
+          },
+        })
+        if (name.trim() || description.trim()) {
+          await onSaveWorkout(created.id, {
+            workoutName: name.trim() || null,
+            workoutDescription: description.trim() || null,
+          })
+        }
+        onCreated({
+          ...created,
           workoutName: name.trim() || null,
           workoutDescription: description.trim() || null,
         })
       }
-      onCreated({
-        ...created,
-        workoutName: name.trim() || null,
-        workoutDescription: description.trim() || null,
-      })
       onClose()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to create workout')
@@ -1304,7 +1400,7 @@ function CreateWorkoutDialog({
           </p>
         </div>
         <div className="p-4 space-y-4">
-          {step === 1 && (
+            {step === 1 && (
             <>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
@@ -1313,12 +1409,19 @@ function CreateWorkoutDialog({
                 <select
                   value={mode}
                   onChange={(e) => {
-                    setMode(Number(e.target.value))
-                    setOptions({})
+                    const newMode = Number(e.target.value)
+                    setMode(newMode)
+                    setOptions(
+                      getDefaultOptionsForMode(
+                        newMode,
+                        timerDefaultDirection,
+                        timerDefaultRestDirection
+                      )
+                    )
                   }}
                   className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
                 >
-                  {CREATABLE_TIMER_MODES.map((m) => (
+                  {modeOptions.map((m) => (
                     <option key={m.value} value={m.value}>
                       {m.label}
                     </option>
@@ -1339,12 +1442,18 @@ function CreateWorkoutDialog({
           )}
           {step === 2 && (
             <>
-              <CreateWorkoutOptions
-                mode={mode}
-                options={options}
-                onChange={setOptions}
-                parseDurationInput={parseDurationInput}
-              />
+              {isMultiSegment(mode) ? (
+                <p className="text-sm text-gray-600">
+                  Multi-segment workout. You can add segments after creating.
+                </p>
+              ) : (
+                <CreateWorkoutOptions
+                  mode={mode}
+                  options={options}
+                  onChange={setOptions}
+                  parseDurationInput={parseDurationInput}
+                />
+              )}
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
@@ -1357,7 +1466,7 @@ function CreateWorkoutDialog({
                 <button
                   type="button"
                   onClick={() => setStep(3)}
-                  disabled={!hasValidDurationForMode(mode, options, parseDurationInput)}
+                  disabled={!isMultiSegment(mode) && !hasValidDurationForMode(mode, options, parseDurationInput)}
                   className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
                   style={{ backgroundColor: '#6B21A8' }}
                 >
@@ -1407,7 +1516,7 @@ function CreateWorkoutDialog({
                 <button
                   type="button"
                   onClick={handleCreate}
-                  disabled={busy || !hasValidDurationForMode(mode, options, parseDurationInput)}
+                  disabled={busy || (!isMultiSegment(mode) && !hasValidDurationForMode(mode, options, parseDurationInput))}
                   className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
                   style={{ backgroundColor: '#6B21A8' }}
                 >
@@ -1441,6 +1550,8 @@ function FavoritesSection({
   onCloseCreateDialog,
   doCreateFavoriteWorkout,
   onCreatedWorkout,
+  timerDefaultDirection,
+  timerDefaultRestDirection,
   maxFavorites,
   favoritesCount,
 }: {
@@ -1461,9 +1572,20 @@ function FavoritesSection({
   onOpenCreateDialog: () => void
   onCloseCreateDialog: () => void
   doCreateFavoriteWorkout: (payload: {
-    workout: { timerMode: number; workoutSchedule: string; direction?: boolean }
+    workout:
+      | { type: 'MultiSegmentWorkout' }
+      | {
+          timerMode: number
+          workoutSchedule: string
+          direction?: boolean
+          restDirection?: number
+        }
   }) => Promise<Workout>
   onCreatedWorkout: (workout: Workout) => void
+  /** From user Timer Defaults: true = count up, false = count down. Used for Standard (and Warmup/Cooldown/Rest) default. */
+  timerDefaultDirection?: boolean
+  /** From user Timer Defaults. Used for rest timer direction when creating a workout. */
+  timerDefaultRestDirection?: number
   maxFavorites?: number
   favoritesCount?: number
 }) {
@@ -1873,6 +1995,7 @@ function FavoritesSection({
                 onSave={onSave}
                 onClose={() => onSelectWorkout(null)}
                 scheduleOnly
+                horizontalScheduleLayout
               />
             </div>
           </>
@@ -1971,6 +2094,7 @@ function FavoritesSection({
                       onSelectWorkout(null)
                     }
                     setBookmarkDialogOpen(false)
+                    toast.success('Bookmarks updated')
                   } catch (e) {
                     console.error('[bookmark save]', e)
                   } finally {
@@ -2192,6 +2316,9 @@ function FavoritesSection({
           createWorkout={doCreateFavoriteWorkout}
           onSaveWorkout={onSave}
           onCreated={onCreatedWorkout}
+          timerDefaultDirection={timerDefaultDirection}
+          timerDefaultRestDirection={timerDefaultRestDirection}
+          timerModeOptions={FAVORITE_CREATABLE_TIMER_MODES}
         />
       )}
     </div>
@@ -2206,6 +2333,7 @@ const FavoritesDetailPanel = forwardRef<
     onClose: () => void
     scheduleOnly?: boolean
     onDirtyChange?: (dirty: boolean) => void
+    horizontalScheduleLayout?: boolean
   }
 >(function FavoritesDetailPanel({
   workout,
@@ -2213,12 +2341,14 @@ const FavoritesDetailPanel = forwardRef<
   onClose,
   scheduleOnly = false,
   onDirtyChange,
+  horizontalScheduleLayout = false,
 }: {
   workout: Workout
   onSave: (workoutId: string, data: Record<string, unknown>) => Promise<void>
   onClose: () => void
   scheduleOnly?: boolean
   onDirtyChange?: (dirty: boolean) => void
+  horizontalScheduleLayout?: boolean
 }, ref: React.Ref<{ save: () => Promise<void> }>) {
   const [name, setName] = useState(workout.workoutName ?? '')
   const [description, setDescription] = useState(workout.workoutDescription ?? '')
@@ -2445,6 +2575,7 @@ const FavoritesDetailPanel = forwardRef<
               setIsDirty(true)
             }}
             parseDurationInput={parseDurationInput}
+            horizontalLayout={horizontalScheduleLayout}
           />
         </div>
       )}
@@ -2673,6 +2804,8 @@ function CollectionsSection({
   maxFavorites,
   favoritesCount,
   createWorkoutInCollection,
+  timerDefaultDirection,
+  timerDefaultRestDirection,
 }: {
   collections: WorkoutCollection[]
   collectionDetail: { collection: WorkoutCollection; workouts: Workout[] } | null
@@ -2699,9 +2832,18 @@ function CollectionsSection({
   createWorkoutInCollection?: (
     collectionId: string,
     payload: {
-      workout: { timerMode: number; workoutSchedule: string; direction?: boolean }
+      workout:
+        | { type: 'MultiSegmentWorkout' }
+        | {
+            timerMode: number
+            workoutSchedule: string
+            direction?: boolean
+            restDirection?: number
+          }
     }
   ) => Promise<Workout>
+  timerDefaultDirection?: boolean
+  timerDefaultRestDirection?: number
 }) {
   const [createOpen, setCreateOpen] = useState(false)
   const [createName, setCreateName] = useState('')
@@ -2968,7 +3110,7 @@ function CollectionsSection({
   }, [collectionDetail?.workouts, expandedWorkoutId])
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1.5fr)]">
+    <div className="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.8fr)]">
       <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
         <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex items-center justify-between gap-2">
           <h3 className="text-sm font-medium text-gray-800">
@@ -3451,6 +3593,7 @@ function CollectionsSection({
                             <FavoritesDetailPanel
                               workout={w}
                               scheduleOnly
+                              horizontalScheduleLayout
                               ref={collectionDetailPanelRef}
                               onDirtyChange={setHasUnsavedChanges}
                               onSave={async (workoutId, data) => {
@@ -3743,6 +3886,7 @@ function CollectionsSection({
                     await onReloadCollectionDetail?.()
                     setCollectionBookmarkDialogOpen(false)
                     setCollectionBookmarkWorkout(null)
+                    toast.success('Bookmarks updated')
                   } catch (e) {
                     console.error('[bookmark save]', e)
                   } finally {
@@ -3771,6 +3915,9 @@ function CollectionsSection({
             await onReloadCollectionDetail?.()
             setExpandedWorkoutId(workout.id)
           }}
+          timerDefaultDirection={timerDefaultDirection}
+          timerDefaultRestDirection={timerDefaultRestDirection}
+          timerModeOptions={FAVORITE_CREATABLE_TIMER_MODES}
         />
       )}
 
@@ -4001,6 +4148,7 @@ function PlansSection({
   favoriteWorkouts,
   collectionsExcludingFavorites,
   workoutsById,
+  timerDefaults,
 }: {
   plans: WorkoutPlan[]
   selectedPlanId: string | null
@@ -4035,6 +4183,14 @@ function PlansSection({
   favoriteWorkouts?: Workout[]
   collectionsExcludingFavorites?: WorkoutCollection[]
   workoutsById?: Map<string, Workout>
+  timerDefaults?: {
+    direction?: boolean
+    restDirection?: number
+    warmupDuration?: number
+    warmupDirection?: boolean
+    cooldownDuration?: number
+    cooldownDirection?: boolean
+  }
 }) {
   const [createOpen, setCreateOpen] = useState(false)
   const [addWorkoutSource, setAddWorkoutSource] = useState<
@@ -4243,9 +4399,10 @@ function PlansSection({
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || 'Failed to update workout schedule')
       }
+      reloadPlanned()
       setEditSchedulePlannedWorkout(null)
       setExpandedPlannedWorkoutId(null)
-      reloadPlanned()
+      toast.success('Workout schedule saved')
     } catch (e) {
       setEditScheduleError(e instanceof Error ? e.message : 'Failed to update workout schedule')
     } finally {
@@ -4278,7 +4435,8 @@ function PlansSection({
       setEditPlannedWorkout(null)
       setEditPlannedName('')
       setEditPlannedDescription('')
-      reloadPlanned()
+      setExpandedPlannedWorkoutId(null)
+      toast.success('Planned workout saved')
     } catch (e) {
       setEditPlannedError(e instanceof Error ? e.message : 'Failed to update workout')
     } finally {
@@ -4311,6 +4469,7 @@ function PlansSection({
       }
       setCopyPlannedWorkout(null)
       if (copyTargetPlanId === selectedPlanId) reloadPlanned()
+      toast.success('Workout copied to plan')
     } catch (e) {
       setCopyError(e instanceof Error ? e.message : 'Failed to copy workout')
     } finally {
@@ -4340,6 +4499,7 @@ function PlansSection({
       }
       setMovePlannedWorkout(null)
       reloadPlanned()
+      toast.success('Workout moved to date')
     } catch (e) {
       setMoveError(e instanceof Error ? e.message : 'Failed to move workout')
     } finally {
@@ -4370,6 +4530,7 @@ function PlansSection({
     return entry
   }
 
+  /** Add from favorite or collection: copy workout into planned workout, set sourceWorkoutId to workout.id, ordinal = end of list for that day. */
   async function addPlannedFromWorkout(workout: Workout) {
     if (!selectedPlan) return
     setCreateBusy(true)
@@ -4407,6 +4568,7 @@ function PlansSection({
     }
   }
 
+  /** Create from scratch: workout from form, sourceWorkoutId null, ordinal = end of list for that day. plannedWorkoutId and plan/day set by API. */
   async function handleCreatePlanned() {
     if (!selectedPlan) return
     if (!hasValidDurationForMode(createMode, createOptions, parseDurationInput)) {
@@ -4416,7 +4578,20 @@ function PlansSection({
     setCreateError(null)
     setCreateBusy(true)
     try {
-      const workout = buildWorkoutFromCreateForm(createMode, createOptions)
+      const workout = buildWorkoutFromCreateForm(
+        createMode,
+        Object.keys(createOptions).length === 0
+          ? getDefaultOptionsForMode(
+              createMode,
+              timerDefaults?.direction,
+              timerDefaults?.restDirection,
+              timerDefaults?.warmupDuration,
+              timerDefaults?.warmupDirection,
+              timerDefaults?.cooldownDuration,
+              timerDefaults?.cooldownDirection
+            )
+          : createOptions
+      )
       const dayKey = createDate.slice(0, 10)
       const ordinal = (byDay[dayKey] ?? []).length
       const res = await authedFetch(
@@ -4430,6 +4605,7 @@ function PlansSection({
             day: createDate,
             ordinal,
             workout,
+            sourceWorkoutId: null,
             clientToday: todayYmd,
           }),
         }
@@ -4453,7 +4629,7 @@ function PlansSection({
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1.7fr)]">
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.8fr)]">
         <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
           <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex items-center justify-between gap-2">
             <h3 className="text-sm font-medium text-gray-800">
@@ -5050,13 +5226,21 @@ function PlansSection({
                               {expandedPlannedWorkoutId === pw.id && (
                                 <li className="border-t border-gray-200 bg-gray-50/80 list-none">
                                   <div className="p-4">
-                                    <h4 className="text-sm font-semibold text-gray-800 mb-2">Edit workout schedule</h4>
+                                    <div className="mb-3">
+                                      <label className="block text-xs font-medium text-gray-700 mb-1">
+                                        Timer mode
+                                      </label>
+                                      <p className="text-sm text-gray-900 py-1.5">
+                                        {PLANNED_WORKOUT_CREATABLE_TIMER_MODES.find((m) => m.value === editScheduleMode)?.label ?? 'Standard'}
+                                      </p>
+                                    </div>
                                     <form onSubmit={handleSaveEditSchedule} className="space-y-4">
                                       <CreateWorkoutOptions
                                         mode={editScheduleMode}
                                         options={editScheduleOptions}
                                         onChange={setEditScheduleOptions}
                                         parseDurationInput={parseDurationInput}
+                                        horizontalLayout
                                       />
                                       {editScheduleError && <p className="text-xs text-red-600">{editScheduleError}</p>}
                                       <div className="flex justify-end gap-2">
@@ -5210,7 +5394,20 @@ function PlansSection({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setAddWorkoutSource('createNew')}
+                      onClick={() => {
+                        setAddWorkoutSource('createNew')
+                        setCreateOptions(
+                          getDefaultOptionsForMode(
+                            createMode,
+                            timerDefaults?.direction,
+                            timerDefaults?.restDirection,
+                            timerDefaults?.warmupDuration,
+                            timerDefaults?.warmupDirection,
+                            timerDefaults?.cooldownDuration,
+                            timerDefaults?.cooldownDirection
+                          )
+                        )
+                      }}
                       className="w-full rounded border border-gymnext-muted/40 border-l-4 bg-white px-4 py-3 flex items-center gap-3 text-left text-sm font-medium text-gray-900 hover:bg-gymnext-background"
                       style={{ borderLeftColor: '#6B21A8' }}
                     >
@@ -5414,12 +5611,23 @@ function PlansSection({
                       id="plan-mode"
                       value={createMode}
                       onChange={(e) => {
-                        setCreateMode(Number(e.target.value))
-                        setCreateOptions({})
+                        const newMode = Number(e.target.value)
+                        setCreateMode(newMode)
+                        setCreateOptions(
+                          getDefaultOptionsForMode(
+                            newMode,
+                            timerDefaults?.direction,
+                            timerDefaults?.restDirection,
+                            timerDefaults?.warmupDuration,
+                            timerDefaults?.warmupDirection,
+                            timerDefaults?.cooldownDuration,
+                            timerDefaults?.cooldownDirection
+                          )
+                        )
                       }}
                       className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
                     >
-                      {CREATABLE_TIMER_MODES.map((m) => (
+                      {PLANNED_WORKOUT_CREATABLE_TIMER_MODES.map((m) => (
                         <option key={m.value} value={m.value}>
                           {m.label}
                         </option>
@@ -5922,6 +6130,116 @@ const CREATABLE_TIMER_MODES = [
   { value: 13, label: 'Rest' },
 ] as const
 
+/** Workout types shown when creating a favorite (only these 7). Multi-Segment uses sentinel mode 100. */
+const FAVORITE_CREATABLE_TIMER_MODES: { value: number; label: string }[] = [
+  { value: 1, label: 'Standard' },
+  { value: 2, label: 'Round' },
+  { value: 4, label: 'Tabata' },
+  { value: 3, label: 'Mixed Intervals' },
+  { value: 5, label: 'EMOM' },
+  { value: 12, label: 'Sets with Rest' },
+  { value: 100, label: 'Multi-Segment' },
+]
+
+/** Timer modes for planned workouts: Warmup and Cooldown first; no Lap Timer / Shot Clock; includes Mixed Intervals and Multi-Segment. */
+const PLANNED_WORKOUT_CREATABLE_TIMER_MODES: { value: number; label: string }[] = [
+  { value: 10, label: 'Warmup' },
+  { value: 11, label: 'Cooldown' },
+  { value: 1, label: 'Standard' },
+  { value: 2, label: 'Round' },
+  { value: 3, label: 'Mixed Intervals' },
+  { value: 4, label: 'Tabata' },
+  { value: 5, label: 'EMOM' },
+  { value: 12, label: 'Sets with Rest' },
+  { value: 13, label: 'Rest' },
+  { value: 100, label: 'Multi-Segment' },
+]
+
+/** Default form options per mode so "Add to plan" / create workout use these values.
+ * timerDefaultDirection: from user Timer Defaults (true = count up, false = count down). Used for Standard, Round, Warmup, Cooldown, Rest.
+ * timerDefaultRestDirection: from user Timer Defaults (1=Match Workout, 2=Up, 3=Down). Used for Round, Tabata, Sets with Rest.
+ * warmupDuration/cooldownDuration: seconds from user Timer Defaults; formatted as timeCap for modes 10 and 11. */
+function getDefaultOptionsForMode(
+  mode: number,
+  timerDefaultDirection?: boolean,
+  timerDefaultRestDirection?: number,
+  warmupDuration?: number,
+  warmupDirection?: boolean,
+  cooldownDuration?: number,
+  cooldownDirection?: boolean
+): Record<string, string | number> {
+  switch (mode) {
+    case 1:
+      return { timeCap: '10:00', direction: timerDefaultDirection ?? false }
+    case 2:
+      return {
+        duration: '1:00',
+        rounds: 5,
+        restBetween: '0:00',
+        direction: timerDefaultDirection ?? false,
+        restDirection:
+          timerDefaultRestDirection === 2 || timerDefaultRestDirection === 3
+            ? timerDefaultRestDirection
+            : 1,
+      }
+    case 4:
+      return {
+        workDuration: '0:20',
+        restDuration: '0:10',
+        roundsPerTabata: 8,
+        numberOfTabatas: 1,
+        restBetweenTabatas: '0:00',
+        direction: timerDefaultDirection ?? false,
+        restDirection:
+          timerDefaultRestDirection === 2 || timerDefaultRestDirection === 3
+            ? timerDefaultRestDirection
+            : 1,
+      }
+    case 5:
+      return {
+        intervalSeconds: 60,
+        intervals: 10,
+        direction: timerDefaultDirection ?? false,
+      }
+    case 7:
+      return { shotClockSeconds: 24 }
+    case 10:
+      return {
+        timeCap:
+          warmupDuration != null && warmupDuration > 0
+            ? formatDuration(warmupDuration)
+            : '10:00',
+        direction: warmupDirection ?? timerDefaultDirection ?? false,
+      }
+    case 11:
+      return {
+        timeCap:
+          cooldownDuration != null && cooldownDuration > 0
+            ? formatDuration(cooldownDuration)
+            : '10:00',
+        direction: cooldownDirection ?? timerDefaultDirection ?? false,
+      }
+    case 13:
+      return { timeCap: '5:00', direction: timerDefaultDirection ?? false }
+    case 12:
+      return {
+        sets: 5,
+        restDrivenType: 0,
+        fixedRest: '2:00',
+        workRatio: 1,
+        restRatio: 1,
+        restDirection:
+          timerDefaultRestDirection === 2 || timerDefaultRestDirection === 3
+            ? timerDefaultRestDirection
+            : 1,
+      }
+    case 100:
+      return {}
+    default:
+      return {}
+  }
+}
+
 function parseDurationInput(s: string): number {
   const t = s.trim()
   if (!t) return 0
@@ -5972,12 +6290,52 @@ function getTimeCapSeconds(
   return parseDurationInput(String(t))
 }
 
-/** Returns false if mode is Warmup/Cooldown/Rest and timeCap is 0 or invalid (those modes don't support infinite). */
+/** Returns false if mode is Warmup/Cooldown/Rest and timeCap is 0 or invalid (those modes don't support infinite).
+ * For Tabata (4), returns false if workDuration or restDuration is 0 or invalid.
+ * For Round (2), returns false if duration (round duration) is 0 or invalid.
+ * For EMOM (5), returns false if intervalSeconds or intervals is 0 or invalid.
+ * For Sets with Rest (12), returns false if sets <= 0, or (when fixed rest) rest duration <= 0, or (when work:rest ratio) work/rest ratio <= 0. */
 function hasValidDurationForMode(
   mode: number,
   options: Record<string, string | number>,
   parseDurationInput: (s: string) => number
 ): boolean {
+  if (mode === 2) {
+    const durationSec =
+      options.duration != null ? parseDurationInput(String(options.duration)) : 0
+    return durationSec > 0
+  }
+  if (mode === 4) {
+    const workSec =
+      options.workDuration != null
+        ? parseDurationInput(String(options.workDuration))
+        : 0
+    const restSec =
+      options.restDuration != null
+        ? parseDurationInput(String(options.restDuration))
+        : 0
+    return workSec > 0 && restSec > 0
+  }
+  if (mode === 5) {
+    const intervalSeconds = Number(options.intervalSeconds ?? 0)
+    const intervals = Number(options.intervals ?? 0)
+    return intervalSeconds > 0 && intervals > 0
+  }
+  if (mode === 12) {
+    const sets = Number(options.sets ?? 0)
+    if (sets <= 0) return false
+    const restDrivenType = Number(options.restDrivenType ?? 0)
+    if (restDrivenType === 0) {
+      const fixedRestSec =
+        options.fixedRest != null
+          ? parseDurationInput(String(options.fixedRest))
+          : 0
+      return fixedRestSec > 0
+    }
+    const workRatio = Number(options.workRatio ?? 0)
+    const restRatio = Number(options.restRatio ?? 0)
+    return workRatio > 0 && restRatio > 0
+  }
   if (!isWarmupCooldownRestMode(mode)) return true
   return getTimeCapSeconds(options, parseDurationInput) > 0
 }
@@ -6021,6 +6379,7 @@ function parseScheduleToOptions(scheduleStr: string | null | undefined): {
         options.restDuration = formatDuration(num('tabataRestDuration') || dur('tabataRestDuration'))
         options.roundsPerTabata = num('roundsPerTabata')
         options.numberOfTabatas = num('numberOfTabatas')
+        options.restBetweenTabatas = formatDuration(num('restBetweenTabatas') || dur('restBetweenTabatas'))
         break
       case 5:
         options.intervalSeconds = num('emomIntervalDuration')
@@ -6042,8 +6401,8 @@ function parseScheduleToOptions(scheduleStr: string | null | undefined): {
         options.sets = num('restDrivenNumberOfSets')
         options.restDrivenType = num('restDrivenType')
         options.fixedRest = formatDuration(num('restDrivenFixedRestDuration') || dur('restDrivenFixedRestDuration'))
-        options.workRatio = num('restDrivenWorkRatio')
-        options.restRatio = num('restDrivenRestRatio')
+        options.workRatio = Math.max(1, num('restDrivenWorkRatio'))
+        options.restRatio = Math.max(1, num('restDrivenRestRatio'))
         break
       default:
         break
@@ -6057,8 +6416,31 @@ function parseScheduleToOptions(scheduleStr: string | null | undefined): {
 
 function buildWorkoutFromCreateForm(
   mode: number,
-  options: Record<string, string | number>
+  options: Record<string, string | number>,
+  parseDurationInputFn?: (s: string) => number
 ): Record<string, unknown> {
+  const parseDuration = (s: string): number => {
+    if (typeof parseDurationInputFn === 'function') return parseDurationInputFn(s)
+    const t = String(s).trim()
+    if (!t) return 0
+    const parts = t.split(':')
+    if (parts.length === 1) {
+      const m = parseInt(parts[0]!, 10)
+      return Number.isNaN(m) ? 0 : m * 60
+    }
+    if (parts.length === 2) {
+      const m = parseInt(parts[0]!, 10)
+      const sec = parseInt(parts[1]!, 10)
+      return (Number.isNaN(m) ? 0 : m * 60) + (Number.isNaN(sec) ? 0 : sec)
+    }
+    if (parts.length === 3) {
+      const h = parseInt(parts[0]!, 10)
+      const m = parseInt(parts[1]!, 10)
+      const sec = parseInt(parts[2]!, 10)
+      return (Number.isNaN(h) ? 0 : h * 3600) + (Number.isNaN(m) ? 0 : m * 60) + (Number.isNaN(sec) ? 0 : sec)
+    }
+    return 0
+  }
   const schedule: Record<string, unknown> = { timerMode: mode }
   const dir =
     options.direction === true || options.direction === 'true'
@@ -6074,7 +6456,7 @@ function buildWorkoutFromCreateForm(
   const dur = (key: string) => {
     const v = options[key]
     if (typeof v === 'number') return v
-    if (typeof v === 'string') return parseDurationInput(v)
+    if (typeof v === 'string') return parseDuration(v)
     return 0
   }
   switch (mode) {
@@ -6091,6 +6473,7 @@ function buildWorkoutFromCreateForm(
       schedule.tabataRestDuration = dur('restDuration')
       schedule.roundsPerTabata = num('roundsPerTabata')
       schedule.numberOfTabatas = num('numberOfTabatas')
+      schedule.restBetweenTabatas = dur('restBetweenTabatas')
       break
     case 5:
       schedule.emomIntervalDuration = num('intervalSeconds')
@@ -6110,9 +6493,11 @@ function buildWorkoutFromCreateForm(
       schedule.restDrivenType = num('restDrivenType')
       if (schedule.restDrivenType === 0) {
         schedule.restDrivenFixedRestDuration = dur('fixedRest')
+        schedule.restDrivenWorkRatio = 1
+        schedule.restDrivenRestRatio = 1
       } else {
-        schedule.restDrivenWorkRatio = num('workRatio')
-        schedule.restDrivenRestRatio = num('restRatio')
+        schedule.restDrivenWorkRatio = Math.max(1, num('workRatio'))
+        schedule.restDrivenRestRatio = Math.max(1, num('restRatio'))
       }
       break
     case 13:
@@ -6134,12 +6519,18 @@ function CreateWorkoutOptions({
   options,
   onChange,
   parseDurationInput,
+  horizontalLayout = false,
 }: {
   mode: number
   options: Record<string, string | number>
   onChange: (o: Record<string, string | number>) => void
   parseDurationInput: (s: string) => number
+  /** When true, show up to 4 values per row (e.g. on favorites schedule edit). */
+  horizontalLayout?: boolean
 }) {
+  const layoutClass = horizontalLayout
+    ? 'grid grid-cols-2 lg:grid-cols-4 gap-3'
+    : 'space-y-3'
   const setOpt = (key: string, value: string | number) =>
     onChange({ ...options, [key]: value })
   const getOpt = (key: string, def: string | number) =>
@@ -6166,7 +6557,8 @@ function CreateWorkoutOptions({
     key: string,
     label: string,
     def = 0,
-    min = 0
+    min = 0,
+    max?: number
   ) => (
     <div key={key}>
       <label className="block text-xs font-medium text-gray-700">
@@ -6175,10 +6567,14 @@ function CreateWorkoutOptions({
       <input
         type="number"
         min={min}
+        max={max}
         value={Number(getOpt(key, def))}
-        onChange={(e) =>
-          setOpt(key, parseInt(e.target.value, 10) || 0)
-        }
+        onChange={(e) => {
+          const n = parseInt(e.target.value, 10)
+          const val = Number.isNaN(n) ? def : n
+          const clamped = Math.min(max ?? 999999, Math.max(min, val))
+          setOpt(key, clamped)
+        }}
         className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
       />
     </div>
@@ -6198,11 +6594,28 @@ function CreateWorkoutOptions({
       </select>
     </div>
   )
+  /** Rest direction from user Timer Defaults: 1=Match Workout, 2=Up, 3=Down. Only these three options. */
+  const restDirectionSelect = () => (
+    <div key="restDirection">
+      <label className="block text-xs font-medium text-gray-700">
+        Rest direction
+      </label>
+      <select
+        value={String(Number(getOpt('restDirection', 1)))}
+        onChange={(e) => setOpt('restDirection', parseInt(e.target.value, 10) || 1)}
+        className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+      >
+        <option value="1">Match Workout</option>
+        <option value="2">Always Up</option>
+        <option value="3">Always Down</option>
+      </select>
+    </div>
+  )
 
   switch (mode) {
     case 1:
       return (
-        <div className="space-y-3">
+        <div className={layoutClass}>
           {durationInput(
             'timeCap',
             'Time cap (0 = infinite)',
@@ -6213,46 +6626,62 @@ function CreateWorkoutOptions({
       )
     case 2:
       return (
-        <div className="space-y-3">
+        <div className={layoutClass}>
           {durationInput('duration', 'Round duration', '1:00')}
           {numberInput(
             'rounds',
-            'Number of rounds (0 = infinite)',
-            3
+            horizontalLayout ? 'Number of rounds' : 'Number of rounds (0 = infinite)',
+            5
           )}
           {durationInput(
             'restBetween',
             'Rest between rounds',
-            '0:30'
+            '0:00'
           )}
+          {directionSelect()}
+          {restDirectionSelect()}
         </div>
       )
     case 4:
       return (
-        <div className="space-y-3">
+        <div className={layoutClass}>
           {durationInput('workDuration', 'Work duration', '0:20')}
           {durationInput('restDuration', 'Rest duration', '0:10')}
           {numberInput(
             'roundsPerTabata',
             'Rounds per tabata',
-            8
+            8,
+            1,
+            99
           )}
           {numberInput(
             'numberOfTabatas',
             'Number of tabatas',
-            1
+            1,
+            1,
+            99
           )}
+          {Number(getOpt('numberOfTabatas', 1)) > 1 &&
+            durationInput(
+              'restBetweenTabatas',
+              'Rest between tabatas',
+              '0:00'
+            )}
+          {directionSelect()}
+          {restDirectionSelect()}
         </div>
       )
     case 5:
       return (
-        <div className="space-y-3">
+        <div className={layoutClass}>
           {numberInput(
             'intervalSeconds',
             'Interval (seconds)',
-            60
+            60,
+            1
           )}
-          {numberInput('intervals', 'Number of intervals', 10)}
+          {numberInput('intervals', 'Number of intervals', 10, 1)}
+          {directionSelect()}
         </div>
       )
     case 6:
@@ -6263,7 +6692,7 @@ function CreateWorkoutOptions({
       )
     case 7:
       return (
-        <div className="space-y-3">
+        <div className={layoutClass}>
           {numberInput(
             'shotClockSeconds',
             'Shot clock (seconds)',
@@ -6275,14 +6704,14 @@ function CreateWorkoutOptions({
     case 11:
     case 13:
       return (
-        <div className="space-y-3">
+        <div className={layoutClass}>
           {durationInput(
             'timeCap',
             mode === 13
               ? 'Rest duration (min 0:01)'
               : mode === 10
-                ? 'Warmup duration (min 0:01)'
-                : 'Cooldown duration (min 0:01)',
+                ? 'Warmup duration'
+                : 'Cooldown duration',
             '5:00'
           )}
           {directionSelect()}
@@ -6290,8 +6719,8 @@ function CreateWorkoutOptions({
       )
     case 12:
       return (
-        <div className="space-y-3">
-          {numberInput('sets', 'Number of sets', 3)}
+        <div className={layoutClass}>
+          {numberInput('sets', 'Number of sets', 5, 1)}
           <div>
             <label className="block text-xs font-medium text-gray-700">
               Rest type
@@ -6311,13 +6740,14 @@ function CreateWorkoutOptions({
             </select>
           </div>
           {Number(getOpt('restDrivenType', 0)) === 0 ? (
-            durationInput('fixedRest', 'Rest duration', '1:00')
+            durationInput('fixedRest', 'Rest duration', '2:00')
           ) : (
             <>
-              {numberInput('workRatio', 'Work ratio', 1)}
-              {numberInput('restRatio', 'Rest ratio', 1)}
+              {numberInput('workRatio', 'Work ratio', 1, 1)}
+              {numberInput('restRatio', 'Rest ratio', 1, 1)}
             </>
           )}
+          {restDirectionSelect()}
         </div>
       )
     default:

@@ -5,6 +5,7 @@ import {
   getUserWorkoutCollections,
   getUserWorkoutPlans,
   getUserWorkouts,
+  getUserDocument,
 } from '@/lib/firestore'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
 import type { SubscriptionLimits } from '@/lib/subscription-limits-constants'
@@ -30,7 +31,7 @@ export async function GET(request: NextRequest) {
   const { uid } = authResult
 
   try {
-    const [allWorkouts, allWorkoutPlans, allWorkoutCollections, subscriptionLimitsResult] =
+    const [allWorkouts, allWorkoutPlans, allWorkoutCollections, subscriptionLimitsResult, userDoc] =
       await Promise.all([
         getUserWorkouts(uid),
         getUserWorkoutPlans(uid),
@@ -39,7 +40,32 @@ export async function GET(request: NextRequest) {
           console.error('[app overview] getSubscriptionLimits failed:', err)
           return null
         }),
+        getUserDocument(uid),
       ])
+
+    const settings = userDoc?.settings
+    const timerDefaultsParts: {
+      direction?: boolean
+      restDirection?: number
+      warmupDuration?: number
+      warmupDirection?: boolean
+      cooldownDuration?: number
+      cooldownDirection?: boolean
+    } = {}
+    if (settings && typeof settings.direction === 'boolean')
+      timerDefaultsParts.direction = settings.direction === true
+    if (settings && typeof settings.restDirection === 'number')
+      timerDefaultsParts.restDirection = settings.restDirection
+    if (settings && typeof settings.warmupDuration === 'number')
+      timerDefaultsParts.warmupDuration = settings.warmupDuration
+    if (settings && typeof settings.warmupDirection === 'boolean')
+      timerDefaultsParts.warmupDirection = settings.warmupDirection
+    if (settings && typeof settings.cooldownDuration === 'number')
+      timerDefaultsParts.cooldownDuration = settings.cooldownDuration
+    if (settings && typeof settings.cooldownDirection === 'boolean')
+      timerDefaultsParts.cooldownDirection = settings.cooldownDirection
+    const timerDefaults =
+      Object.keys(timerDefaultsParts).length > 0 ? timerDefaultsParts : undefined
 
     const workouts = allWorkouts.filter((w) => !w.deletedAt)
     const workoutPlans = allWorkoutPlans.filter((p) => !p.deletedAt)
@@ -64,6 +90,7 @@ export async function GET(request: NextRequest) {
       workoutPlans,
       workoutCollections,
       subscriptionLimits,
+      timerDefaults,
       counts: {
         favorites: favoritesCount,
         collections: collectionsCount,

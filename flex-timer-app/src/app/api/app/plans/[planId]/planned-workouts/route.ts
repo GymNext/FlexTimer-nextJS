@@ -57,7 +57,10 @@ export async function GET(
 /**
  * POST /api/app/plans/[planId]/planned-workouts
  * Create a planned workout for the signed-in user's plan.
- * Body: { day: string (YYYY-MM-DD), ordinal?: number, workout: object }.
+ * plannedWorkoutId is auto-generated. planId and day come from the URL and body.
+ * Body: { day: string (YYYY-MM-DD), ordinal?: number (default: end of list), workout: object, sourceWorkoutId?: string | null, clientToday?: string }.
+ * - sourceWorkoutId: set to the workout id when adding from a favorite or collection; null when creating from scratch.
+ * - ordinal: 0-based index; use count of existing workouts for that plan/day to append at end.
  */
 export async function POST(
   request: NextRequest,

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUserAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
-import { addWorkoutToCollection, createWorkout, getCollectionById, getWorkoutsByIds } from '@/lib/firestore'
+import { addWorkoutToCollection, createWorkout, createMultiSegmentWorkout, getCollectionById, getWorkoutsByIds } from '@/lib/firestore'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
 
 type RouteParams = Promise<{ collectionId: string }>
@@ -63,17 +63,33 @@ export async function POST(
       body.workout != null && typeof body.workout === 'object'
         ? (body.workout as Record<string, unknown>)
         : undefined
-    if (!workout || typeof workout.timerMode !== 'number' || typeof workout.workoutSchedule !== 'string') {
+    if (!workout) {
+      return NextResponse.json(
+        { error: 'workout object required' },
+        { status: 400 }
+      )
+    }
+
+    if (workout.type === 'MultiSegmentWorkout') {
+      const created = await createMultiSegmentWorkout(uid)
+      await addWorkoutToCollection(uid, collectionId, created.id)
+      return NextResponse.json(created)
+    }
+
+    if (typeof workout.timerMode !== 'number' || typeof workout.workoutSchedule !== 'string') {
       return NextResponse.json(
         { error: 'workout.timerMode (number) and workout.workoutSchedule (string) required' },
         { status: 400 }
       )
     }
 
+    const restDirection =
+      typeof workout.restDirection === 'number' ? workout.restDirection : 0
     const created = await createWorkout(uid, {
       timerMode: workout.timerMode as number,
       workoutSchedule: workout.workoutSchedule as string,
       direction: workout.direction === true,
+      restDirection,
     })
     await addWorkoutToCollection(uid, collectionId, created.id)
     return NextResponse.json(created)
