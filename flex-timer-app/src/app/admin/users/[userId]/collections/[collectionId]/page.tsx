@@ -552,8 +552,8 @@ function CreateWorkoutOptions({
     <div key="direction">
       <label className="block text-sm font-medium text-gray-700">Direction</label>
       <select
-        value={getOpt('direction', false) ? 'up' : 'down'}
-        onChange={(e) => setOpt('direction', e.target.value === 'up')}
+        value={Number(getOpt('direction', 0)) ? 'up' : 'down'}
+        onChange={(e) => setOpt('direction', e.target.value === 'up' ? 1 : 0)}
         className="mt-1 block w-full rounded border border-gray-300 px-3 py-2 text-sm"
       >
         <option value="up">Count up</option>

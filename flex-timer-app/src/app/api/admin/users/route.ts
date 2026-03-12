@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
       const providers =
         u.providerData?.length > 0
           ? [...new Set(u.providerData.map((p) => providerIdToLabel[p.providerId] ?? p.providerId))]
-          : u.providerId ? [providerIdToLabel[u.providerId] ?? u.providerId] : [unknownProviderLabel]
+          : [unknownProviderLabel]
       return {
         uid: u.uid,
         email: u.email ?? null,

@@ -212,8 +212,6 @@ export interface AdminUserProfile extends AdminUserRecord {
   subscriptionInfo?: AdminSubscriptionInfo
   /** User IDs merged into this user (UserDetails.mergedUserIds) */
   mergedUserIds?: string[]
-  /** User IDs merged into this user (UserDetails.mergedUserIds) */
-  mergedUserIds?: string[]
   /** UserDetails settings map (key-value pairs from app) */
   settings?: Record<string, unknown>
   dataCounts: UserDataCounts

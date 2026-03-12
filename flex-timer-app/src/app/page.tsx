@@ -1116,7 +1116,7 @@ function UserAppLayout({
             active={activeTab === 'plans'}
             onClick={() => setActiveTab('plans')}
           >
-            Plans
+            Planning
           </TabButton>
         </div>
       </div>
@@ -1321,7 +1321,9 @@ function CreateWorkoutDialog({
       setError(
         mode === 2
           ? 'Round duration must be greater than 0.'
-          : mode === 4
+          : mode === 3
+            ? 'Add at least one interval. Work and rest durations must be greater than 0:00. Rounds must be at least 1.'
+            : mode === 4
             ? 'Work duration and Rest duration must be greater than 0.'
             : mode === 5
               ? 'Interval and Number of intervals must be greater than 0.'
@@ -1395,8 +1397,9 @@ function CreateWorkoutDialog({
           </h3>
           <p className="text-xs text-gray-500 mt-0.5">
             {step === 1 && 'Choose the workout type.'}
-            {step === 2 && 'Configure the timer settings for this workout.'}
-            {step === 3 && 'Optionally set a name and description.'}
+            {step === 2 && (mode === 3 ? 'Add and order your intervals.' : 'Configure the timer settings for this workout.')}
+            {step === 3 && (mode === 3 ? 'Set number of rounds, rest between rounds, and direction.' : 'Optionally set a name and description.')}
+            {step === 4 && 'Optionally set a name and description.'}
           </p>
         </div>
         <div className="p-4 space-y-4">
@@ -1452,6 +1455,7 @@ function CreateWorkoutDialog({
                   options={options}
                   onChange={setOptions}
                   parseDurationInput={parseDurationInput}
+                  mixedIntervalsStep={mode === 3 ? 1 : undefined}
                 />
               )}
               <div className="flex justify-end gap-2">
@@ -1475,7 +1479,36 @@ function CreateWorkoutDialog({
               </div>
             </>
           )}
-          {step === 3 && (
+          {step === 3 && mode === 3 && (
+            <>
+              <CreateWorkoutOptions
+                mode={3}
+                options={options}
+                onChange={setOptions}
+                parseDurationInput={parseDurationInput}
+                mixedIntervalsStep={2}
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setStep(2)}
+                  disabled={busy}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                >
+                  Back
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStep(4)}
+                  className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90"
+                  style={{ backgroundColor: '#6B21A8' }}
+                >
+                  Next
+                </button>
+              </div>
+            </>
+          )}
+          {step === 3 && mode !== 3 && (
             <>
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
@@ -1508,6 +1541,56 @@ function CreateWorkoutDialog({
                 <button
                   type="button"
                   onClick={() => setStep(2)}
+                  disabled={busy}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                >
+                  Back
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreate}
+                  disabled={busy || (!isMultiSegment(mode) && !hasValidDurationForMode(mode, options, parseDurationInput))}
+                  className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
+                  style={{ backgroundColor: '#6B21A8' }}
+                >
+                  {busy ? 'Creating…' : 'Create workout'}
+                </button>
+              </div>
+            </>
+          )}
+          {step === 4 && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Name (optional)
+                </label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                  placeholder="Workout name"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Description (optional)
+                </label>
+                <textarea
+                  rows={2}
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                  placeholder="Optional description"
+                />
+              </div>
+              {error && (
+                <p className="text-xs text-red-600">{error}</p>
+              )}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setStep(3)}
                   disabled={busy}
                   className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
                 >
@@ -2398,7 +2481,7 @@ const FavoritesDetailPanel = forwardRef<
   const doSave = useCallback(async () => {
     if (
       isSingle &&
-      !hasValidDurationForMode(scheduleMode, { ...scheduleOptions, direction: scheduleDirection }, parseDurationInput)
+      !hasValidDurationForMode(scheduleMode, { ...scheduleOptions, direction: scheduleDirection ? 1 : 0 }, parseDurationInput)
     ) {
       setError('Warmup, Cooldown, and Rest require a duration greater than 0:00.')
       return
@@ -2435,7 +2518,7 @@ const FavoritesDetailPanel = forwardRef<
       if (isSingle) {
         const built = buildWorkoutFromCreateForm(scheduleMode, {
           ...scheduleOptions,
-          direction: scheduleDirection,
+          direction: scheduleDirection ? 1 : 0,
         }) as { workoutSchedule: string; direction: boolean }
         await onSave(workout.id, {
           ...nameDesc,
@@ -2568,10 +2651,10 @@ const FavoritesDetailPanel = forwardRef<
           </div>
           <CreateWorkoutOptions
             mode={scheduleMode}
-            options={{ ...scheduleOptions, direction: scheduleDirection }}
+            options={{ ...scheduleOptions, direction: scheduleDirection ? 1 : 0 }}
             onChange={(o) => {
               setScheduleOptions(o)
-              setScheduleDirection(o.direction === true || o.direction === 'true')
+              setScheduleDirection(Number(o.direction) !== 0 || o.direction === 'true')
               setIsDirty(true)
             }}
             parseDurationInput={parseDurationInput}
@@ -4371,7 +4454,7 @@ function PlansSection({
   function openEditSchedulePlanned(pw: PlannedWorkout) {
     const parsed = parseScheduleToOptions(pw.workout.workoutSchedule)
     setEditScheduleMode(parsed.mode)
-    setEditScheduleOptions({ ...parsed.options, direction: parsed.direction })
+    setEditScheduleOptions({ ...parsed.options, direction: parsed.direction ? 1 : 0 })
     setEditScheduleError(null)
     setEditSchedulePlannedWorkout(pw)
   }
@@ -6168,15 +6251,16 @@ function getDefaultOptionsForMode(
   cooldownDuration?: number,
   cooldownDirection?: boolean
 ): Record<string, string | number> {
+  const dirNum = (d: boolean | number | undefined) => (d === true || d === 1 || d === 2 || d === 3 ? 1 : 0)
   switch (mode) {
     case 1:
-      return { timeCap: '10:00', direction: timerDefaultDirection ?? false }
+      return { timeCap: '10:00', direction: dirNum(timerDefaultDirection) }
     case 2:
       return {
         duration: '1:00',
         rounds: 5,
         restBetween: '0:00',
-        direction: timerDefaultDirection ?? false,
+        direction: dirNum(timerDefaultDirection),
         restDirection:
           timerDefaultRestDirection === 2 || timerDefaultRestDirection === 3
             ? timerDefaultRestDirection
@@ -6189,7 +6273,7 @@ function getDefaultOptionsForMode(
         roundsPerTabata: 8,
         numberOfTabatas: 1,
         restBetweenTabatas: '0:00',
-        direction: timerDefaultDirection ?? false,
+        direction: dirNum(timerDefaultDirection),
         restDirection:
           timerDefaultRestDirection === 2 || timerDefaultRestDirection === 3
             ? timerDefaultRestDirection
@@ -6199,7 +6283,14 @@ function getDefaultOptionsForMode(
       return {
         intervalSeconds: 60,
         intervals: 10,
-        direction: timerDefaultDirection ?? false,
+        direction: dirNum(timerDefaultDirection),
+      }
+    case 3:
+      return {
+        customIntervalsJson: JSON.stringify([{ type: 'duration', duration: '1:00' }]),
+        customIntervalNumberOfRounds: 1,
+        customIntervalRestBetweenRounds: '0:00',
+        direction: dirNum(timerDefaultDirection),
       }
     case 7:
       return { shotClockSeconds: 24 }
@@ -6209,7 +6300,7 @@ function getDefaultOptionsForMode(
           warmupDuration != null && warmupDuration > 0
             ? formatDuration(warmupDuration)
             : '10:00',
-        direction: warmupDirection ?? timerDefaultDirection ?? false,
+        direction: dirNum(warmupDirection ?? timerDefaultDirection),
       }
     case 11:
       return {
@@ -6217,10 +6308,10 @@ function getDefaultOptionsForMode(
           cooldownDuration != null && cooldownDuration > 0
             ? formatDuration(cooldownDuration)
             : '10:00',
-        direction: cooldownDirection ?? timerDefaultDirection ?? false,
+        direction: dirNum(cooldownDirection ?? timerDefaultDirection),
       }
     case 13:
-      return { timeCap: '5:00', direction: timerDefaultDirection ?? false }
+      return { timeCap: '5:00', direction: dirNum(timerDefaultDirection) }
     case 12:
       return {
         sets: 5,
@@ -6321,6 +6412,33 @@ function hasValidDurationForMode(
     const intervals = Number(options.intervals ?? 0)
     return intervalSeconds > 0 && intervals > 0
   }
+  if (mode === 3) {
+    const rounds = Number(options.customIntervalNumberOfRounds ?? 0)
+    if (rounds < 1) return false
+    try {
+      const raw = options.customIntervalsJson
+      const arr = typeof raw === 'string' ? (JSON.parse(raw) as Array<{ type: string; duration?: string; restDuration?: string; repeats?: number }>) : []
+      if (arr.length === 0) return false
+      for (const it of arr) {
+        const t = typeof it.type === 'string' ? it.type : ''
+        if (t === 'duration') {
+          if (parseDurationInput(String(it.duration ?? '')) <= 0) return false
+        } else if (t === 'rest') {
+          if (parseDurationInput(String(it.restDuration ?? '')) <= 0) return false
+        } else if (t === 'durationRepeated') {
+          if (parseDurationInput(String(it.duration ?? '')) <= 0) return false
+          if (typeof it.repeats !== 'number' || it.repeats < 1) return false
+        } else if (t === 'durationRestRepeated') {
+          if (parseDurationInput(String(it.duration ?? '')) <= 0) return false
+          if (parseDurationInput(String(it.restDuration ?? '')) <= 0) return false
+          if (typeof it.repeats !== 'number' || it.repeats < 1) return false
+        }
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
   if (mode === 12) {
     const sets = Number(options.sets ?? 0)
     if (sets <= 0) return false
@@ -6374,6 +6492,37 @@ function parseScheduleToOptions(scheduleStr: string | null | undefined): {
         options.rounds = num('commonIntervalNumberOfRounds')
         options.restBetween = formatDuration(num('commonIntervalRestBetweenRounds') || dur('commonIntervalRestBetweenRounds'))
         break
+      case 3: {
+        const types = Array.isArray(schedule.customIntervalTypes)
+          ? (schedule.customIntervalTypes as string[])
+          : []
+        const durations = Array.isArray(schedule.customIntervalDurations)
+          ? (schedule.customIntervalDurations as number[])
+          : []
+        const restDurations = Array.isArray(schedule.customIntervalRestDurations)
+          ? (schedule.customIntervalRestDurations as number[])
+          : []
+        const repeats = Array.isArray(schedule.customIntervalRepeats)
+          ? (schedule.customIntervalRepeats as number[])
+          : []
+        const intervals: Array<{ type: string; duration?: string; restDuration?: string; repeats?: number }> = types.map((type, i) => {
+          const item: { type: string; duration?: string; restDuration?: string; repeats?: number } = { type }
+          if (type === 'duration' || type === 'durationRepeated' || type === 'durationRestRepeated') {
+            item.duration = formatDuration(durations[i] ?? 0)
+          }
+          if (type === 'rest' || type === 'durationRestRepeated') {
+            item.restDuration = formatDuration(restDurations[i] ?? 0)
+          }
+          if (type === 'durationRepeated' || type === 'durationRestRepeated') {
+            item.repeats = repeats[i] ?? 1
+          }
+          return item
+        })
+        options.customIntervalsJson = JSON.stringify(intervals)
+        options.customIntervalNumberOfRounds = num('customIntervalNumberOfRounds') || 1
+        options.customIntervalRestBetweenRounds = formatDuration(num('customIntervalRestBetweenRounds') || dur('customIntervalRestBetweenRounds'))
+        break
+      }
       case 4:
         options.workDuration = formatDuration(num('tabataWorkDuration') || dur('tabataWorkDuration'))
         options.restDuration = formatDuration(num('tabataRestDuration') || dur('tabataRestDuration'))
@@ -6443,7 +6592,7 @@ function buildWorkoutFromCreateForm(
   }
   const schedule: Record<string, unknown> = { timerMode: mode }
   const dir =
-    options.direction === true || options.direction === 'true'
+    Number(options.direction) !== 0 || options.direction === 'true'
   const num = (key: string) => {
     const v = options[key]
     if (typeof v === 'number') return v
@@ -6468,6 +6617,44 @@ function buildWorkoutFromCreateForm(
       schedule.commonIntervalNumberOfRounds = num('rounds')
       schedule.commonIntervalRestBetweenRounds = dur('restBetween')
       break
+    case 3: {
+      const types: string[] = []
+      const durations: number[] = []
+      const restDurations: number[] = []
+      const repeats: number[] = []
+      try {
+        const raw = options.customIntervalsJson
+        const arr = typeof raw === 'string' ? (JSON.parse(raw) as Array<{ type: string; duration?: string; restDuration?: string; repeats?: number }>) : []
+        for (const it of arr) {
+          const t = typeof it.type === 'string' ? it.type : 'duration'
+          types.push(t)
+          if (t === 'duration' || t === 'durationRepeated' || t === 'durationRestRepeated') {
+            durations.push(it.duration != null ? parseDuration(String(it.duration)) : 0)
+          } else {
+            durations.push(0)
+          }
+          if (t === 'rest' || t === 'durationRestRepeated') {
+            restDurations.push(it.restDuration != null ? parseDuration(String(it.restDuration)) : 0)
+          } else {
+            restDurations.push(0)
+          }
+          if (t === 'durationRepeated' || t === 'durationRestRepeated') {
+            repeats.push(typeof it.repeats === 'number' && it.repeats > 0 ? it.repeats : 1)
+          } else {
+            repeats.push(0)
+          }
+        }
+      } catch {
+        // leave arrays empty
+      }
+      schedule.customIntervalTypes = types
+      schedule.customIntervalDurations = durations
+      schedule.customIntervalRestDurations = restDurations
+      schedule.customIntervalRepeats = repeats
+      schedule.customIntervalNumberOfRounds = Math.max(1, num('customIntervalNumberOfRounds'))
+      schedule.customIntervalRestBetweenRounds = dur('customIntervalRestBetweenRounds')
+      break
+    }
     case 4:
       schedule.tabataWorkDuration = dur('workDuration')
       schedule.tabataRestDuration = dur('restDuration')
@@ -6520,6 +6707,8 @@ function CreateWorkoutOptions({
   onChange,
   parseDurationInput,
   horizontalLayout = false,
+  /** When 1, show only intervals list. When 2, show only rounds/rest/direction. Used by CreateWorkoutDialog for Mixed Intervals. */
+  mixedIntervalsStep,
 }: {
   mode: number
   options: Record<string, string | number>
@@ -6527,6 +6716,7 @@ function CreateWorkoutOptions({
   parseDurationInput: (s: string) => number
   /** When true, show up to 4 values per row (e.g. on favorites schedule edit). */
   horizontalLayout?: boolean
+  mixedIntervalsStep?: 1 | 2
 }) {
   const layoutClass = horizontalLayout
     ? 'grid grid-cols-2 lg:grid-cols-4 gap-3'
@@ -6535,6 +6725,9 @@ function CreateWorkoutOptions({
     onChange({ ...options, [key]: value })
   const getOpt = (key: string, def: string | number) =>
     options[key] ?? def
+  const modeNum = Number(mode)
+  const isMixedIntervals = modeNum === 3 || mode === 3 || String(mode).trim() === '3'
+  const restBetweenRepetitionsLabel = horizontalLayout ? 'Rest b/w repetitions' : 'Rest between repetitions'
   const durationInput = (
     key: string,
     label: string,
@@ -6585,8 +6778,8 @@ function CreateWorkoutOptions({
         Direction
       </label>
       <select
-        value={getOpt('direction', false) ? 'up' : 'down'}
-        onChange={(e) => setOpt('direction', e.target.value === 'up')}
+        value={Number(getOpt('direction', 0)) ? 'up' : 'down'}
+        onChange={(e) => setOpt('direction', e.target.value === 'up' ? 1 : 0)}
         className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
       >
         <option value="up">Count up</option>
@@ -6612,7 +6805,137 @@ function CreateWorkoutOptions({
     </div>
   )
 
-  switch (mode) {
+  switch (modeNum) {
+    case 3: {
+      type CustomIntervalItem = { type: string; duration?: string; restDuration?: string; repeats?: number }
+      let intervals: CustomIntervalItem[] = []
+      try {
+        const raw = getOpt('customIntervalsJson', '[]')
+        intervals = typeof raw === 'string' ? (JSON.parse(raw) as CustomIntervalItem[]) : []
+        if (!Array.isArray(intervals)) intervals = []
+      } catch {
+        intervals = []
+      }
+      const setIntervals = (next: CustomIntervalItem[]) => {
+        onChange({ ...options, customIntervalsJson: JSON.stringify(next) })
+      }
+      const addInterval = (type: 'duration' | 'rest' | 'durationRepeated' | 'durationRestRepeated') => {
+        if (type === 'duration') setIntervals([...intervals, { type: 'duration', duration: '1:00' }])
+        else if (type === 'rest') setIntervals([...intervals, { type: 'rest', restDuration: '0:30' }])
+        else if (type === 'durationRepeated') setIntervals([...intervals, { type: 'durationRepeated', duration: '1:00', repeats: 3 }])
+        else setIntervals([...intervals, { type: 'durationRestRepeated', duration: '0:45', restDuration: '0:15', repeats: 4 }])
+      }
+      const updateInterval = (index: number, updates: Partial<CustomIntervalItem>) => {
+        const next = intervals.map((it, i) => (i === index ? { ...it, ...updates } : it))
+        setIntervals(next)
+      }
+      const removeInterval = (index: number) => setIntervals(intervals.filter((_, i) => i !== index))
+      const moveInterval = (index: number, dir: 'up' | 'down') => {
+        const target = dir === 'up' ? index - 1 : index + 1
+        if (target < 0 || target >= intervals.length) return
+        const next = [...intervals]
+        ;[next[index], next[target]] = [next[target], next[index]]
+        setIntervals(next)
+      }
+      const typeLabels: Record<string, string> = {
+        duration: 'Work Interval',
+        rest: 'Rest Interval',
+        durationRepeated: 'Work Block',
+        durationRestRepeated: 'Work/Rest Block',
+      }
+      if (mixedIntervalsStep === 2) {
+        return (
+          <div className={layoutClass}>
+            {numberInput('customIntervalNumberOfRounds', 'Repetitions', 1, 1)}
+            {Number(getOpt('customIntervalNumberOfRounds', 1)) > 1 &&
+              durationInput('customIntervalRestBetweenRounds', restBetweenRepetitionsLabel, '0:00')}
+            {directionSelect()}
+          </div>
+        )
+      }
+      return (
+        <div className="space-y-4">
+          <div>
+            <div className="mb-2">
+              <span className="text-xs font-medium text-gray-700">Add</span>
+            </div>
+            <div className="flex flex-wrap gap-1 mb-2">
+              <button type="button" onClick={() => addInterval('duration')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">Work Interval</button>
+              <button type="button" onClick={() => addInterval('rest')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">Rest Interval</button>
+              <button type="button" onClick={() => addInterval('durationRepeated')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">Work Block</button>
+              <button type="button" onClick={() => addInterval('durationRestRepeated')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">Work/Rest Block</button>
+            </div>
+            <ul className="space-y-2 max-h-[40vh] overflow-y-auto">
+              {intervals.map((it, index) => (
+                <li key={index} className="rounded border border-gray-200 bg-gray-50/50 p-2 flex flex-wrap items-end gap-2">
+                  <span className="text-xs font-medium text-gray-800 min-w-[7rem] shrink-0">{typeLabels[it.type] ?? it.type}</span>
+                  {(it.type === 'duration' || it.type === 'durationRepeated' || it.type === 'durationRestRepeated') && (
+                    <div>
+                      <label className="block text-xs text-gray-500">Work</label>
+                      <input
+                        type="text"
+                        placeholder="0:00"
+                        value={it.duration ?? ''}
+                        onChange={(e) => updateInterval(index, { duration: e.target.value })}
+                        className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+                      />
+                    </div>
+                  )}
+                  {(it.type === 'rest' || it.type === 'durationRestRepeated') && (
+                    <div>
+                      <label className="block text-xs text-gray-500">Rest</label>
+                      <input
+                        type="text"
+                        placeholder="0:00"
+                        value={it.restDuration ?? ''}
+                        onChange={(e) => updateInterval(index, { restDuration: e.target.value })}
+                        className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+                      />
+                    </div>
+                  )}
+                  {(it.type === 'durationRepeated' || it.type === 'durationRestRepeated') && (
+                    <div>
+                      <label className="block text-xs text-gray-500">Repeats</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={it.repeats ?? 1}
+                        onChange={(e) => updateInterval(index, { repeats: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+                        className="w-14 rounded border border-gray-300 px-2 py-1 text-sm"
+                      />
+                    </div>
+                  )}
+                  <div className="flex gap-0.5 ml-auto">
+                    <button type="button" onClick={() => moveInterval(index, 'up')} disabled={index === 0} className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40" aria-label="Move up">↑</button>
+                    <button type="button" onClick={() => moveInterval(index, 'down')} disabled={index === intervals.length - 1} className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40" aria-label="Move down">↓</button>
+                    <button
+                      type="button"
+                      onClick={() => removeInterval(index)}
+                      className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100"
+                      aria-label="Remove"
+                      title="Remove"
+                    >
+                      ×
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {intervals.length === 0 && (
+              <p className="text-xs text-gray-500">Add at least one interval above.</p>
+            )}
+          </div>
+          {mixedIntervalsStep === undefined && (
+            <div className={layoutClass}>
+              {numberInput('customIntervalNumberOfRounds', 'Repetitions', 1, 1)}
+              {Number(getOpt('customIntervalNumberOfRounds', 1)) > 1 &&
+                durationInput('customIntervalRestBetweenRounds', restBetweenRepetitionsLabel, '0:00')}
+              {directionSelect()}
+            </div>
+          )}
+        </div>
+      )
+    }
     case 1:
       return (
         <div className={layoutClass}>

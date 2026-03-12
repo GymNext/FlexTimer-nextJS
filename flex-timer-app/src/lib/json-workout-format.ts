@@ -236,13 +236,44 @@ function scheduleToDisplayDescription(
       return r
     }
     case 3: {
-      const durations = Array.isArray(s.customIntervalDurations) ? (s.customIntervalDurations as number[]) : []
-      if (durations.length === 0) return strings.no_custom_intervals_specified_text
+      const types = Array.isArray(s.customIntervalTypes)
+        ? (s.customIntervalTypes as string[])
+        : []
+      const durations = Array.isArray(s.customIntervalDurations)
+        ? (s.customIntervalDurations as number[])
+        : []
+      const restDurations = Array.isArray(s.customIntervalRestDurations)
+        ? (s.customIntervalRestDurations as number[])
+        : []
+      const repeats = Array.isArray(s.customIntervalRepeats)
+        ? (s.customIntervalRepeats as number[])
+        : []
+      if (types.length === 0 && durations.length === 0) {
+        return strings.no_custom_intervals_specified_text
+      }
       const rounds = n('customIntervalNumberOfRounds', 1)
-      const restBetween = n('customIntervalRestBetweenIntervals', 0)
-      const parts = durations.map((d) => durationToString(d))
-      let r = rounds > 1 ? `${rounds} × ` : ''
-      r += parts.join(restBetween > 0 ? `, ${durationToString(restBetween)} ${strings.rest_abbr}, ` : ', ')
+      const parts: string[] = []
+      const count = Math.max(types.length, durations.length, restDurations.length, repeats.length)
+      for (let i = 0; i < count; i += 1) {
+        const t = typeof types[i] === 'string' ? (types[i] as string) : 'duration'
+        const work = durations[i] ?? 0
+        const rest = restDurations[i] ?? 0
+        const repsRaw = repeats[i]
+        const reps = typeof repsRaw === 'number' && repsRaw > 0 ? repsRaw : 1
+        if (t === 'duration') {
+          parts.push(durationToString(work))
+        } else if (t === 'rest') {
+          parts.push(`${durationToString(rest)}R`)
+        } else if (t === 'durationRepeated') {
+          parts.push(`${reps} x ${durationToString(work)}`)
+        } else if (t === 'durationRestRepeated') {
+          parts.push(`${reps} x ${durationToString(work)}/${durationToString(rest)}R`)
+        } else {
+          parts.push(durationToString(work))
+        }
+      }
+      let r = rounds > 1 ? `${rounds} x ` : ''
+      r += parts.join(', ')
       return r
     }
     case 4: {
@@ -299,8 +330,8 @@ export interface WorkoutEntryLike {
   workoutName?: string | null
   workoutDescription?: string | null
   type?: string
-  timerMode?: number
-  timerModes?: number[]
+  timerMode?: number | unknown
+  timerModes?: number[] | unknown
   workoutSchedule?: string | null
   segments?: Array<{ workoutName?: string | null; workoutDescription?: string | null; workoutSchedule?: string | null; timerMode?: number }>
   direction?: boolean

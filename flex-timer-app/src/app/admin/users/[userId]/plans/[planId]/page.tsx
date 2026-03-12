@@ -251,7 +251,7 @@ export default function AdminPlanDetailPage() {
 
   const buildWorkoutFromCreateForm = useCallback((): Record<string, unknown> => {
     const schedule: Record<string, unknown> = { timerMode: createMode }
-    const dir = createOptions.direction === true || createOptions.direction === 'true'
+    const dir = createOptions.direction === 1 || createOptions.direction === 'true'
     const num = (key: string) => {
       const v = createOptions[key]
       if (typeof v === 'number') return v
@@ -763,8 +763,8 @@ function CreateWorkoutOptions({
     <div key="direction">
       <label className="block text-sm font-medium text-gray-700">Direction</label>
       <select
-        value={getOpt('direction', false) ? 'up' : 'down'}
-        onChange={(e) => setOpt('direction', e.target.value === 'up')}
+        value={Number(getOpt('direction', 0)) ? 'up' : 'down'}
+        onChange={(e) => setOpt('direction', e.target.value === 'up' ? 1 : 0)}
         className="mt-1 block w-full rounded border border-gray-300 px-3 py-2 text-sm"
       >
         <option value="up">Count up</option>
