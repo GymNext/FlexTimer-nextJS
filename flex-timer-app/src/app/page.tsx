@@ -6698,7 +6698,13 @@ function parseScheduleToOptions(scheduleStr: string | null | undefined): {
         })
         options.customIntervalsJson = JSON.stringify(intervals)
         options.customIntervalNumberOfRounds = num('customIntervalNumberOfRounds') || 1
-        options.customIntervalRestBetweenRounds = formatDuration(num('customIntervalRestBetweenRounds') || dur('customIntervalRestBetweenRounds'))
+        const restBetweenRoundsSeconds =
+          num('customIntervalRestBetweenRounds') || dur('customIntervalRestBetweenRounds')
+        options.customIntervalRestBetweenRounds = formatDuration(restBetweenRoundsSeconds)
+        const restBetweenIntervalsSeconds =
+          num('customIntervalRestBetweenIntervals') || dur('customIntervalRestBetweenIntervals')
+        options.customIntervalRestBetweenIntervals = formatDuration(restBetweenIntervalsSeconds)
+        options.customIntervalRestBetweenIntervalsEnabled = restBetweenIntervalsSeconds > 0 ? 1 : 0
         break
       }
       case 4:
@@ -6853,6 +6859,12 @@ function buildWorkoutFromCreateForm(
       schedule.customIntervalSetNames = setNames
       schedule.customIntervalNumberOfRounds = Math.max(1, num('customIntervalNumberOfRounds'))
       schedule.customIntervalRestBetweenRounds = dur('customIntervalRestBetweenRounds')
+      const recurringRestEnabledOpt = options.customIntervalRestBetweenIntervalsEnabled
+      const recurringRestEnabled =
+        typeof recurringRestEnabledOpt === 'number'
+          ? recurringRestEnabledOpt !== 0
+          : recurringRestEnabledOpt === '1'
+      schedule.customIntervalRestBetweenIntervals = recurringRestEnabled ? dur('customIntervalRestBetweenIntervals') : 0
       break
     }
     case 4:
@@ -7048,9 +7060,10 @@ function CreateWorkoutOptions({
         durationRepeated: 'Work Block',
         durationRestRepeated: 'Work/Rest Block',
       }
-      const recurringRestSeconds = parseDurationInput(String(getOpt('customIntervalRestBetweenIntervals', '0') ?? '0'))
-      const recurringRestEnabled = recurringRestSeconds > 0
-      const recurringRestDisplay = String(getOpt('customIntervalRestBetweenIntervals', '1:00') ?? '1:00')
+      const recurringRestEnabled = Number(getOpt('customIntervalRestBetweenIntervalsEnabled', 0)) === 1
+      const recurringRestDisplay = String(
+        getOpt('customIntervalRestBetweenIntervals', recurringRestEnabled ? '1:00' : '0:00') ?? (recurringRestEnabled ? '1:00' : '0:00')
+      )
       if (mixedIntervalsStep === 2) {
         return (
           <div className={layoutClass}>
@@ -7156,10 +7169,14 @@ function CreateWorkoutOptions({
                   checked={recurringRestEnabled}
                   onChange={(e) => {
                     if (e.target.checked) {
-                      const current = String(getOpt('customIntervalRestBetweenIntervals', '')) || '1:00'
-                      setOpt('customIntervalRestBetweenIntervals', current)
+                      const raw = String(getOpt('customIntervalRestBetweenIntervals', '') ?? '').trim()
+                      const isZeroLike =
+                        raw === '' || raw === '0' || raw === '0:00' || raw === '00:00'
+                      const next = isZeroLike ? '1:00' : raw
+                      setOpt('customIntervalRestBetweenIntervals', next)
+                      setOpt('customIntervalRestBetweenIntervalsEnabled', 1)
                     } else {
-                      setOpt('customIntervalRestBetweenIntervals', '0:00')
+                      setOpt('customIntervalRestBetweenIntervalsEnabled', 0)
                     }
                   }}
                   className="h-3 w-3 rounded border-gray-300 text-gymnext focus:ring-gymnext"
