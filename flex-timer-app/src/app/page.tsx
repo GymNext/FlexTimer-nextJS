@@ -1000,7 +1000,7 @@ function UserAppLayout({
 
   function updatePlannedWorkoutMetadataInPlace(
     plannedWorkoutId: string,
-    patch: { workoutName?: string | null; workoutDescription?: string | null }
+    patch: { workoutName?: string | null; workoutDescription?: string | null; workoutDetails?: string | null }
   ) {
     const updater = (list: PlannedWorkout[]) =>
       list.map((pw) =>
@@ -1012,6 +1012,9 @@ function UserAppLayout({
                 workoutName: patch.workoutName !== undefined ? patch.workoutName : pw.workout.workoutName,
                 workoutDescription:
                   patch.workoutDescription !== undefined ? patch.workoutDescription : pw.workout.workoutDescription,
+                ...(patch.workoutDetails !== undefined && pw.workout.type !== 'MultiSegmentWorkout'
+                  ? { workoutDetails: patch.workoutDetails }
+                  : {}),
               },
             }
           : pw
@@ -1363,6 +1366,7 @@ function CreateWorkoutDialog({
   )
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [workoutDetails, setWorkoutDetails] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -1418,16 +1422,18 @@ function CreateWorkoutDialog({
                     : 1),
           },
         })
-        if (name.trim() || description.trim()) {
+        if (name.trim() || description.trim() || workoutDetails.trim()) {
           await onSaveWorkout(created.id, {
             workoutName: name.trim() || null,
             workoutDescription: description.trim() || null,
+            workoutDetails: workoutDetails.trim() || null,
           })
         }
         onCreated({
           ...created,
           workoutName: name.trim() || null,
           workoutDescription: description.trim() || null,
+          workoutDetails: workoutDetails.trim() || null,
         })
       }
       onClose()
@@ -1589,6 +1595,20 @@ function CreateWorkoutDialog({
                   placeholder="Optional description"
                 />
               </div>
+              {!isMultiSegment(mode) && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Workout details (optional)
+                  </label>
+                  <textarea
+                    rows={6}
+                    value={workoutDetails}
+                    onChange={(e) => setWorkoutDetails(e.target.value)}
+                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                    placeholder="Rep scheme, weights, movements, etc."
+                  />
+                </div>
+              )}
               {error && (
                 <p className="text-xs text-red-600">{error}</p>
               )}
@@ -1732,6 +1752,11 @@ function FavoritesSection({
   const [editDescription, setEditDescription] = useState('')
   const [editBusy, setEditBusy] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
+
+  const [editDetailsWorkout, setEditDetailsWorkout] = useState<Workout | null>(null)
+  const [editDetailsValue, setEditDetailsValue] = useState('')
+  const [editDetailsBusy, setEditDetailsBusy] = useState(false)
+  const [editDetailsError, setEditDetailsError] = useState<string | null>(null)
 
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false)
@@ -2079,6 +2104,20 @@ function FavoritesSection({
                       >
                         Edit workout
                       </button>
+                      {selectedWorkout.type === 'SingleSegmentWorkout' && (
+                        <button
+                          type="button"
+                          className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                          onClick={() => {
+                            setMoreMenuOpen(false)
+                            setEditDetailsWorkout(selectedWorkout)
+                            setEditDetailsValue((selectedWorkout as { workoutDetails?: string | null }).workoutDetails ?? '')
+                            setEditDetailsError(null)
+                          }}
+                        >
+                          Edit workout details
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
@@ -2448,6 +2487,66 @@ function FavoritesSection({
         </div>
       )}
 
+      {editDetailsWorkout && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !editDetailsBusy && setEditDetailsWorkout(null)}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-800">Edit workout details</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Rep scheme, weights, movements, etc.</p>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault()
+                if (!editDetailsWorkout) return
+                setEditDetailsBusy(true)
+                setEditDetailsError(null)
+                try {
+                  await onSave(editDetailsWorkout.id, { workoutDetails: editDetailsValue.trim() || null })
+                  setEditDetailsWorkout(null)
+                } catch (err) {
+                  setEditDetailsError(err instanceof Error ? err.message : 'Failed to save')
+                } finally {
+                  setEditDetailsBusy(false)
+                }
+              }}
+              className="p-4 space-y-4"
+            >
+              <textarea
+                rows={8}
+                value={editDetailsValue}
+                onChange={(e) => setEditDetailsValue(e.target.value)}
+                className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
+              />
+              {editDetailsError && <p className="text-xs text-red-600">{editDetailsError}</p>}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditDetailsWorkout(null)}
+                  disabled={editDetailsBusy}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editDetailsBusy}
+                  className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
+                  style={{ backgroundColor: '#6B21A8' }}
+                >
+                  {editDetailsBusy ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {createDialogOpen && favoritesCollection && (
         <CreateWorkoutDialog
           onClose={onCloseCreateDialog}
@@ -2519,6 +2618,7 @@ const FavoritesDetailPanel = forwardRef<
   )
   const [newSegmentName, setNewSegmentName] = useState('')
   const [newSegmentDescription, setNewSegmentDescription] = useState('')
+  const [newSegmentDetails, setNewSegmentDetails] = useState('')
   const [newSegmentError, setNewSegmentError] = useState<string | null>(null)
 
   // State for the "Edit segment" dialog (same step flow as Add segment)
@@ -2530,6 +2630,7 @@ const FavoritesDetailPanel = forwardRef<
   )
   const [editSegmentName, setEditSegmentName] = useState('')
   const [editSegmentDescription, setEditSegmentDescription] = useState('')
+  const [editSegmentDetails, setEditSegmentDetails] = useState('')
   const [editSegmentError, setEditSegmentError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -2662,6 +2763,7 @@ const FavoritesDetailPanel = forwardRef<
     setNewSegmentOptions(getDefaultOptionsForMode(1))
     setNewSegmentName('')
     setNewSegmentDescription('')
+    setNewSegmentDetails('')
     setNewSegmentError(null)
     setAddSegmentStep(1)
     setAddSegmentOpen(true)
@@ -2695,6 +2797,7 @@ const FavoritesDetailPanel = forwardRef<
     setEditSegmentOptions(parsed.options)
     setEditSegmentName(seg.workoutName ?? '')
     setEditSegmentDescription(seg.workoutDescription ?? '')
+    setEditSegmentDetails(seg.workoutDetails ?? '')
     setEditSegmentStep(1)
     setEditSegmentError(null)
     setEditSegmentIndex(index)
@@ -2727,6 +2830,7 @@ const FavoritesDetailPanel = forwardRef<
     updateSegment(editSegmentIndex, {
       workoutName: editSegmentName.trim() || null,
       workoutDescription: editSegmentDescription.trim() || null,
+      workoutDetails: editSegmentDetails.trim() || null,
       workoutSchedule: built.workoutSchedule,
     })
     setEditSegmentIndex(null)
@@ -2749,6 +2853,7 @@ const FavoritesDetailPanel = forwardRef<
         workoutId: `${workout.workoutId}-seg-${index}`,
         workoutName: newSegmentName.trim() || null,
         workoutDescription: newSegmentDescription.trim() || null,
+        workoutDetails: newSegmentDetails.trim() || null,
         workoutSchedule: built.workoutSchedule,
       }
       return [...prev, next]
@@ -2976,6 +3081,18 @@ const FavoritesDetailPanel = forwardRef<
                     placeholder="Optional"
                   />
                 </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Workout details (optional)
+                  </label>
+                  <textarea
+                    rows={5}
+                    value={newSegmentDetails}
+                    onChange={(e) => setNewSegmentDetails(e.target.value)}
+                    className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                    placeholder="Rep scheme, weights, movements, etc."
+                  />
+                </div>
               </div>
             )}
 
@@ -3138,6 +3255,18 @@ const FavoritesDetailPanel = forwardRef<
                     onChange={(e) => setEditSegmentDescription(e.target.value)}
                     className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
                     placeholder="Optional"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Workout details (optional)
+                  </label>
+                  <textarea
+                    rows={5}
+                    value={editSegmentDetails}
+                    onChange={(e) => setEditSegmentDetails(e.target.value)}
+                    className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                    placeholder="Rep scheme, weights, movements, etc."
                   />
                 </div>
               </div>
@@ -3306,6 +3435,11 @@ function CollectionsSection({
   const [editMetaDescription, setEditMetaDescription] = useState('')
   const [editMetaBusy, setEditMetaBusy] = useState(false)
   const [editMetaError, setEditMetaError] = useState<string | null>(null)
+
+  const [editDetailsWorkout, setEditDetailsWorkout] = useState<Workout | null>(null)
+  const [editDetailsValue, setEditDetailsValue] = useState('')
+  const [editDetailsBusy, setEditDetailsBusy] = useState(false)
+  const [editDetailsError, setEditDetailsError] = useState<string | null>(null)
 
   const [collectionMoreMenuOpen, setCollectionMoreMenuOpen] = useState(false)
   const [collectionDeleteConfirmOpen, setCollectionDeleteConfirmOpen] = useState(false)
@@ -3971,6 +4105,21 @@ function CollectionsSection({
                               >
                                 Edit workout
                               </button>
+                              {w.type === 'SingleSegmentWorkout' && (
+                                <button
+                                  type="button"
+                                  className="w-full text-left px-3 py-2 text-sm text-gray-900 hover:bg-gray-100"
+                                  onClick={() => {
+                                    setCollectionWorkoutMenuOpenId(null)
+                                    setCollectionWorkoutMenuAnchorRect(null)
+                                    setEditDetailsWorkout(w)
+                                    setEditDetailsValue((w as { workoutDetails?: string | null }).workoutDetails ?? '')
+                                    setEditDetailsError(null)
+                                  }}
+                                >
+                                  Edit workout details
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 className="w-full text-left px-3 py-2 text-sm text-gray-900 hover:bg-gray-100"
@@ -4506,6 +4655,66 @@ function CollectionsSection({
         </div>
       )}
 
+      {editDetailsWorkout && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !editDetailsBusy && setEditDetailsWorkout(null)}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-800">Edit workout details</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Rep scheme, weights, movements, etc.</p>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault()
+                if (!editDetailsWorkout) return
+                setEditDetailsBusy(true)
+                setEditDetailsError(null)
+                try {
+                  await onSaveWorkout(editDetailsWorkout.id, { workoutDetails: editDetailsValue.trim() || null })
+                  setEditDetailsWorkout(null)
+                } catch (err) {
+                  setEditDetailsError(err instanceof Error ? err.message : 'Failed to save')
+                } finally {
+                  setEditDetailsBusy(false)
+                }
+              }}
+              className="p-4 space-y-4"
+            >
+              <textarea
+                rows={8}
+                value={editDetailsValue}
+                onChange={(e) => setEditDetailsValue(e.target.value)}
+                className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
+              />
+              {editDetailsError && <p className="text-xs text-red-600">{editDetailsError}</p>}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditDetailsWorkout(null)}
+                  disabled={editDetailsBusy}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editDetailsBusy}
+                  className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
+                  style={{ backgroundColor: '#6B21A8' }}
+                >
+                  {editDetailsBusy ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {editOpen && editCollection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
@@ -4624,7 +4833,7 @@ function PlansSection({
   reloadPlanned: () => void
   onPlannedWorkoutMetadataSaved: (
     plannedWorkoutId: string,
-    patch: { workoutName?: string | null; workoutDescription?: string | null }
+    patch: { workoutName?: string | null; workoutDescription?: string | null; workoutDetails?: string | null }
   ) => void
   onCreatePlan: (name: string, description: string | null) => Promise<WorkoutPlan>
   onUpdatePlan: (planId: string, name: string, description: string | null) => Promise<void>
@@ -4669,6 +4878,11 @@ function PlansSection({
   const [editPlannedBusy, setEditPlannedBusy] = useState(false)
   const [editPlannedError, setEditPlannedError] = useState<string | null>(null)
 
+  const [editDetailsPlannedWorkout, setEditDetailsPlannedWorkout] = useState<PlannedWorkout | null>(null)
+  const [editDetailsValue, setEditDetailsValue] = useState('')
+  const [editDetailsBusy, setEditDetailsBusy] = useState(false)
+  const [editDetailsError, setEditDetailsError] = useState<string | null>(null)
+
   const [createPlanName, setCreatePlanName] = useState('')
   const [createPlanDescription, setCreatePlanDescription] = useState('')
   const [createPlanBusy, setCreatePlanBusy] = useState(false)
@@ -4687,6 +4901,7 @@ function PlansSection({
   const [createNewNameStep, setCreateNewNameStep] = useState(false)
   const [createPlannedName, setCreatePlannedName] = useState('')
   const [createPlannedDescription, setCreatePlannedDescription] = useState('')
+  const [createPlannedDetails, setCreatePlannedDetails] = useState('')
 
   const [planMoreMenuOpen, setPlanMoreMenuOpen] = useState(false)
   const [planDeleteConfirmOpen, setPlanDeleteConfirmOpen] = useState(false)
@@ -4991,6 +5206,7 @@ function PlansSection({
     }
     if (w.workoutSchedule != null) entry.workoutSchedule = w.workoutSchedule
     if (w.direction != null) entry.direction = w.direction
+    if (w.type === 'SingleSegmentWorkout' && 'workoutDetails' in w && w.workoutDetails != null) entry.workoutDetails = w.workoutDetails
     if (w.type === 'MultiSegmentWorkout' && w.segments) entry.segments = w.segments
     return entry
   }
@@ -5080,7 +5296,7 @@ function PlansSection({
         throw new Error(data.error || `HTTP ${res.status}`)
       }
       const created = (await res.json()) as { id: string; [k: string]: unknown }
-      const hasMeta = createPlannedName.trim() || createPlannedDescription.trim()
+      const hasMeta = createPlannedName.trim() || createPlannedDescription.trim() || createPlannedDetails.trim()
       if (created?.id && hasMeta) {
         const patchRes = await authedFetch(
           `/api/app/plans/${encodeURIComponent(selectedPlan.id)}/planned-workouts/${encodeURIComponent(created.id)}`,
@@ -5090,6 +5306,7 @@ function PlansSection({
             body: JSON.stringify({
               workoutName: createPlannedName.trim() || null,
               workoutDescription: createPlannedDescription.trim() || null,
+              workoutDetails: createPlannedDetails.trim() || null,
             }),
           }
         )
@@ -5104,6 +5321,7 @@ function PlansSection({
       setCreateNewNameStep(false)
       setCreatePlannedName('')
       setCreatePlannedDescription('')
+      setCreatePlannedDetails('')
       reloadPlanned()
     } catch (e) {
       setCreateError(
@@ -5663,6 +5881,21 @@ function PlansSection({
                                         >
                                           Edit workout
                                         </button>
+                                        {pw.workout.type !== 'MultiSegmentWorkout' && (
+                                          <button
+                                            type="button"
+                                            className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                            onClick={() => {
+                                              setPlannedWorkoutMenuId(null)
+                                              setPlannedWorkoutMenuAnchorRect(null)
+                                              setEditDetailsPlannedWorkout(pw)
+                                              setEditDetailsValue((pw.workout as { workoutDetails?: string | null }).workoutDetails ?? '')
+                                              setEditDetailsError(null)
+                                            }}
+                                          >
+                                            Edit workout details
+                                          </button>
+                                        )}
                                         </>
                                         )}
                                         <button
@@ -6153,6 +6386,17 @@ function PlansSection({
                           placeholder="Optional description"
                         />
                       </div>
+                      <div>
+                        <label htmlFor="create-planned-details" className="block text-xs font-medium text-gray-700 mb-1">Workout details (optional)</label>
+                        <textarea
+                          id="create-planned-details"
+                          rows={6}
+                          value={createPlannedDetails}
+                          onChange={(e) => setCreatePlannedDetails(e.target.value)}
+                          className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                          placeholder="Rep scheme, weights, movements, etc."
+                        />
+                      </div>
                       <div className="flex justify-end gap-2 pt-1">
                         <button
                           type="button"
@@ -6548,6 +6792,81 @@ function PlansSection({
                   style={{ backgroundColor: '#6B21A8' }}
                 >
                   {editPlannedBusy ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {editDetailsPlannedWorkout && selectedPlan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !editDetailsBusy && setEditDetailsPlannedWorkout(null)}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-800">Edit workout details</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Rep scheme, weights, movements, etc.</p>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault()
+                if (!editDetailsPlannedWorkout || !selectedPlan) return
+                setEditDetailsBusy(true)
+                setEditDetailsError(null)
+                try {
+                  const res = await authedFetch(
+                    `/api/app/plans/${encodeURIComponent(selectedPlan.id)}/planned-workouts/${encodeURIComponent(editDetailsPlannedWorkout.id)}`,
+                    {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ workoutDetails: editDetailsValue.trim() || null }),
+                    }
+                  )
+                  if (!res.ok) {
+                    const data = await res.json().catch(() => ({}))
+                    throw new Error(data.error || `HTTP ${res.status}`)
+                  }
+                  onPlannedWorkoutMetadataSaved(editDetailsPlannedWorkout.id, {
+                    workoutDetails: editDetailsValue.trim() || null,
+                  })
+                  setEditDetailsPlannedWorkout(null)
+                  toast.success('Workout details saved')
+                } catch (err) {
+                  setEditDetailsError(err instanceof Error ? err.message : 'Failed to save')
+                } finally {
+                  setEditDetailsBusy(false)
+                }
+              }}
+              className="p-4 space-y-4"
+            >
+              <textarea
+                rows={8}
+                value={editDetailsValue}
+                onChange={(e) => setEditDetailsValue(e.target.value)}
+                className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
+              />
+              {editDetailsError && <p className="text-xs text-red-600">{editDetailsError}</p>}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditDetailsPlannedWorkout(null)}
+                  disabled={editDetailsBusy}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editDetailsBusy}
+                  className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
+                  style={{ backgroundColor: '#6B21A8' }}
+                >
+                  {editDetailsBusy ? 'Saving…' : 'Save'}
                 </button>
               </div>
             </form>

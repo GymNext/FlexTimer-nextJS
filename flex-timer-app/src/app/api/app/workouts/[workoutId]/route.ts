@@ -98,7 +98,7 @@ export async function PATCH(
     }
 
     const hasMetadataUpdate =
-      'workoutName' in body || 'workoutDescription' in body
+      'workoutName' in body || 'workoutDescription' in body || 'workoutDetails' in body
 
     if (body.recover === true) {
       if (!workout.deletedAt) {
@@ -132,6 +132,7 @@ export async function PATCH(
       await updateWorkoutMetadata(uid, workoutId, {
         workoutName: typeof body.workoutName === 'string' || body.workoutName === null ? (body.workoutName as string | null) : undefined,
         workoutDescription: typeof body.workoutDescription === 'string' || body.workoutDescription === null ? (body.workoutDescription as string | null) : undefined,
+        workoutDetails: typeof body.workoutDetails === 'string' || body.workoutDetails === null ? (body.workoutDetails as string | null) : undefined,
       })
       const updated = await getWorkoutById(uid, workoutId)
       return NextResponse.json(updated ?? workout)
@@ -147,6 +148,7 @@ export async function PATCH(
       await updateWorkoutSingleSegment(uid, workoutId, {
         workoutName: typeof body.workoutName === 'string' || body.workoutName === null ? (body.workoutName as string | null) : undefined,
         workoutDescription: typeof body.workoutDescription === 'string' || body.workoutDescription === null ? (body.workoutDescription as string | null) : undefined,
+        workoutDetails: typeof body.workoutDetails === 'string' || body.workoutDetails === null ? (body.workoutDetails as string | null) : undefined,
         timerMode: typeof body.timerMode === 'number' ? body.timerMode : undefined,
         workoutSchedule: typeof body.workoutSchedule === 'string' || body.workoutSchedule === null ? (body.workoutSchedule as string | null) : undefined,
         direction: typeof body.direction === 'boolean' ? body.direction : undefined,
@@ -183,6 +185,7 @@ export async function PATCH(
       await updateWorkoutMetadata(uid, workoutId, {
         workoutName: typeof body.workoutName === 'string' || body.workoutName === null ? (body.workoutName as string | null) : undefined,
         workoutDescription: typeof body.workoutDescription === 'string' || body.workoutDescription === null ? (body.workoutDescription as string | null) : undefined,
+        workoutDetails: typeof body.workoutDetails === 'string' || body.workoutDetails === null ? (body.workoutDetails as string | null) : undefined,
       })
       const updated = await getWorkoutById(uid, workoutId)
       return NextResponse.json(updated ?? workout)

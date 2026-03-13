@@ -28,6 +28,7 @@ function mapSegmentFromEntry(seg: Record<string, unknown>, index: number, fallba
     workoutId,
     workoutName: (seg.workoutName as string) ?? null,
     workoutDescription: (seg.workoutDescription as string) ?? null,
+    workoutDetails: (seg.workoutDetails as string) ?? null,
     workoutImage: (seg.workoutImage as string) ?? null,
     workoutShareId: (seg.workoutShareId as string) ?? null,
     workoutSchedule: typeof seg.workoutSchedule === 'string' ? seg.workoutSchedule : null,
@@ -270,6 +271,7 @@ function mapWorkoutDoc(doc: DocumentSnapshot): Workout | null {
     workoutShareId: typeof d.workoutShareId === 'string' ? d.workoutShareId : '',
     workoutName: d.workoutName ?? null,
     workoutDescription: d.workoutDescription ?? null,
+    workoutDetails: (type === 'SingleSegmentWorkout' ? (raw.workoutDetails as string) : undefined) ?? null,
     workoutImage: d.workoutImage ?? null,
     timerMode: raw.timerMode,
     timerModes: raw.timerModes,
@@ -341,6 +343,7 @@ function parseSegment(raw: Record<string, unknown>, index: number, fallbackWorko
     workoutId,
     workoutName: (raw.workoutName as string) ?? null,
     workoutDescription: (raw.workoutDescription as string) ?? null,
+    workoutDetails: (raw.workoutDetails as string) ?? null,
     workoutImage: (raw.workoutImage as string) ?? null,
     workoutShareId: (raw.workoutShareId as string) ?? null,
     workoutSchedule: workoutSchedule ?? undefined,
@@ -447,6 +450,7 @@ export async function createWorkout(
     workoutShareId: '',
     workoutName: null,
     workoutDescription: null,
+    workoutDetails: null,
     workoutImage: null,
     timerMode: data.timerMode,
     workoutSchedule: data.workoutSchedule,
@@ -904,11 +908,11 @@ export async function updatePlannedWorkoutDayAndOrdinal(
   await ref.update(data)
 }
 
-/** Update a planned workout's embedded workout name and/or description. */
+/** Update a planned workout's embedded workout name, description, and/or details. */
 export async function updatePlannedWorkoutWorkoutMetadata(
   userId: string,
   plannedWorkoutId: string,
-  updates: { workoutName?: string | null; workoutDescription?: string | null }
+  updates: { workoutName?: string | null; workoutDescription?: string | null; workoutDetails?: string | null }
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const ref = adminDb
@@ -922,6 +926,9 @@ export async function updatePlannedWorkoutWorkoutMetadata(
   }
   if (updates.workoutDescription !== undefined) {
     data['workout.workoutDescription'] = updates.workoutDescription
+  }
+  if (updates.workoutDetails !== undefined) {
+    data['workout.workoutDetails'] = updates.workoutDetails
   }
   if (Object.keys(data).length === 0) return
   await ref.update(data)
@@ -980,7 +987,7 @@ export async function deletePlannedWorkout(userId: string, plannedWorkoutId: str
 export async function updateWorkoutMetadata(
   userId: string,
   workoutId: string,
-  updates: { workoutName?: string | null; workoutDescription?: string | null }
+  updates: { workoutName?: string | null; workoutDescription?: string | null; workoutDetails?: string | null }
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const data: Record<string, unknown> = {}
@@ -996,6 +1003,12 @@ export async function updateWorkoutMetadata(
         ? updates.workoutDescription.trim()
         : null
   }
+  if ('workoutDetails' in updates) {
+    data.workoutDetails =
+      updates.workoutDetails != null && updates.workoutDetails.trim() !== ''
+        ? updates.workoutDetails.trim()
+        : null
+  }
   if (Object.keys(data).length === 0) return
   const ref = adminDb
     .collection('users')
@@ -1009,6 +1022,7 @@ export async function updateWorkoutMetadata(
 export type SingleSegmentUpdate = {
   workoutName?: string | null
   workoutDescription?: string | null
+  workoutDetails?: string | null
   timerMode?: number
   workoutSchedule?: string | null
   direction?: boolean
@@ -1036,6 +1050,7 @@ export async function updateWorkoutSingleSegment(
   const data: Record<string, unknown> = {}
   if ('workoutName' in updates) data.workoutName = updates.workoutName ?? null
   if ('workoutDescription' in updates) data.workoutDescription = updates.workoutDescription ?? null
+  if ('workoutDetails' in updates) data.workoutDetails = updates.workoutDetails ?? null
   if ('timerMode' in updates && typeof updates.timerMode === 'number') data.timerMode = updates.timerMode
   if ('workoutSchedule' in updates) data.workoutSchedule = updates.workoutSchedule ?? null
   if ('direction' in updates) data.direction = updates.direction === true
@@ -1079,6 +1094,7 @@ export async function updateWorkoutMultiSegment(
       workoutId: seg.workoutId,
       workoutName: seg.workoutName ?? null,
       workoutDescription: seg.workoutDescription ?? null,
+      workoutDetails: seg.workoutDetails ?? null,
       workoutImage: seg.workoutImage ?? null,
       workoutShareId: seg.workoutShareId ?? null,
       workoutSchedule: seg.workoutSchedule ?? null,
@@ -1118,6 +1134,7 @@ function mapPlanDayEntry(e: Record<string, unknown>): PlanDayEntry {
     warningStrategy: typeof e.warningStrategy === 'number' ? e.warningStrategy : undefined,
     warnings: Array.isArray(e.warnings) ? (e.warnings as number[]) : undefined,
     workoutDescription: e.workoutDescription != null ? String(e.workoutDescription) : null,
+    workoutDetails: e.workoutDetails != null ? String(e.workoutDetails) : null,
     workoutId: typeof e.workoutId === 'string' ? e.workoutId : undefined,
     workoutImage: e.workoutImage != null ? String(e.workoutImage) : null,
     workoutName: e.workoutName != null ? String(e.workoutName) : null,

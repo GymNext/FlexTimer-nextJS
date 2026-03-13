@@ -57,6 +57,8 @@ export interface PlanDayEntry {
   warningStrategy?: number
   warnings?: number[]
   workoutDescription?: string | null
+  /** Single-segment: full workout details (rep scheme, weights, movements, etc.) */
+  workoutDetails?: string | null
   workoutId?: string
   workoutImage?: string | null
   workoutName?: string | null
@@ -116,6 +118,8 @@ export interface WorkoutSegment {
   workoutId: string
   workoutName?: string | null
   workoutDescription?: string | null
+  /** Full segment details (rep scheme, weights, movements, etc.) */
+  workoutDetails?: string | null
   workoutImage?: string | null
   workoutShareId?: string | null
   /** JSON string from JsonHelper.toJsonFromWorkoutSchedule */
@@ -138,6 +142,8 @@ export interface Workout {
   workoutShareId: string
   workoutName: string | null
   workoutDescription: string | null
+  /** SingleSegmentWorkout only: full workout details (rep scheme, weights, movements, etc.) */
+  workoutDetails?: string | null
   workoutImage: string | null
   /** SingleSegmentWorkout: timer mode (raw int) */
   timerMode?: unknown

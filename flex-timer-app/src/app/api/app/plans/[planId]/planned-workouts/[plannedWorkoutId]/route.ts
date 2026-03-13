@@ -84,7 +84,7 @@ export async function PATCH(
     )
   }
 
-  let body: { day?: unknown; ordinal?: unknown; workoutName?: unknown; workoutDescription?: unknown; workout?: unknown }
+  let body: { day?: unknown; ordinal?: unknown; workoutName?: unknown; workoutDescription?: unknown; workoutDetails?: unknown; workout?: unknown }
   try {
     body = await request.json().catch(() => ({}))
   } catch {
@@ -130,19 +130,24 @@ export async function PATCH(
       body.workoutDescription === null || typeof body.workoutDescription === 'string'
         ? (body.workoutDescription as string | null)
         : undefined
+    const workoutDetails =
+      body.workoutDetails === null || typeof body.workoutDetails === 'string'
+        ? (body.workoutDetails as string | null)
+        : undefined
 
-    if (workoutName !== undefined || workoutDescription !== undefined) {
+    if (workoutName !== undefined || workoutDescription !== undefined || workoutDetails !== undefined) {
       await updatePlannedWorkoutWorkoutMetadata(uid, plannedWorkoutId, {
         workoutName,
         workoutDescription,
+        workoutDetails,
       })
       const updated = await getPlannedWorkout(uid, plannedWorkoutId)
       return NextResponse.json(updated ?? plannedWorkout)
     }
 
-    if (day === undefined && ordinal === undefined) {
+    if (day === undefined && ordinal === undefined && workoutName === undefined && workoutDescription === undefined && workoutDetails === undefined) {
       return NextResponse.json(
-        { error: 'Provide day, ordinal, or workout name/description' },
+        { error: 'Provide day, ordinal, or workout name/description/details' },
         { status: 400 }
       )
     }
