@@ -998,6 +998,28 @@ function UserAppLayout({
     }
   }
 
+  function updatePlannedWorkoutMetadataInPlace(
+    plannedWorkoutId: string,
+    patch: { workoutName?: string | null; workoutDescription?: string | null }
+  ) {
+    const updater = (list: PlannedWorkout[]) =>
+      list.map((pw) =>
+        pw.id === plannedWorkoutId
+          ? {
+              ...pw,
+              workout: {
+                ...pw.workout,
+                workoutName: patch.workoutName !== undefined ? patch.workoutName : pw.workout.workoutName,
+                workoutDescription:
+                  patch.workoutDescription !== undefined ? patch.workoutDescription : pw.workout.workoutDescription,
+              },
+            }
+          : pw
+      )
+    setPlannedWorkouts((prev) => updater(prev))
+    setOptimisticPlannedWorkouts((prev) => (prev ? updater(prev) : null))
+  }
+
   const byDay = useMemo(() => {
     const source = optimisticPlannedWorkouts ?? plannedWorkouts
     const map: Record<string, PlannedWorkout[]> = {}
@@ -1254,6 +1276,7 @@ function UserAppLayout({
               reloadPlanned={() => {
                 if (selectedPlanId) loadPlannedWorkoutsForPlan(selectedPlanId)
               }}
+              onPlannedWorkoutMetadataSaved={updatePlannedWorkoutMetadataInPlace}
               onCreatePlan={handleCreatePlan}
               onUpdatePlan={handleUpdatePlan}
               onDeletePlan={handleDeletePlan}
@@ -4563,6 +4586,7 @@ function PlansSection({
   onDeletePlanned,
   user,
   reloadPlanned,
+  onPlannedWorkoutMetadataSaved,
   onCreatePlan,
   onUpdatePlan,
   onDeletePlan,
@@ -4598,6 +4622,10 @@ function PlansSection({
   onDeletePlanned: (pw: PlannedWorkout) => void
   user: User
   reloadPlanned: () => void
+  onPlannedWorkoutMetadataSaved: (
+    plannedWorkoutId: string,
+    patch: { workoutName?: string | null; workoutDescription?: string | null }
+  ) => void
   onCreatePlan: (name: string, description: string | null) => Promise<WorkoutPlan>
   onUpdatePlan: (planId: string, name: string, description: string | null) => Promise<void>
   onDeletePlan: (planId: string) => Promise<void>
@@ -4869,6 +4897,10 @@ function PlansSection({
       setEditPlannedName('')
       setEditPlannedDescription('')
       setExpandedPlannedWorkoutId(null)
+      onPlannedWorkoutMetadataSaved(editPlannedWorkout.id, {
+        workoutName: editPlannedName.trim() || null,
+        workoutDescription: editPlannedDescription.trim() || null,
+      })
       toast.success('Planned workout saved')
     } catch (e) {
       setEditPlannedError(e instanceof Error ? e.message : 'Failed to update workout')

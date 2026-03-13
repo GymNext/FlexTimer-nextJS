@@ -104,7 +104,12 @@ export async function POST(
     if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
       return NextResponse.json({ error: 'day required (YYYY-MM-DD)' }, { status: 400 })
     }
-    if (!workout || typeof workout.timerMode !== 'number') {
+    const isMultiSegment =
+      workout?.type === 'MultiSegmentWorkout' && Array.isArray(workout.segments)
+    if (!workout) {
+      return NextResponse.json({ error: 'workout required' }, { status: 400 })
+    }
+    if (!isMultiSegment && typeof workout.timerMode !== 'number') {
       return NextResponse.json({ error: 'workout.timerMode required (number)' }, { status: 400 })
     }
 
