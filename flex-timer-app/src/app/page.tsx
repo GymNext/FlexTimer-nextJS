@@ -2441,10 +2441,14 @@ const FavoritesDetailPanel = forwardRef<
 
   const isSingle = workout.type === 'SingleSegmentWorkout'
   const parsed = useMemo(
-    () => (isSingle ? parseScheduleToOptions(workout.workoutSchedule) : null),
-    [isSingle, workout.workoutSchedule]
+    () =>
+      isSingle
+        ? parseScheduleToOptions(workout.workoutSchedule, workout.timerMode)
+        : null,
+    [isSingle, workout.workoutSchedule, workout.timerMode]
   )
   const [scheduleMode, setScheduleMode] = useState(parsed?.mode ?? 1)
+
   const [scheduleOptions, setScheduleOptions] = useState<Record<string, string | number>>(parsed?.options ?? {})
   const [scheduleDirection, setScheduleDirection] = useState(parsed?.direction ?? false)
 
@@ -2646,7 +2650,7 @@ const FavoritesDetailPanel = forwardRef<
               Timer mode
             </label>
             <p className="text-sm text-gray-900 py-1.5">
-              {CREATABLE_TIMER_MODES.find((m) => m.value === scheduleMode)?.label ?? 'Standard'}
+              {FAVORITE_CREATABLE_TIMER_MODES.find((m) => m.value === scheduleMode)?.label ?? 'Standard'}
             </p>
           </div>
           <CreateWorkoutOptions
@@ -2683,9 +2687,15 @@ const FavoritesDetailPanel = forwardRef<
                 className="rounded border border-gray-200 bg-gray-50/50 p-2"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium text-gray-900 truncate flex-1">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExpandedSegmentIndex(expandedSegmentIndex === index ? null : index)
+                    }
+                    className="text-left text-sm font-medium text-gray-900 truncate flex-1 hover:underline"
+                  >
                     {getSegmentDisplayName(seg, index)}
-                  </span>
+                  </button>
                   <div className="inline-flex items-center gap-0.5 shrink-0">
                     <button
                       type="button"
@@ -2707,19 +2717,12 @@ const FavoritesDetailPanel = forwardRef<
                     </button>
                     <button
                       type="button"
-                      onClick={() =>
-                        setExpandedSegmentIndex(expandedSegmentIndex === index ? null : index)
-                      }
-                      className="text-xs text-gymnext-dark hover:underline px-1"
-                    >
-                      {expandedSegmentIndex === index ? 'Collapse' : 'Edit'}
-                    </button>
-                    <button
-                      type="button"
                       onClick={() => deleteSegment(index)}
-                      className="text-xs text-red-600 hover:underline px-1"
+                      className="h-6 w-6 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100"
+                      aria-label="Remove segment"
+                      title="Remove segment"
                     >
-                      Delete
+                      ×
                     </button>
                   </div>
                 </div>
@@ -4458,7 +4461,7 @@ function PlansSection({
   }
 
   function openEditSchedulePlanned(pw: PlannedWorkout) {
-    const parsed = parseScheduleToOptions(pw.workout.workoutSchedule)
+    const parsed = parseScheduleToOptions(pw.workout.workoutSchedule, pw.workout.timerMode)
     setEditScheduleMode(parsed.mode)
     setEditScheduleOptions({ ...parsed.options, direction: parsed.direction ? 1 : 0 })
     setEditScheduleError(null)
@@ -6618,7 +6621,10 @@ function hasValidDurationForMode(
 }
 
 /** Parse workoutSchedule JSON into { mode, options, direction } for use with CreateWorkoutOptions / buildWorkoutFromCreateForm. */
-function parseScheduleToOptions(scheduleStr: string | null | undefined): {
+function parseScheduleToOptions(
+  scheduleStr: string | null | undefined,
+  explicitTimerMode?: unknown
+): {
   mode: number
   options: Record<string, string | number>
   direction: boolean
@@ -6631,7 +6637,32 @@ function parseScheduleToOptions(scheduleStr: string | null | undefined): {
   }
   try {
     const schedule = JSON.parse(scheduleStr) as Record<string, unknown>
-    mode = typeof schedule.timerMode === 'number' ? schedule.timerMode : 1
+    const hasCustomIntervals =
+      Array.isArray(schedule.customIntervalTypes) ||
+      Array.isArray(schedule.customIntervalDurations) ||
+      Array.isArray(schedule.customIntervalRestDurations) ||
+      Array.isArray(schedule.customIntervalRepeats)
+
+    const coerceMode = (val: unknown): number | undefined => {
+      if (typeof val === 'number') return val
+      if (typeof val === 'string') {
+        const n = parseInt(val, 10)
+        return Number.isNaN(n) ? undefined : n
+      }
+      return undefined
+    }
+
+    // Prefer explicit timerMode from caller (which may be string or number), falling back to schedule.timerMode.
+    const rawTimerMode =
+      coerceMode(explicitTimerMode) ?? coerceMode(schedule.timerMode)
+
+    // Use raw timerMode when present, but override mis-labeled Standard (1) that actually has custom intervals.
+    if (typeof rawTimerMode === 'number') {
+      const tm = rawTimerMode
+      mode = tm === 1 && hasCustomIntervals ? 3 : tm
+    } else {
+      mode = hasCustomIntervals ? 3 : 1
+    }
     const num = (key: string) => {
       const v = schedule[key]
       if (typeof v === 'number') return v
