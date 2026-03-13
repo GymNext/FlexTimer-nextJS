@@ -4895,6 +4895,8 @@ function PlansSection({
   >({})
   const [createError, setCreateError] = useState<string | null>(null)
   const [createBusy, setCreateBusy] = useState(false)
+  /** When Create New Workout: 0 = timer mode only, 1 = timer config (and for Mixed, sub-steps). */
+  const [createNewStep, setCreateNewStep] = useState<0 | 1>(0)
   /** When Create New Workout + Mixed Interval: 1 = intervals/blocks, 2 = repeats/rest/direction. */
   const [createNewMixedStep, setCreateNewMixedStep] = useState<1 | 2>(1)
   /** When true, show the optional name/description step before Add to plan. */
@@ -6106,11 +6108,13 @@ function PlansSection({
                 {addWorkoutSource === 'choice' && 'Add from Favorites, a collection, or create new.'}
                 {addWorkoutSource === 'favorites' && 'Pick a workout from Favorites.'}
                 {addWorkoutSource === 'collection' && 'Pick a collection, then a workout.'}
-                {addWorkoutSource === 'createNew' && (createNewNameStep
-                  ? 'Optionally set a name and description.'
-                  : createMode === 3
-                    ? (createNewMixedStep === 1 ? 'Step 1 of 2: Add and order your intervals.' : 'Step 2 of 2: Set repeats, rest between repeats, and direction.')
-                    : 'Choose day and timer mode for this workout.')}
+                {addWorkoutSource === 'createNew' && (createNewStep === 0
+                  ? 'Choose the workout type.'
+                  : createNewNameStep
+                    ? 'Optionally set a name and description.'
+                    : createMode === 3
+                      ? (createNewMixedStep === 1 ? 'Step 1 of 2: Add and order your intervals.' : 'Step 2 of 2: Set repeats, rest between repeats, and direction.')
+                      : 'Configure the timer settings for this workout.')}
               </p>
             </div>
             <div className="p-4 space-y-4 overflow-y-auto min-h-0">
@@ -6148,6 +6152,7 @@ function PlansSection({
                         const defaultMode = 1
                         setAddWorkoutSource('createNew')
                         setCreateMode(defaultMode)
+                        setCreateNewStep(0)
                         setCreateNewMixedStep(1)
                         setCreateNewNameStep(false)
                         setCreateOptions(
@@ -6354,6 +6359,8 @@ function PlansSection({
                         setCreateNewNameStep(false)
                       } else if (createMode === 3 && createNewMixedStep === 2) {
                         setCreateNewMixedStep(1)
+                      } else if (createNewStep === 1) {
+                        setCreateNewStep(0)
                       } else {
                         setAddWorkoutSource('choice')
                       }
@@ -6362,7 +6369,63 @@ function PlansSection({
                   >
                     ← Back
                   </button>
-                  {createNewNameStep ? (
+                  {createNewStep === 0 ? (
+                    <>
+                      <div>
+                        <label
+                          htmlFor="plan-mode"
+                          className="block text-xs font-medium text-gray-700 mb-1"
+                        >
+                          Workout type
+                        </label>
+                        <select
+                          id="plan-mode"
+                          value={createMode}
+                          onChange={(e) => {
+                            const newMode = Number(e.target.value)
+                            setCreateMode(newMode)
+                            if (newMode !== 3) setCreateNewMixedStep(1)
+                            setCreateOptions(
+                              getDefaultOptionsForMode(
+                                newMode,
+                                timerDefaults?.direction,
+                                timerDefaults?.restDirection,
+                                timerDefaults?.warmupDuration,
+                                timerDefaults?.warmupDirection,
+                                timerDefaults?.cooldownDuration,
+                                timerDefaults?.cooldownDirection
+                              )
+                            )
+                          }}
+                          className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                        >
+                          {PLANNED_WORKOUT_CREATABLE_TIMER_MODES.map((m) => (
+                            <option key={m.value} value={m.value}>
+                              {m.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="flex justify-end gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => { setCreateOpen(false); setAddWorkoutSource('choice') }}
+                          disabled={createBusy}
+                          className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCreateNewStep(1)}
+                          className="rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                          style={{ backgroundColor: '#6B21A8' }}
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </>
+                  ) : createNewNameStep ? (
                     <>
                       <div>
                         <label htmlFor="create-planned-name" className="block text-xs font-medium text-gray-700 mb-1">Name (optional)</label>
@@ -6419,44 +6482,6 @@ function PlansSection({
                     </>
                   ) : (
                   <>
-                  {!(createMode === 3 && createNewMixedStep === 2) && (
-                  <div>
-                    <label
-                      htmlFor="plan-mode"
-                      className="block text-xs font-medium text-gray-700 mb-1"
-                    >
-                      Timer mode
-                    </label>
-                    <select
-                      id="plan-mode"
-                      value={createMode}
-                      onChange={(e) => {
-                        const newMode = Number(e.target.value)
-                        setCreateMode(newMode)
-                        if (newMode !== 3) setCreateNewMixedStep(1)
-                        setCreateNewNameStep(false)
-                        setCreateOptions(
-                          getDefaultOptionsForMode(
-                            newMode,
-                            timerDefaults?.direction,
-                            timerDefaults?.restDirection,
-                            timerDefaults?.warmupDuration,
-                            timerDefaults?.warmupDirection,
-                            timerDefaults?.cooldownDuration,
-                            timerDefaults?.cooldownDirection
-                          )
-                        )
-                      }}
-                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                    >
-                      {PLANNED_WORKOUT_CREATABLE_TIMER_MODES.map((m) => (
-                        <option key={m.value} value={m.value}>
-                          {m.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  )}
                   {createMode === 3 ? (
                     createNewMixedStep === 1 ? (
                       <>
