@@ -1390,7 +1390,7 @@ function CreateWorkoutDialog({
         aria-hidden
         onClick={() => !busy && onClose()}
       />
-      <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+      <div className="relative w-full max-w-lg rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
         <div className="border-b border-gymnext-muted/30 px-4 py-3">
           <h3 className="text-sm font-semibold text-gray-800">
             {title}
@@ -4309,6 +4309,12 @@ function PlansSection({
   >({})
   const [createError, setCreateError] = useState<string | null>(null)
   const [createBusy, setCreateBusy] = useState(false)
+  /** When Create New Workout + Mixed Interval: 1 = intervals/blocks, 2 = repeats/rest/direction. */
+  const [createNewMixedStep, setCreateNewMixedStep] = useState<1 | 2>(1)
+  /** When true, show the optional name/description step before Add to plan. */
+  const [createNewNameStep, setCreateNewNameStep] = useState(false)
+  const [createPlannedName, setCreatePlannedName] = useState('')
+  const [createPlannedDescription, setCreatePlannedDescription] = useState('')
 
   const [planMoreMenuOpen, setPlanMoreMenuOpen] = useState(false)
   const [planDeleteConfirmOpen, setPlanDeleteConfirmOpen] = useState(false)
@@ -4697,9 +4703,31 @@ function PlansSection({
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || `HTTP ${res.status}`)
       }
+      const created = (await res.json()) as { id: string; [k: string]: unknown }
+      const hasMeta = createPlannedName.trim() || createPlannedDescription.trim()
+      if (created?.id && hasMeta) {
+        const patchRes = await authedFetch(
+          `/api/app/plans/${encodeURIComponent(selectedPlan.id)}/planned-workouts/${encodeURIComponent(created.id)}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              workoutName: createPlannedName.trim() || null,
+              workoutDescription: createPlannedDescription.trim() || null,
+            }),
+          }
+        )
+        if (!patchRes.ok) {
+          const data = await patchRes.json().catch(() => ({}))
+          throw new Error(data.error || 'Failed to save name/description')
+        }
+      }
       setCreateOpen(false)
       setAddWorkoutSource('choice')
       setCreateOptions({})
+      setCreateNewNameStep(false)
+      setCreatePlannedName('')
+      setCreatePlannedDescription('')
       reloadPlanned()
     } catch (e) {
       setCreateError(
@@ -5434,7 +5462,7 @@ function PlansSection({
             aria-hidden
             onClick={() => !createBusy && (setCreateOpen(false), setAddWorkoutSource('choice'), setExpandedCollectionId(null), setSelectedWorkoutForPlan(null))}
           />
-          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg max-h-[85vh] flex flex-col">
+          <div className="relative w-full max-w-lg rounded-lg border border-gymnext-muted/30 bg-white shadow-lg max-h-[85vh] flex flex-col">
             <div className="border-b border-gymnext-muted/30 px-4 py-3 shrink-0">
               <h3 className="text-sm font-semibold text-gray-800">
                 Add planned workout
@@ -5443,7 +5471,11 @@ function PlansSection({
                 {addWorkoutSource === 'choice' && 'Add from Favorites, a collection, or create new.'}
                 {addWorkoutSource === 'favorites' && 'Pick a workout from Favorites.'}
                 {addWorkoutSource === 'collection' && 'Pick a collection, then a workout.'}
-                {addWorkoutSource === 'createNew' && 'Choose day and timer mode for this workout.'}
+                {addWorkoutSource === 'createNew' && (createNewNameStep
+                  ? 'Optionally set a name and description.'
+                  : createMode === 3
+                    ? (createNewMixedStep === 1 ? 'Step 1 of 2: Add and order your intervals.' : 'Step 2 of 2: Set repeats, rest between repeats, and direction.')
+                    : 'Choose day and timer mode for this workout.')}
               </p>
             </div>
             <div className="p-4 space-y-4 overflow-y-auto min-h-0">
@@ -5478,10 +5510,14 @@ function PlansSection({
                     <button
                       type="button"
                       onClick={() => {
+                        const defaultMode = 1
                         setAddWorkoutSource('createNew')
+                        setCreateMode(defaultMode)
+                        setCreateNewMixedStep(1)
+                        setCreateNewNameStep(false)
                         setCreateOptions(
                           getDefaultOptionsForMode(
-                            createMode,
+                            defaultMode,
                             timerDefaults?.direction,
                             timerDefaults?.restDirection,
                             timerDefaults?.warmupDuration,
@@ -5675,14 +5711,69 @@ function PlansSection({
                 </>
               )}
               {addWorkoutSource === 'createNew' && (
-                <>
+                <div className="space-y-4">
                   <button
                     type="button"
-                    onClick={() => setAddWorkoutSource('choice')}
+                    onClick={() => {
+                      if (createNewNameStep) {
+                        setCreateNewNameStep(false)
+                      } else if (createMode === 3 && createNewMixedStep === 2) {
+                        setCreateNewMixedStep(1)
+                      } else {
+                        setAddWorkoutSource('choice')
+                      }
+                    }}
                     className="text-xs text-gymnext-dark hover:text-gymnext hover:underline"
                   >
                     ← Back
                   </button>
+                  {createNewNameStep ? (
+                    <>
+                      <div>
+                        <label htmlFor="create-planned-name" className="block text-xs font-medium text-gray-700 mb-1">Name (optional)</label>
+                        <input
+                          id="create-planned-name"
+                          type="text"
+                          value={createPlannedName}
+                          onChange={(e) => setCreatePlannedName(e.target.value)}
+                          className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                          placeholder="Workout name"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="create-planned-desc" className="block text-xs font-medium text-gray-700 mb-1">Description (optional)</label>
+                        <textarea
+                          id="create-planned-desc"
+                          rows={2}
+                          value={createPlannedDescription}
+                          onChange={(e) => setCreatePlannedDescription(e.target.value)}
+                          className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                          placeholder="Optional description"
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setCreateNewNameStep(false)}
+                          disabled={createBusy}
+                          className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                        >
+                          Back
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleCreatePlanned}
+                          disabled={createBusy || !canAddPlannedForSelectedDate || !hasValidDurationForMode(createMode, createOptions, parseDurationInput)}
+                          className="rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                          style={{ backgroundColor: '#6B21A8' }}
+                        >
+                          {createBusy ? 'Adding…' : 'Add to plan'}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                  <>
+                  {!(createMode === 3 && createNewMixedStep === 2) && (
                   <div>
                     <label
                       htmlFor="plan-mode"
@@ -5696,6 +5787,8 @@ function PlansSection({
                       onChange={(e) => {
                         const newMode = Number(e.target.value)
                         setCreateMode(newMode)
+                        if (newMode !== 3) setCreateNewMixedStep(1)
+                        setCreateNewNameStep(false)
                         setCreateOptions(
                           getDefaultOptionsForMode(
                             newMode,
@@ -5717,32 +5810,99 @@ function PlansSection({
                       ))}
                     </select>
                   </div>
-                  <CreateWorkoutOptions
-                    mode={createMode}
-                    options={createOptions}
-                    onChange={setCreateOptions}
-                    parseDurationInput={parseDurationInput}
-                  />
-                  <div className="flex justify-end gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => { setCreateOpen(false); setAddWorkoutSource('choice') }}
-                      disabled={createBusy}
-                      className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCreatePlanned}
-                      disabled={createBusy || !canAddPlannedForSelectedDate || !hasValidDurationForMode(createMode, createOptions, parseDurationInput)}
-                      className="rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
-                      style={{ backgroundColor: '#6B21A8' }}
-                    >
-                      {createBusy ? 'Adding…' : 'Add to plan'}
-                    </button>
-                  </div>
+                  )}
+                  {createMode === 3 ? (
+                    createNewMixedStep === 1 ? (
+                      <>
+                        <CreateWorkoutOptions
+                          mode={createMode}
+                          options={createOptions}
+                          onChange={setCreateOptions}
+                          parseDurationInput={parseDurationInput}
+                          mixedIntervalsStep={1}
+                        />
+                        <div className="flex justify-end gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => { setCreateOpen(false); setAddWorkoutSource('choice') }}
+                            disabled={createBusy}
+                            className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCreateNewMixedStep(2)}
+                            disabled={!hasValidDurationForMode(createMode, createOptions, parseDurationInput)}
+                            className="rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                            style={{ backgroundColor: '#6B21A8' }}
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <CreateWorkoutOptions
+                          mode={createMode}
+                          options={createOptions}
+                          onChange={setCreateOptions}
+                          parseDurationInput={parseDurationInput}
+                          mixedIntervalsStep={2}
+                        />
+                        <div className="flex justify-end gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setCreateNewMixedStep(1)}
+                            disabled={createBusy}
+                            className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                          >
+                            Back
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCreateNewNameStep(true)}
+                            disabled={createBusy || !canAddPlannedForSelectedDate || !hasValidDurationForMode(createMode, createOptions, parseDurationInput)}
+                            className="rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                            style={{ backgroundColor: '#6B21A8' }}
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </>
+                    )
+                  ) : (
+                    <>
+                      <CreateWorkoutOptions
+                        mode={createMode}
+                        options={createOptions}
+                        onChange={setCreateOptions}
+                        parseDurationInput={parseDurationInput}
+                      />
+                      <div className="flex justify-end gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => { setCreateOpen(false); setAddWorkoutSource('choice') }}
+                          disabled={createBusy}
+                          className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCreateNewNameStep(true)}
+                          disabled={createBusy || !canAddPlannedForSelectedDate || !hasValidDurationForMode(createMode, createOptions, parseDurationInput)}
+                          className="rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                          style={{ backgroundColor: '#6B21A8' }}
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </>
+              )}
+                </div>
               )}
             </div>
           </div>
@@ -6224,7 +6384,7 @@ const FAVORITE_CREATABLE_TIMER_MODES: { value: number; label: string }[] = [
   { value: 100, label: 'Multi-Segment' },
 ]
 
-/** Timer modes for planned workouts: Warmup and Cooldown first; no Lap Timer / Shot Clock; includes Mixed Intervals and Multi-Segment. */
+/** Timer modes for planned workouts: Warmup and Cooldown first; no Lap Timer / Shot Clock; includes Mixed Intervals; Multi-Segment not offered. */
 const PLANNED_WORKOUT_CREATABLE_TIMER_MODES: { value: number; label: string }[] = [
   { value: 10, label: 'Warmup' },
   { value: 11, label: 'Cooldown' },
@@ -6235,7 +6395,6 @@ const PLANNED_WORKOUT_CREATABLE_TIMER_MODES: { value: number; label: string }[] 
   { value: 5, label: 'EMOM' },
   { value: 12, label: 'Sets with Rest' },
   { value: 13, label: 'Rest' },
-  { value: 100, label: 'Multi-Segment' },
 ]
 
 /** Default form options per mode so "Add to plan" / create workout use these values.
@@ -6493,9 +6652,20 @@ function parseScheduleToOptions(scheduleStr: string | null | undefined): {
         options.restBetween = formatDuration(num('commonIntervalRestBetweenRounds') || dur('commonIntervalRestBetweenRounds'))
         break
       case 3: {
-        const types = Array.isArray(schedule.customIntervalTypes)
-          ? (schedule.customIntervalTypes as string[])
-          : []
+        /** customIntervalTypes in schedule: 1=duration, 2=rest, 3=durationRepeated, 4=durationRestRepeated. Never 0 (rep).
+         * customIntervalDurations:
+         *   - type=duration or durationRepeated: work duration
+         *   - type=rest: rest duration
+         *   - type=durationRestRepeated: work duration
+         * customIntervalRestDurations:
+         *   - only used for type=durationRestRepeated: rest duration inside the block
+         */
+        const typeNumToStr = { 1: 'duration' as const, 2: 'rest' as const, 3: 'durationRepeated' as const, 4: 'durationRestRepeated' as const }
+        const rawTypes = Array.isArray(schedule.customIntervalTypes) ? schedule.customIntervalTypes : []
+        const types = rawTypes.map((t) => {
+          const n = typeof t === 'number' ? t : typeof t === 'string' && /^[1-4]$/.test(t) ? parseInt(t, 10) : 0
+          return typeNumToStr[n as 1 | 2 | 3 | 4] ?? 'duration'
+        })
         const durations = Array.isArray(schedule.customIntervalDurations)
           ? (schedule.customIntervalDurations as number[])
           : []
@@ -6505,15 +6675,23 @@ function parseScheduleToOptions(scheduleStr: string | null | undefined): {
         const repeats = Array.isArray(schedule.customIntervalRepeats)
           ? (schedule.customIntervalRepeats as number[])
           : []
-        const intervals: Array<{ type: string; duration?: string; restDuration?: string; repeats?: number }> = types.map((type, i) => {
-          const item: { type: string; duration?: string; restDuration?: string; repeats?: number } = { type }
-          if (type === 'duration' || type === 'durationRepeated' || type === 'durationRestRepeated') {
-            item.duration = formatDuration(durations[i] ?? 0)
+        const validIntervalTypes = ['duration', 'rest', 'durationRepeated', 'durationRestRepeated'] as const
+        const intervals: Array<{ type: string; duration?: string; restDuration?: string; repeats?: number }> = types.map((normalizedType, i) => {
+          const item: { type: string; duration?: string; restDuration?: string; repeats?: number } = { type: normalizedType }
+          const primary = durations[i] ?? 0
+          const secondary = restDurations[i] ?? 0
+          if (normalizedType === 'duration' || normalizedType === 'durationRepeated' || normalizedType === 'durationRestRepeated') {
+            item.duration = formatDuration(primary)
           }
-          if (type === 'rest' || type === 'durationRestRepeated') {
-            item.restDuration = formatDuration(restDurations[i] ?? 0)
+          if (normalizedType === 'rest') {
+            // Rest-only interval: its rest duration is stored in customIntervalDurations.
+            item.restDuration = formatDuration(primary)
           }
-          if (type === 'durationRepeated' || type === 'durationRestRepeated') {
+          if (normalizedType === 'durationRestRepeated') {
+            // Work/rest block: rest duration is stored in customIntervalRestDurations.
+            item.restDuration = formatDuration(secondary)
+          }
+          if (normalizedType === 'durationRepeated' || normalizedType === 'durationRestRepeated') {
             item.repeats = repeats[i] ?? 1
           }
           return item
@@ -6591,8 +6769,6 @@ function buildWorkoutFromCreateForm(
     return 0
   }
   const schedule: Record<string, unknown> = { timerMode: mode }
-  const dir =
-    Number(options.direction) !== 0 || options.direction === 'true'
   const num = (key: string) => {
     const v = options[key]
     if (typeof v === 'number') return v
@@ -6618,31 +6794,54 @@ function buildWorkoutFromCreateForm(
       schedule.commonIntervalRestBetweenRounds = dur('restBetween')
       break
     case 3: {
-      const types: string[] = []
+      /** customIntervalTypes in schedule: 1=duration, 2=rest, 3=durationRepeated, 4=durationRestRepeated. Never 0.
+       * customIntervalDurations:
+       *   - type=duration or durationRepeated: work duration
+       *   - type=rest: rest duration
+       *   - type=durationRestRepeated: work duration
+       * customIntervalRestDurations:
+       *   - only used for type=durationRestRepeated: rest duration inside the block
+       */
+      const typeStrToNum: Record<string, number> = { duration: 1, rest: 2, durationRepeated: 3, durationRestRepeated: 4 }
+      const types: number[] = []
       const durations: number[] = []
       const restDurations: number[] = []
       const repeats: number[] = []
+      /** Set names: null means no name for that interval set. */
+      const setNames: Array<string | null> = []
       try {
         const raw = options.customIntervalsJson
         const arr = typeof raw === 'string' ? (JSON.parse(raw) as Array<{ type: string; duration?: string; restDuration?: string; repeats?: number }>) : []
+        const validIntervalTypes = ['duration', 'rest', 'durationRepeated', 'durationRestRepeated'] as const
+        const normalizeType = (rawType: unknown): (typeof validIntervalTypes)[number] => {
+          const t = typeof rawType === 'string' ? rawType : 'duration'
+          if (t === 'rep') return 'durationRepeated'
+          return validIntervalTypes.includes(t as (typeof validIntervalTypes)[number]) ? (t as (typeof validIntervalTypes)[number]) : 'duration'
+        }
         for (const it of arr) {
-          const t = typeof it.type === 'string' ? it.type : 'duration'
-          types.push(t)
+          const t = normalizeType(it.type)
+          types.push(typeStrToNum[t] ?? 1)
+          // primarySeconds: value stored in customIntervalDurations
+          // secondarySeconds: value stored in customIntervalRestDurations (only for durationRestRepeated)
+          let primarySeconds = 0
+          let secondarySeconds = 0
           if (t === 'duration' || t === 'durationRepeated' || t === 'durationRestRepeated') {
-            durations.push(it.duration != null ? parseDuration(String(it.duration)) : 0)
-          } else {
-            durations.push(0)
+            primarySeconds = it.duration != null ? parseDuration(String(it.duration)) : 0
           }
-          if (t === 'rest' || t === 'durationRestRepeated') {
-            restDurations.push(it.restDuration != null ? parseDuration(String(it.restDuration)) : 0)
-          } else {
-            restDurations.push(0)
+          if (t === 'rest') {
+            primarySeconds = it.restDuration != null ? parseDuration(String(it.restDuration)) : 0
           }
+          if (t === 'durationRestRepeated') {
+            secondarySeconds = it.restDuration != null ? parseDuration(String(it.restDuration)) : 0
+          }
+          durations.push(primarySeconds)
+          restDurations.push(secondarySeconds)
           if (t === 'durationRepeated' || t === 'durationRestRepeated') {
             repeats.push(typeof it.repeats === 'number' && it.repeats > 0 ? it.repeats : 1)
           } else {
             repeats.push(0)
           }
+          setNames.push(null)
         }
       } catch {
         // leave arrays empty
@@ -6651,6 +6850,7 @@ function buildWorkoutFromCreateForm(
       schedule.customIntervalDurations = durations
       schedule.customIntervalRestDurations = restDurations
       schedule.customIntervalRepeats = repeats
+      schedule.customIntervalSetNames = setNames
       schedule.customIntervalNumberOfRounds = Math.max(1, num('customIntervalNumberOfRounds'))
       schedule.customIntervalRestBetweenRounds = dur('customIntervalRestBetweenRounds')
       break
@@ -6693,6 +6893,10 @@ function buildWorkoutFromCreateForm(
     default:
       break
   }
+  const dir =
+    mode === 1 && (schedule.standardTimeCap === 0 || schedule.standardTimeCap === undefined)
+      ? false
+      : (Number(options.direction) !== 0 || options.direction === 'true')
   return {
     type: 'SingleSegmentWorkout',
     timerMode: mode,
@@ -6727,14 +6931,15 @@ function CreateWorkoutOptions({
     options[key] ?? def
   const modeNum = Number(mode)
   const isMixedIntervals = modeNum === 3 || mode === 3 || String(mode).trim() === '3'
-  const restBetweenRepetitionsLabel = horizontalLayout ? 'Rest b/w repetitions' : 'Rest between repetitions'
+  const restBetweenRepetitionsLabel = 'Rest between repeats'
   const durationInput = (
     key: string,
     label: string,
-    placeholder = '0:00'
+    placeholder = '0:00',
+    labelClassName?: string
   ) => (
     <div key={key}>
-      <label className="block text-xs font-medium text-gray-700">
+      <label className={`block text-xs font-medium text-gray-700 ${labelClassName ?? ''}`.trim()}>
         {label}
       </label>
       <input
@@ -6846,66 +7051,75 @@ function CreateWorkoutOptions({
       if (mixedIntervalsStep === 2) {
         return (
           <div className={layoutClass}>
-            {numberInput('customIntervalNumberOfRounds', 'Repetitions', 1, 1)}
+            {numberInput('customIntervalNumberOfRounds', 'Repeats', 1, 1)}
             {Number(getOpt('customIntervalNumberOfRounds', 1)) > 1 &&
-              durationInput('customIntervalRestBetweenRounds', restBetweenRepetitionsLabel, '0:00')}
+              durationInput('customIntervalRestBetweenRounds', restBetweenRepetitionsLabel, '0:00', horizontalLayout ? 'whitespace-nowrap' : undefined)}
             {directionSelect()}
           </div>
         )
       }
       return (
         <div className="space-y-4">
+          {mixedIntervalsStep === undefined && (
+            <div className={layoutClass}>
+              {numberInput('customIntervalNumberOfRounds', 'Repeats', 1, 1)}
+              {Number(getOpt('customIntervalNumberOfRounds', 1)) > 1 &&
+                durationInput('customIntervalRestBetweenRounds', restBetweenRepetitionsLabel, '0:00', horizontalLayout ? 'whitespace-nowrap' : undefined)}
+              {directionSelect()}
+            </div>
+          )}
           <div>
-            <div className="mb-2">
-              <span className="text-xs font-medium text-gray-700">Add</span>
-            </div>
-            <div className="flex flex-wrap gap-1 mb-2">
-              <button type="button" onClick={() => addInterval('duration')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">Work Interval</button>
-              <button type="button" onClick={() => addInterval('rest')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">Rest Interval</button>
-              <button type="button" onClick={() => addInterval('durationRepeated')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">Work Block</button>
-              <button type="button" onClick={() => addInterval('durationRestRepeated')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">Work/Rest Block</button>
-            </div>
+            <div className="flex flex-wrap gap-1 mb-2 justify-end">
+                <button type="button" onClick={() => addInterval('duration')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">+ Work Interval</button>
+                <button type="button" onClick={() => addInterval('rest')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">+ Rest Interval</button>
+                <button type="button" onClick={() => addInterval('durationRepeated')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">+ Work Block</button>
+                <button type="button" onClick={() => addInterval('durationRestRepeated')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">+ Work/Rest Block</button>
+              </div>
             <ul className="space-y-2 max-h-[40vh] overflow-y-auto">
               {intervals.map((it, index) => (
-                <li key={index} className="rounded border border-gray-200 bg-gray-50/50 p-2 flex flex-wrap items-end gap-2">
-                  <span className="text-xs font-medium text-gray-800 min-w-[7rem] shrink-0">{typeLabels[it.type] ?? it.type}</span>
-                  {(it.type === 'duration' || it.type === 'durationRepeated' || it.type === 'durationRestRepeated') && (
-                    <div>
-                      <label className="block text-xs text-gray-500">Work</label>
-                      <input
-                        type="text"
-                        placeholder="0:00"
-                        value={it.duration ?? ''}
-                        onChange={(e) => updateInterval(index, { duration: e.target.value })}
-                        className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
-                      />
+                <li key={index} className="rounded border border-gray-200 bg-gray-50/50 p-2 flex gap-2 items-center">
+                  <div className="flex flex-col gap-1 flex-1 min-w-0">
+                    <span className="text-xs font-medium text-gray-800">{typeLabels[it.type] ?? it.type}</span>
+                    <div className="flex flex-wrap gap-2 items-end">
+                      {(it.type === 'duration' || it.type === 'durationRepeated' || it.type === 'durationRestRepeated') && (
+                        <div>
+                          <label className="block text-xs text-gray-500">Work</label>
+                          <input
+                            type="text"
+                            placeholder="0:00"
+                            value={it.duration ?? ''}
+                            onChange={(e) => updateInterval(index, { duration: e.target.value })}
+                            className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+                          />
+                        </div>
+                      )}
+                      {(it.type === 'rest' || it.type === 'durationRestRepeated') && (
+                        <div>
+                          <label className="block text-xs text-gray-500">Rest</label>
+                          <input
+                            type="text"
+                            placeholder="0:00"
+                            value={it.restDuration ?? ''}
+                            onChange={(e) => updateInterval(index, { restDuration: e.target.value })}
+                            className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+                          />
+                        </div>
+                      )}
+                      {(it.type === 'durationRepeated' || it.type === 'durationRestRepeated') && (
+                        <div>
+                          <label className="block text-xs text-gray-500">Repeats</label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={it.repeats ?? 1}
+                            onChange={(e) => updateInterval(index, { repeats: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+                            className="w-14 rounded border border-gray-300 px-2 py-1 text-sm"
+                          />
+                        </div>
+                      )}
                     </div>
-                  )}
-                  {(it.type === 'rest' || it.type === 'durationRestRepeated') && (
-                    <div>
-                      <label className="block text-xs text-gray-500">Rest</label>
-                      <input
-                        type="text"
-                        placeholder="0:00"
-                        value={it.restDuration ?? ''}
-                        onChange={(e) => updateInterval(index, { restDuration: e.target.value })}
-                        className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
-                      />
-                    </div>
-                  )}
-                  {(it.type === 'durationRepeated' || it.type === 'durationRestRepeated') && (
-                    <div>
-                      <label className="block text-xs text-gray-500">Repeats</label>
-                      <input
-                        type="number"
-                        min={1}
-                        value={it.repeats ?? 1}
-                        onChange={(e) => updateInterval(index, { repeats: Math.max(1, parseInt(e.target.value, 10) || 1) })}
-                        className="w-14 rounded border border-gray-300 px-2 py-1 text-sm"
-                      />
-                    </div>
-                  )}
-                  <div className="flex gap-0.5 ml-auto">
+                  </div>
+                  <div className="flex gap-0.5 shrink-0">
                     <button type="button" onClick={() => moveInterval(index, 'up')} disabled={index === 0} className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40" aria-label="Move up">↑</button>
                     <button type="button" onClick={() => moveInterval(index, 'down')} disabled={index === intervals.length - 1} className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40" aria-label="Move down">↓</button>
                     <button
@@ -6925,28 +7139,53 @@ function CreateWorkoutOptions({
               <p className="text-xs text-gray-500">Add at least one interval above.</p>
             )}
           </div>
-          {mixedIntervalsStep === undefined && (
-            <div className={layoutClass}>
-              {numberInput('customIntervalNumberOfRounds', 'Repetitions', 1, 1)}
-              {Number(getOpt('customIntervalNumberOfRounds', 1)) > 1 &&
-                durationInput('customIntervalRestBetweenRounds', restBetweenRepetitionsLabel, '0:00')}
-              {directionSelect()}
+        </div>
+      )
+    }
+    case 1: {
+      const timeCapSec = parseDurationInput(String(getOpt('timeCap', '') ?? ''))
+      const isInfinite = timeCapSec === 0
+      return (
+        <div className={layoutClass}>
+          <div key="timeCap">
+            <label className="block text-xs font-medium text-gray-700">
+              Time cap (0 = infinite)
+            </label>
+            <input
+              type="text"
+              placeholder="3:00"
+              value={String(getOpt('timeCap', '') ?? '')}
+              onChange={(e) => {
+                const val = e.target.value
+                const sec = parseDurationInput(val)
+                if (sec === 0) {
+                  onChange({ ...options, timeCap: val, direction: 0 })
+                } else {
+                  setOpt('timeCap', val)
+                }
+              }}
+              className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+            />
+          </div>
+          {isInfinite ? (
+            <div key="direction">
+              <label className="block text-xs font-medium text-gray-700">
+                Direction
+              </label>
+              <select
+                value="down"
+                disabled
+                className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm bg-gray-50 text-gray-600 cursor-not-allowed"
+              >
+                <option value="down">Count down</option>
+              </select>
             </div>
+          ) : (
+            directionSelect()
           )}
         </div>
       )
     }
-    case 1:
-      return (
-        <div className={layoutClass}>
-          {durationInput(
-            'timeCap',
-            'Time cap (0 = infinite)',
-            '3:00'
-          )}
-          {directionSelect()}
-        </div>
-      )
     case 2:
       return (
         <div className={layoutClass}>

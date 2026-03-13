@@ -236,9 +236,16 @@ function scheduleToDisplayDescription(
       return r
     }
     case 3: {
-      const types = Array.isArray(s.customIntervalTypes)
-        ? (s.customIntervalTypes as string[])
-        : []
+      /** customIntervalTypes in schedule: 1=duration, 2=rest, 3=durationRepeated, 4=durationRestRepeated. Never 0.
+       * customIntervalDurations:
+       *   - type=duration or durationRepeated: work duration
+       *   - type=rest: rest duration
+       *   - type=durationRestRepeated: work duration
+       * customIntervalRestDurations:
+       *   - only used for type=durationRestRepeated: rest duration inside the block
+       */
+      const typeNumToStr: Record<number, string> = { 1: 'duration', 2: 'rest', 3: 'durationRepeated', 4: 'durationRestRepeated' }
+      const rawTypes = Array.isArray(s.customIntervalTypes) ? s.customIntervalTypes : []
       const durations = Array.isArray(s.customIntervalDurations)
         ? (s.customIntervalDurations as number[])
         : []
@@ -248,28 +255,31 @@ function scheduleToDisplayDescription(
       const repeats = Array.isArray(s.customIntervalRepeats)
         ? (s.customIntervalRepeats as number[])
         : []
-      if (types.length === 0 && durations.length === 0) {
+      if (rawTypes.length === 0 && durations.length === 0) {
         return strings.no_custom_intervals_specified_text
       }
       const rounds = n('customIntervalNumberOfRounds', 1)
       const parts: string[] = []
-      const count = Math.max(types.length, durations.length, restDurations.length, repeats.length)
+      const count = Math.max(rawTypes.length, durations.length, restDurations.length, repeats.length)
       for (let i = 0; i < count; i += 1) {
-        const t = typeof types[i] === 'string' ? (types[i] as string) : 'duration'
-        const work = durations[i] ?? 0
-        const rest = restDurations[i] ?? 0
+        const raw = rawTypes[i]
+        const num = typeof raw === 'number' ? raw : typeof raw === 'string' && /^[1-4]$/.test(raw) ? parseInt(raw as string, 10) : 1
+        const t = typeNumToStr[num] ?? 'duration'
+        const primary = durations[i] ?? 0
+        const secondary = restDurations[i] ?? 0
         const repsRaw = repeats[i]
         const reps = typeof repsRaw === 'number' && repsRaw > 0 ? repsRaw : 1
         if (t === 'duration') {
-          parts.push(durationToString(work))
+          parts.push(durationToString(primary))
         } else if (t === 'rest') {
-          parts.push(`${durationToString(rest)}R`)
+          // Rest-only interval: its rest duration is stored in customIntervalDurations.
+          parts.push(`${durationToString(primary)}R`)
         } else if (t === 'durationRepeated') {
-          parts.push(`${reps} x ${durationToString(work)}`)
+          parts.push(`${reps} x ${durationToString(primary)}`)
         } else if (t === 'durationRestRepeated') {
-          parts.push(`${reps} x ${durationToString(work)}/${durationToString(rest)}R`)
+          parts.push(`${reps} x ${durationToString(primary)}/${durationToString(secondary)}R`)
         } else {
-          parts.push(durationToString(work))
+          parts.push(durationToString(primary))
         }
       }
       let r = rounds > 1 ? `${rounds} x ` : ''
