@@ -3,7 +3,6 @@
 
 import { useEffect, useMemo, useState, Fragment, forwardRef, useImperativeHandle, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import Link from 'next/link'
 import Image from 'next/image'
 import toast from 'react-hot-toast'
 import headerIcon from './icon.png'
@@ -29,6 +28,7 @@ import { UNLIMITED } from '@/lib/subscription-limits-constants'
 import type { SubscriptionLimits, SubscriptionTier } from '@/lib/subscription-limits-constants'
 import {
   getWorkoutDisplayDescription,
+  getWorkoutDetailDescription,
   getWorkoutDisplayName,
   getScheduleDisplayDescription,
   getSegmentDisplayName,
@@ -157,14 +157,8 @@ export default function HomePage() {
         />
       </section>
       <footer className="border-t border-gymnext-muted/30 bg-white">
-        <div className="max-w-6xl mx-auto px-4 py-3 text-xs text-gray-500 flex items-center justify-between">
-          <span>GymNext FlexTimer</span>
-          <Link
-            href="/admin"
-            className="text-gymnext hover:text-gymnext-dark font-medium"
-          >
-            Admin console
-          </Link>
+        <div className="max-w-6xl mx-auto px-4 py-3 text-xs text-gray-500 flex items-center justify-center">
+          <span>GymNext Flex Timer · © 1804282 Ontario Limited dba GymNext</span>
         </div>
       </footer>
     </main>
@@ -180,6 +174,8 @@ function AppHeader({
   subscriptionTier?: SubscriptionTier
   onLogoClick: () => void
 }) {
+  const [upgradePromptOpen, setUpgradePromptOpen] = useState(false)
+
   async function handleSignOut() {
     await signOut(auth)
   }
@@ -190,6 +186,7 @@ function AppHeader({
       : subscriptionTier === 'classic'
         ? 'Classic Tier'
         : 'Basic Tier'
+  const isPro = subscriptionTier === 'pro'
 
   return (
     <header className="border-b border-gymnext-muted/30 bg-white">
@@ -211,10 +208,10 @@ function AppHeader({
           </span>
           <div className="flex flex-col items-start">
             <span className="text-sm font-semibold text-gray-900">
-              GymNext FlexTimer
+              GymNext Flex Timer
             </span>
             <span className="text-xs text-gray-500">
-              Workouts, collections & plans
+              The world's most advanced interval timer
             </span>
           </div>
         </button>
@@ -223,7 +220,18 @@ function AppHeader({
             <span className="text-xs font-medium text-gray-900">
               {user.email ?? user.displayName ?? 'Signed in'}
             </span>
-            <span className="text-xs text-gray-500">{tierLabel}</span>
+            {isPro ? (
+              <span className="text-xs text-gray-500">{tierLabel}</span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setUpgradePromptOpen(true)}
+                className="text-xs text-gray-500 hover:text-gymnext hover:underline cursor-pointer"
+                title="Upgrade to Pro"
+              >
+                {tierLabel}
+              </button>
+            )}
           </div>
           <button
             type="button"
@@ -234,6 +242,30 @@ function AppHeader({
           </button>
         </div>
       </div>
+
+      {upgradePromptOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => setUpgradePromptOpen(false)}
+          />
+          <div className="relative w-full max-w-sm rounded-lg bg-white shadow-lg p-4 space-y-4">
+            <p className="text-sm text-gray-800">
+              You can upgrade to Pro in the Flex Timer mobile app.
+            </p>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => setUpgradePromptOpen(false)}
+                className="rounded bg-gymnext px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   )
 }
@@ -285,7 +317,7 @@ function SignInScreen({ authError }: { authError: string | null }) {
     <div className="w-full max-w-md rounded-xl bg-white shadow-lg border border-gymnext-muted/30 p-6 space-y-6">
       <div className="space-y-1">
         <h1 className="text-lg font-semibold text-gray-900">
-          Sign in to GymNext FlexTimer
+          Sign in to GymNext Flex Timer
         </h1>
         <p className="text-xs text-gray-500">
           Use your existing account credentials from our mobile application
@@ -436,7 +468,7 @@ function UserAppLayout({
   const [plansLoading, setPlansLoading] = useState(false)
   const [plansError, setPlansError] = useState<string | null>(null)
   const [weekStart, setWeekStart] = useState<string>(() => getLocalYYYYMMDD(new Date()))
-  const [planViewMode, setPlanViewMode] = useState<'week' | '3day' | '1day'>('1day')
+  const [planViewMode, setPlanViewMode] = useState<'week' | '3day' | '1day'>('3day')
 
   useEffect(() => {
     const today = getLocalYYYYMMDD(new Date())
@@ -1947,7 +1979,7 @@ function FavoritesSection({
                     {getWorkoutDisplayName(w) || w.workoutId}
                   </p>
                   <p className="text-xs text-gray-500 truncate">
-                    {getWorkoutDisplayDescription(w) || '—'}
+                    {getWorkoutDetailDescription(w) || '—'}
                   </p>
                 </div>
               </li>
@@ -1988,7 +2020,7 @@ function FavoritesSection({
                   {getWorkoutDisplayName(selectedWorkout) || selectedWorkout.workoutId}
                 </p>
                 <p className="text-xs text-gray-600 mt-1">
-                  {getWorkoutDisplayDescription(selectedWorkout) || '—'}
+                  {getWorkoutDetailDescription(selectedWorkout) || '—'}
                 </p>
               </div>
               <div className="shrink-0">
@@ -2455,7 +2487,27 @@ const FavoritesDetailPanel = forwardRef<
   const [segments, setSegments] = useState<WorkoutSegment[]>(
     workout.type === 'MultiSegmentWorkout' && workout.segments ? [...workout.segments] : []
   )
-  const [expandedSegmentIndex, setExpandedSegmentIndex] = useState<number | null>(null)
+  // State for the "Add segment" dialog (step 1 = timer config; for Mixed Intervals: step 2 = repeats/rest/direction, step 3 = name/description)
+  const [addSegmentOpen, setAddSegmentOpen] = useState(false)
+  const [addSegmentStep, setAddSegmentStep] = useState<1 | 2 | 3>(1)
+  const [newSegmentMode, setNewSegmentMode] = useState<number>(1)
+  const [newSegmentOptions, setNewSegmentOptions] = useState<Record<string, string | number>>(
+    () => getDefaultOptionsForMode(1)
+  )
+  const [newSegmentName, setNewSegmentName] = useState('')
+  const [newSegmentDescription, setNewSegmentDescription] = useState('')
+  const [newSegmentError, setNewSegmentError] = useState<string | null>(null)
+
+  // State for the "Edit segment" dialog (same step flow as Add segment)
+  const [editSegmentIndex, setEditSegmentIndex] = useState<number | null>(null)
+  const [editSegmentStep, setEditSegmentStep] = useState<1 | 2 | 3>(1)
+  const [editSegmentMode, setEditSegmentMode] = useState<number>(1)
+  const [editSegmentOptions, setEditSegmentOptions] = useState<Record<string, string | number>>(
+    () => getDefaultOptionsForMode(1)
+  )
+  const [editSegmentName, setEditSegmentName] = useState('')
+  const [editSegmentDescription, setEditSegmentDescription] = useState('')
+  const [editSegmentError, setEditSegmentError] = useState<string | null>(null)
 
   useEffect(() => {
     setName(workout.workoutName ?? '')
@@ -2571,30 +2623,38 @@ const FavoritesDetailPanel = forwardRef<
     ;[next[index], next[target]] = [next[target], next[index]]
     setSegments(next)
     setIsDirty(true)
-    if (expandedSegmentIndex === index) setExpandedSegmentIndex(target)
-    else if (expandedSegmentIndex === target) setExpandedSegmentIndex(index)
+    if (editSegmentIndex === index) setEditSegmentIndex(target)
+    else if (editSegmentIndex === target) setEditSegmentIndex(index)
   }
 
   function deleteSegment(index: number) {
     setSegments((prev) => prev.filter((_, i) => i !== index))
     setIsDirty(true)
-    if (expandedSegmentIndex === index) setExpandedSegmentIndex(null)
-    else if (expandedSegmentIndex != null && expandedSegmentIndex > index) setExpandedSegmentIndex(expandedSegmentIndex - 1)
+    if (editSegmentIndex === index) setEditSegmentIndex(null)
+    else if (editSegmentIndex != null && editSegmentIndex > index) setEditSegmentIndex(editSegmentIndex - 1)
   }
 
   function addSegment() {
-    const defaultSchedule = JSON.stringify({ timerMode: 1, standardTimeCap: 0 })
-    setSegments((prev) => [
-      ...prev,
-      {
-        workoutId: `${workout.workoutId}-seg-${prev.length}`,
-        workoutName: null,
-        workoutDescription: null,
-        workoutSchedule: defaultSchedule,
-      },
-    ])
-    setIsDirty(true)
-    setExpandedSegmentIndex(segments.length)
+    setNewSegmentMode(1)
+    setNewSegmentOptions(getDefaultOptionsForMode(1))
+    setNewSegmentName('')
+    setNewSegmentDescription('')
+    setNewSegmentError(null)
+    setAddSegmentStep(1)
+    setAddSegmentOpen(true)
+  }
+
+  function handleAddSegmentNext() {
+    if (addSegmentStep === 1) {
+      if (!hasValidDurationForMode(newSegmentMode, newSegmentOptions, parseDurationInput)) {
+        setNewSegmentError('Warmup, Cooldown, Rest, and other segments require a valid duration.')
+        return
+      }
+      setNewSegmentError(null)
+      setAddSegmentStep(2)
+    } else if (addSegmentStep === 2 && newSegmentMode === 3) {
+      setAddSegmentStep(3)
+    }
   }
 
   function updateSegment(index: number, updates: Partial<WorkoutSegment>) {
@@ -2602,6 +2662,77 @@ const FavoritesDetailPanel = forwardRef<
       prev.map((s, i) => (i === index ? { ...s, ...updates } : s))
     )
     setIsDirty(true)
+  }
+
+  function openEditSegment(index: number) {
+    const seg = segments[index]
+    if (!seg) return
+    const parsed = parseScheduleToOptions(seg.workoutSchedule ?? undefined)
+    setEditSegmentMode(parsed.mode)
+    setEditSegmentOptions(parsed.options)
+    setEditSegmentName(seg.workoutName ?? '')
+    setEditSegmentDescription(seg.workoutDescription ?? '')
+    setEditSegmentStep(1)
+    setEditSegmentError(null)
+    setEditSegmentIndex(index)
+  }
+
+  function handleEditSegmentNext() {
+    if (editSegmentStep === 1) {
+      if (!hasValidDurationForMode(editSegmentMode, editSegmentOptions, parseDurationInput)) {
+        setEditSegmentError('Warmup, Cooldown, Rest, and other segments require a valid duration.')
+        return
+      }
+      setEditSegmentError(null)
+      setEditSegmentStep(2)
+    } else if (editSegmentStep === 2 && editSegmentMode === 3) {
+      setEditSegmentStep(3)
+    }
+  }
+
+  function handleEditSegmentSave() {
+    if (editSegmentIndex == null) return
+    if (!hasValidDurationForMode(editSegmentMode, editSegmentOptions, parseDurationInput)) {
+      setEditSegmentError('Warmup, Cooldown, Rest, and other segments require a valid duration.')
+      return
+    }
+    setEditSegmentError(null)
+    const built = buildWorkoutFromCreateForm(
+      editSegmentMode,
+      editSegmentOptions
+    ) as { workoutSchedule: string }
+    updateSegment(editSegmentIndex, {
+      workoutName: editSegmentName.trim() || null,
+      workoutDescription: editSegmentDescription.trim() || null,
+      workoutSchedule: built.workoutSchedule,
+    })
+    setEditSegmentIndex(null)
+    setEditSegmentStep(1)
+  }
+
+  function handleAddSegmentConfirm() {
+    if (!hasValidDurationForMode(newSegmentMode, newSegmentOptions, parseDurationInput)) {
+      setNewSegmentError('Warmup, Cooldown, Rest, and other segments require a valid duration.')
+      return
+    }
+    setNewSegmentError(null)
+    const built = buildWorkoutFromCreateForm(
+      newSegmentMode,
+      newSegmentOptions
+    ) as { workoutSchedule: string }
+    setSegments((prev) => {
+      const index = prev.length
+      const next: WorkoutSegment = {
+        workoutId: `${workout.workoutId}-seg-${index}`,
+        workoutName: newSegmentName.trim() || null,
+        workoutDescription: newSegmentDescription.trim() || null,
+        workoutSchedule: built.workoutSchedule,
+      }
+      return [...prev, next]
+    })
+    setIsDirty(true)
+    setAddSegmentOpen(false)
+    setAddSegmentStep(1)
   }
 
   return (
@@ -2645,14 +2776,6 @@ const FavoritesDetailPanel = forwardRef<
 
       {isSingle && (
         <div className="space-y-3">
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">
-              Timer mode
-            </label>
-            <p className="text-sm text-gray-900 py-1.5">
-              {FAVORITE_CREATABLE_TIMER_MODES.find((m) => m.value === scheduleMode)?.label ?? 'Standard'}
-            </p>
-          </div>
           <CreateWorkoutOptions
             mode={scheduleMode}
             options={{ ...scheduleOptions, direction: scheduleDirection ? 1 : 0 }}
@@ -2689,9 +2812,7 @@ const FavoritesDetailPanel = forwardRef<
                 <div className="flex items-center justify-between gap-2">
                   <button
                     type="button"
-                    onClick={() =>
-                      setExpandedSegmentIndex(expandedSegmentIndex === index ? null : index)
-                    }
+                    onClick={() => openEditSegment(index)}
                     className="text-left text-sm font-medium text-gray-900 truncate flex-1 hover:underline"
                   >
                     {getSegmentDisplayName(seg, index)}
@@ -2726,17 +2847,337 @@ const FavoritesDetailPanel = forwardRef<
                     </button>
                   </div>
                 </div>
-                {expandedSegmentIndex === index && (
-                  <SegmentEditor
-                    segment={seg}
-                    workoutId={workout.workoutId}
-                    segmentIndex={index}
-                    onChange={(updates) => updateSegment(index, updates)}
-                  />
-                )}
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {addSegmentOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => { setAddSegmentOpen(false); setAddSegmentStep(1) }}
+          />
+          <div className="relative w-full max-w-lg rounded-lg bg-white shadow-lg p-4 space-y-4">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">Add segment</h3>
+                <p className="text-xs text-gray-600">
+                  {addSegmentStep === 1
+                    ? 'Choose the timer mode and configure the segment.'
+                    : addSegmentStep === 2 && newSegmentMode === 3
+                      ? 'Set repeats, rest between repeats, and timer direction.'
+                      : 'Name and description (optional).'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setAddSegmentOpen(false); setAddSegmentStep(1) }}
+                className="text-gray-400 hover:text-gray-600"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            {addSegmentStep === 1 ? (
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Timer mode
+                  </label>
+                  <select
+                    value={newSegmentMode}
+                    onChange={(e) => {
+                      const m = Number(e.target.value)
+                      setNewSegmentMode(m)
+                      setNewSegmentOptions(getDefaultOptionsForMode(m))
+                    }}
+                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                  >
+                    {SEGMENT_CREATABLE_TIMER_MODES.map((m) => (
+                      <option key={m.value} value={m.value}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <CreateWorkoutOptions
+                  mode={newSegmentMode}
+                  options={newSegmentOptions}
+                  onChange={setNewSegmentOptions}
+                  parseDurationInput={parseDurationInput}
+                  mixedIntervalsStep={newSegmentMode === 3 ? 1 : undefined}
+                />
+
+                {newSegmentError && (
+                  <p className="text-xs text-red-600">{newSegmentError}</p>
+                )}
+              </div>
+            ) : addSegmentStep === 2 && newSegmentMode === 3 ? (
+              <div className="space-y-3">
+                <CreateWorkoutOptions
+                  mode={3}
+                  options={newSegmentOptions}
+                  onChange={setNewSegmentOptions}
+                  parseDurationInput={parseDurationInput}
+                  mixedIntervalsStep={2}
+                />
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Segment name
+                  </label>
+                  <input
+                    type="text"
+                    value={newSegmentName}
+                    onChange={(e) => setNewSegmentName(e.target.value)}
+                    className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                    placeholder={`Segment ${segments.length + 1}`}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Description
+                  </label>
+                  <input
+                    type="text"
+                    value={newSegmentDescription}
+                    onChange={(e) => setNewSegmentDescription(e.target.value)}
+                    className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                    placeholder="Optional"
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              {addSegmentStep === 1 ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => { setAddSegmentOpen(false); setAddSegmentStep(1) }}
+                    className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddSegmentNext}
+                    className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
+                    style={{ backgroundColor: '#6B21A8' }}
+                  >
+                    Next
+                  </button>
+                </>
+              ) : addSegmentStep === 2 && newSegmentMode === 3 ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setAddSegmentStep(1)}
+                    className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddSegmentNext}
+                    className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
+                    style={{ backgroundColor: '#6B21A8' }}
+                  >
+                    Next
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setAddSegmentStep(newSegmentMode === 3 ? 2 : 1)}
+                    className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddSegmentConfirm}
+                    className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
+                    style={{ backgroundColor: '#6B21A8' }}
+                  >
+                    Add segment
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editSegmentIndex != null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => { setEditSegmentIndex(null); setEditSegmentStep(1) }}
+          />
+          <div className="relative w-full max-w-lg rounded-lg bg-white shadow-lg p-4 space-y-4">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">Edit segment</h3>
+                <p className="text-xs text-gray-600">
+                  {editSegmentStep === 1
+                    ? 'Choose the timer mode and configure the segment.'
+                    : editSegmentStep === 2 && editSegmentMode === 3
+                      ? 'Set repeats, rest between repeats, and timer direction.'
+                      : 'Name and description (optional).'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setEditSegmentIndex(null); setEditSegmentStep(1) }}
+                className="text-gray-400 hover:text-gray-600"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            {editSegmentStep === 1 ? (
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Timer mode
+                  </label>
+                  <select
+                    value={editSegmentMode}
+                    onChange={(e) => {
+                      const m = Number(e.target.value)
+                      setEditSegmentMode(m)
+                      setEditSegmentOptions(getDefaultOptionsForMode(m))
+                    }}
+                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                  >
+                    {SEGMENT_CREATABLE_TIMER_MODES.map((m) => (
+                      <option key={m.value} value={m.value}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <CreateWorkoutOptions
+                  mode={editSegmentMode}
+                  options={editSegmentOptions}
+                  onChange={setEditSegmentOptions}
+                  parseDurationInput={parseDurationInput}
+                  mixedIntervalsStep={editSegmentMode === 3 ? 1 : undefined}
+                />
+
+                {editSegmentError && (
+                  <p className="text-xs text-red-600">{editSegmentError}</p>
+                )}
+              </div>
+            ) : editSegmentStep === 2 && editSegmentMode === 3 ? (
+              <div className="space-y-3">
+                <CreateWorkoutOptions
+                  mode={3}
+                  options={editSegmentOptions}
+                  onChange={setEditSegmentOptions}
+                  parseDurationInput={parseDurationInput}
+                  mixedIntervalsStep={2}
+                />
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Segment name
+                  </label>
+                  <input
+                    type="text"
+                    value={editSegmentName}
+                    onChange={(e) => setEditSegmentName(e.target.value)}
+                    className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                    placeholder={`Segment ${editSegmentIndex + 1}`}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Description
+                  </label>
+                  <input
+                    type="text"
+                    value={editSegmentDescription}
+                    onChange={(e) => setEditSegmentDescription(e.target.value)}
+                    className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                    placeholder="Optional"
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              {editSegmentStep === 1 ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => { setEditSegmentIndex(null); setEditSegmentStep(1) }}
+                    className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleEditSegmentNext}
+                    className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
+                    style={{ backgroundColor: '#6B21A8' }}
+                  >
+                    Next
+                  </button>
+                </>
+              ) : editSegmentStep === 2 && editSegmentMode === 3 ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setEditSegmentStep(1)}
+                    className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleEditSegmentNext}
+                    className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
+                    style={{ backgroundColor: '#6B21A8' }}
+                  >
+                    Next
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setEditSegmentStep(editSegmentMode === 3 ? 2 : 1)}
+                    className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleEditSegmentSave}
+                    className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
+                    style={{ backgroundColor: '#6B21A8' }}
+                  >
+                    Save
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -2765,106 +3206,6 @@ const FavoritesDetailPanel = forwardRef<
     </form>
   )
 })
-
-function SegmentEditor({
-  segment,
-  workoutId,
-  segmentIndex,
-  onChange,
-}: {
-  segment: WorkoutSegment
-  workoutId: string
-  segmentIndex: number
-  onChange: (updates: Partial<WorkoutSegment>) => void
-}) {
-  const parsed = useMemo(
-    () => parseScheduleToOptions(segment.workoutSchedule ?? undefined),
-    [segment.workoutSchedule]
-  )
-  const [mode, setMode] = useState(parsed.mode)
-  const [options, setOptions] = useState<Record<string, string | number>>(parsed.options)
-  const [name, setName] = useState(segment.workoutName ?? '')
-  const [description, setDescription] = useState(segment.workoutDescription ?? '')
-  const [scheduleError, setScheduleError] = useState<string | null>(null)
-
-  useEffect(() => {
-    setMode(parsed.mode)
-    setOptions(parsed.options)
-    setName(segment.workoutName ?? '')
-    setDescription(segment.workoutDescription ?? '')
-  }, [segment.workoutId, parsed.mode, parsed.options, segment.workoutName, segment.workoutDescription])
-
-  function applyToParent(updates: Partial<WorkoutSegment>) {
-    onChange(updates)
-  }
-
-  function applySchedule() {
-    if (!hasValidDurationForMode(mode, options, parseDurationInput)) {
-      setScheduleError('Warmup, Cooldown, and Rest require a duration greater than 0:00.')
-      return
-    }
-    setScheduleError(null)
-    const built = buildWorkoutFromCreateForm(mode, options) as { workoutSchedule: string }
-    applyToParent({
-      workoutName: name.trim() || null,
-      workoutDescription: description.trim() || null,
-      workoutSchedule: built.workoutSchedule,
-    })
-  }
-
-  return (
-    <div className="mt-3 pt-3 border-t border-gray-200 space-y-3">
-      <div>
-        <label className="block text-xs font-medium text-gray-700 mb-0.5">Segment name</label>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onBlur={() => applyToParent({ workoutName: name.trim() || null, workoutDescription: description.trim() || null })}
-          className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
-          placeholder={`Segment ${segmentIndex + 1}`}
-        />
-      </div>
-      <div>
-        <label className="block text-xs font-medium text-gray-700 mb-0.5">Description</label>
-        <input
-          type="text"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          onBlur={() => applyToParent({ workoutName: name.trim() || null, workoutDescription: description.trim() || null })}
-          className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
-          placeholder="Optional"
-        />
-      </div>
-      <div>
-        <label className="block text-xs font-medium text-gray-700 mb-0.5">Timer mode</label>
-        <p className="text-sm text-gray-900 py-1">
-          {CREATABLE_TIMER_MODES.find((m) => m.value === mode)?.label ?? 'Standard'}
-        </p>
-      </div>
-      <CreateWorkoutOptions
-        mode={mode}
-        options={options}
-        onChange={(o) => {
-          setOptions(o)
-          if (hasValidDurationForMode(mode, o, parseDurationInput)) {
-            const built = buildWorkoutFromCreateForm(mode, o) as { workoutSchedule: string }
-            applyToParent({ workoutSchedule: built.workoutSchedule })
-          }
-        }}
-        parseDurationInput={parseDurationInput}
-      />
-      {scheduleError && <p className="text-xs text-red-600">{scheduleError}</p>}
-      <button
-        type="button"
-        onClick={applySchedule}
-        className="text-xs text-gymnext-dark hover:underline"
-      >
-        Apply segment settings
-      </button>
-    </div>
-  )
-}
 
 function CollectionsSection({
   collections,
@@ -3552,7 +3893,7 @@ function CollectionsSection({
                           {getWorkoutDisplayName(w) || w.workoutId}
                         </div>
                         <div className="text-sm text-gray-600 mt-0.5">
-                          {getWorkoutDisplayDescription(w) || '—'}
+                          {getWorkoutDetailDescription(w) || '—'}
                         </div>
                       </div>
                       <div className="shrink-0 relative" onClick={(e) => e.stopPropagation()}>
@@ -5068,6 +5409,11 @@ function PlansSection({
                           Rest day
                         </p>
                       )}
+                      {items.length === 0 && dateKey >= todayYmd && (
+                        <p className="text-[11px] text-gray-500 px-1 py-2">
+                          No workouts currently. Add a workout using the button above.
+                        </p>
+                      )}
                       {items.length > 0 && (
                         <ul
                           className=""
@@ -5220,7 +5566,6 @@ function PlansSection({
                                   className="min-w-0 flex-1 py-0.5 cursor-pointer"
                                   onClick={(e) => {
                                     e.stopPropagation()
-                                    if (isPast) return
                                     if (expandedPlannedWorkoutId === pw.id) {
                                       setExpandedPlannedWorkoutId(null)
                                       setEditSchedulePlannedWorkout(null)
@@ -5234,7 +5579,7 @@ function PlansSection({
                                     {getWorkoutDisplayName(w) || 'Workout'}
                                   </div>
                                   <div className="text-sm text-gray-600 mt-0.5">
-                                    {((w.workoutDescription ?? getWorkoutDisplayDescription(w)) || '').trim() || '—'}
+                                    {getWorkoutDetailDescription(w) || '—'}
                                   </div>
                                 </div>
                                 <div className="shrink-0 relative" onClick={(e) => e.stopPropagation()}>
@@ -5340,46 +5685,68 @@ function PlansSection({
                               {expandedPlannedWorkoutId === pw.id && (
                                 <li className="border-t border-gray-200 bg-gray-50/80 list-none">
                                   <div className="p-4">
-                                    <div className="mb-3">
-                                      <label className="block text-xs font-medium text-gray-700 mb-1">
-                                        Timer mode
-                                      </label>
-                                      <p className="text-sm text-gray-900 py-1.5">
-                                        {PLANNED_WORKOUT_CREATABLE_TIMER_MODES.find((m) => m.value === editScheduleMode)?.label ?? 'Standard'}
-                                      </p>
-                                    </div>
-                                    <form onSubmit={handleSaveEditSchedule} className="space-y-4">
-                                      <CreateWorkoutOptions
-                                        mode={editScheduleMode}
-                                        options={editScheduleOptions}
-                                        onChange={setEditScheduleOptions}
-                                        parseDurationInput={parseDurationInput}
-                                        horizontalLayout
-                                      />
-                                      {editScheduleError && <p className="text-xs text-red-600">{editScheduleError}</p>}
-                                      <div className="flex justify-end gap-2">
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setExpandedPlannedWorkoutId(null)
-                                            setEditSchedulePlannedWorkout(null)
-                                            setEditScheduleError(null)
-                                          }}
-                                          disabled={editScheduleBusy}
-                                          className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
-                                        >
-                                          Cancel
-                                        </button>
-                                        <button
-                                          type="submit"
-                                          disabled={editScheduleBusy || !hasValidDurationForMode(editScheduleMode, editScheduleOptions, parseDurationInput)}
-                                          className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
-                                          style={{ backgroundColor: '#6B21A8' }}
-                                        >
-                                          {editScheduleBusy ? 'Saving…' : 'Save'}
-                                        </button>
+                                    {dateKey < todayYmd ? (
+                                      <div className="space-y-4">
+                                        <p className="text-xs text-gray-500">
+                                          This workout is in the past and cannot be edited.
+                                        </p>
+                                        <fieldset disabled className="space-y-4 opacity-90">
+                                          <CreateWorkoutOptions
+                                            mode={editScheduleMode}
+                                            options={editScheduleOptions}
+                                            onChange={() => {}}
+                                            parseDurationInput={parseDurationInput}
+                                            horizontalLayout
+                                          />
+                                        </fieldset>
+                                        <div className="flex justify-end">
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setExpandedPlannedWorkoutId(null)
+                                              setEditSchedulePlannedWorkout(null)
+                                              setEditScheduleError(null)
+                                            }}
+                                            className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                                          >
+                                            Close
+                                          </button>
+                                        </div>
                                       </div>
-                                    </form>
+                                    ) : (
+                                      <form onSubmit={handleSaveEditSchedule} className="space-y-4">
+                                        <CreateWorkoutOptions
+                                          mode={editScheduleMode}
+                                          options={editScheduleOptions}
+                                          onChange={setEditScheduleOptions}
+                                          parseDurationInput={parseDurationInput}
+                                          horizontalLayout
+                                        />
+                                        {editScheduleError && <p className="text-xs text-red-600">{editScheduleError}</p>}
+                                        <div className="flex justify-end gap-2">
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setExpandedPlannedWorkoutId(null)
+                                              setEditSchedulePlannedWorkout(null)
+                                              setEditScheduleError(null)
+                                            }}
+                                            disabled={editScheduleBusy}
+                                            className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                                          >
+                                            Cancel
+                                          </button>
+                                          <button
+                                            type="submit"
+                                            disabled={editScheduleBusy || !hasValidDurationForMode(editScheduleMode, editScheduleOptions, parseDurationInput)}
+                                            className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
+                                            style={{ backgroundColor: '#6B21A8' }}
+                                          >
+                                            {editScheduleBusy ? 'Saving…' : 'Save'}
+                                          </button>
+                                        </div>
+                                      </form>
+                                    )}
                                   </div>
                                 </li>
                               )}
@@ -5594,8 +5961,8 @@ function PlansSection({
                               }}
                             >
                               <span className="font-medium text-gray-900">{getWorkoutDisplayName(w) || 'Workout'}</span>
-                              {(getWorkoutDisplayDescription(w) || '').trim() && (
-                                <span className="block text-xs text-gray-500 truncate">{getWorkoutDisplayDescription(w)}</span>
+                              {(getWorkoutDetailDescription(w) || '').trim() && (
+                                <span className="block text-xs text-gray-500 truncate">{getWorkoutDetailDescription(w)}</span>
                               )}
                             </button>
                           </li>
@@ -5681,8 +6048,8 @@ function PlansSection({
                                           }}
                                         >
                                           <span className="font-medium text-gray-900">{getWorkoutDisplayName(w) || 'Workout'}</span>
-                                          {(getWorkoutDisplayDescription(w) || '').trim() && (
-                                            <span className="block text-xs text-gray-500 truncate">{getWorkoutDisplayDescription(w)}</span>
+                                          {(getWorkoutDetailDescription(w) || '').trim() && (
+                                            <span className="block text-xs text-gray-500 truncate">{getWorkoutDetailDescription(w)}</span>
                                           )}
                                         </button>
                                       </li>
@@ -6397,6 +6764,19 @@ const PLANNED_WORKOUT_CREATABLE_TIMER_MODES: { value: number; label: string }[] 
   { value: 4, label: 'Tabata' },
   { value: 5, label: 'EMOM' },
   { value: 12, label: 'Sets with Rest' },
+  { value: 13, label: 'Rest' },
+]
+
+/** Timer modes allowed when adding a segment to a multi-segment workout. */
+const SEGMENT_CREATABLE_TIMER_MODES: { value: number; label: string }[] = [
+  { value: 10, label: 'Warmup' },
+  { value: 11, label: 'Cooldown' },
+  { value: 1, label: 'Standard' },
+  { value: 2, label: 'Rounds' },
+  { value: 3, label: 'Mixed Intervals' },
+  { value: 12, label: 'Sets with Rest' },
+  { value: 5, label: 'EMOM' },
+  { value: 4, label: 'Tabata' },
   { value: 13, label: 'Rest' },
 ]
 
@@ -7117,10 +7497,10 @@ function CreateWorkoutOptions({
           )}
           <div>
             <div className="flex flex-wrap gap-1 mb-2 justify-end">
-                <button type="button" onClick={() => addInterval('duration')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">+ Work Interval</button>
-                <button type="button" onClick={() => addInterval('rest')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">+ Rest Interval</button>
-                <button type="button" onClick={() => addInterval('durationRepeated')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">+ Work Block</button>
-                <button type="button" onClick={() => addInterval('durationRestRepeated')} className="rounded border border-gray-300 px-2 py-1 text-xs bg-white hover:bg-gray-50">+ Work/Rest Block</button>
+                <button type="button" onClick={() => addInterval('duration')} className="rounded px-2 py-1 text-xs font-medium text-white hover:opacity-90" style={{ backgroundColor: '#6B21A8' }}>+ Work Interval</button>
+                <button type="button" onClick={() => addInterval('rest')} className="rounded px-2 py-1 text-xs font-medium text-white hover:opacity-90" style={{ backgroundColor: '#6B21A8' }}>+ Rest Interval</button>
+                <button type="button" onClick={() => addInterval('durationRepeated')} className="rounded px-2 py-1 text-xs font-medium text-white hover:opacity-90" style={{ backgroundColor: '#6B21A8' }}>+ Work Block</button>
+                <button type="button" onClick={() => addInterval('durationRestRepeated')} className="rounded px-2 py-1 text-xs font-medium text-white hover:opacity-90" style={{ backgroundColor: '#6B21A8' }}>+ Work/Rest Block</button>
               </div>
             <ul className="space-y-2 max-h-[40vh] overflow-y-auto">
               {intervals.map((it, index) => (

@@ -383,6 +383,17 @@ export function getWorkoutDisplayDescription(entry: WorkoutEntryLike): string {
   return timerModeToDisplayString(entry.timerMode ?? entry.timerModes)
 }
 
+/** For workout detailed view: if no user description, timer mode only; if description set, "timer mode • description". */
+export function getWorkoutDetailDescription(entry: WorkoutEntryLike): string {
+  const timerModePart =
+    entry.segments && entry.segments.length > 0
+      ? strings.compound_text
+      : timerModeToDisplayString(entry.timerMode ?? entry.timerModes)
+  const desc = entry.workoutDescription?.trim()
+  if (desc) return `${timerModePart} • ${desc}`
+  return timerModePart
+}
+
 /** Schedule-only description (duration, rounds, etc.) from workoutSchedule JSON. Use for body/details. */
 export function getScheduleDisplayDescription(entry: WorkoutEntryLike): string {
   if (entry.segments && entry.segments.length > 0) return strings.compound_text

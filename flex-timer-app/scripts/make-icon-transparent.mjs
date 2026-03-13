@@ -11,7 +11,7 @@ const root = path.join(__dirname, '..');
 async function main() {
   const sharp = (await import('sharp')).default;
   const iconPath = path.join(root, 'src', 'app', 'icon.png');
-  const publicPath = path.join(root, 'public', 'icon.png');
+  // Only write to src/app/icon.png; avoid public/icon.png to prevent Next.js conflict with app metadata route /icon.png
 
   const img = sharp(iconPath);
   const { data, info } = await img.raw().ensureAlpha().toBuffer({ resolveWithObject: true });
@@ -36,17 +36,8 @@ async function main() {
   })
     .png()
     .toFile(iconPath);
-  await sharp(data, {
-    raw: {
-      width: info.width,
-      height: info.height,
-      channels: 4,
-    },
-  })
-    .png()
-    .toFile(publicPath);
 
-  console.log('Written:', iconPath, publicPath);
+  console.log('Written:', iconPath);
 }
 
 main().catch((e) => {
