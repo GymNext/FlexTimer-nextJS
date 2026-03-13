@@ -7048,6 +7048,9 @@ function CreateWorkoutOptions({
         durationRepeated: 'Work Block',
         durationRestRepeated: 'Work/Rest Block',
       }
+      const recurringRestSeconds = parseDurationInput(String(getOpt('customIntervalRestBetweenIntervals', '0') ?? '0'))
+      const recurringRestEnabled = recurringRestSeconds > 0
+      const recurringRestDisplay = String(getOpt('customIntervalRestBetweenIntervals', '1:00') ?? '1:00')
       if (mixedIntervalsStep === 2) {
         return (
           <div className={layoutClass}>
@@ -7077,67 +7080,101 @@ function CreateWorkoutOptions({
               </div>
             <ul className="space-y-2 max-h-[40vh] overflow-y-auto">
               {intervals.map((it, index) => (
-                <li key={index} className="rounded border border-gray-200 bg-gray-50/50 p-2 flex gap-2 items-center">
-                  <div className="flex flex-col gap-1 flex-1 min-w-0">
-                    <span className="text-xs font-medium text-gray-800">{typeLabels[it.type] ?? it.type}</span>
-                    <div className="flex flex-wrap gap-2 items-end">
-                      {(it.type === 'duration' || it.type === 'durationRepeated' || it.type === 'durationRestRepeated') && (
-                        <div>
-                          <label className="block text-xs text-gray-500">Work</label>
-                          <input
-                            type="text"
-                            placeholder="0:00"
-                            value={it.duration ?? ''}
-                            onChange={(e) => updateInterval(index, { duration: e.target.value })}
-                            className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
-                          />
-                        </div>
-                      )}
-                      {(it.type === 'rest' || it.type === 'durationRestRepeated') && (
-                        <div>
-                          <label className="block text-xs text-gray-500">Rest</label>
-                          <input
-                            type="text"
-                            placeholder="0:00"
-                            value={it.restDuration ?? ''}
-                            onChange={(e) => updateInterval(index, { restDuration: e.target.value })}
-                            className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
-                          />
-                        </div>
-                      )}
-                      {(it.type === 'durationRepeated' || it.type === 'durationRestRepeated') && (
-                        <div>
-                          <label className="block text-xs text-gray-500">Repeats</label>
-                          <input
-                            type="number"
-                            min={1}
-                            value={it.repeats ?? 1}
-                            onChange={(e) => updateInterval(index, { repeats: Math.max(1, parseInt(e.target.value, 10) || 1) })}
-                            className="w-14 rounded border border-gray-300 px-2 py-1 text-sm"
-                          />
-                        </div>
-                      )}
+                <Fragment key={index}>
+                  {index > 0 && recurringRestEnabled && (
+                    <li className="rounded border border-dashed border-gray-200 bg-white p-2 flex justify-between items-center text-xs text-gray-700">
+                      <span className="font-medium">Rest</span>
+                      <span className="font-mono">{recurringRestDisplay}</span>
+                    </li>
+                  )}
+                  <li className="rounded border border-gray-200 bg-gray-50/50 p-2 flex gap-2 items-center">
+                    <div className="flex flex-col gap-1 flex-1 min-w-0">
+                      <span className="text-xs font-medium text-gray-800">{typeLabels[it.type] ?? it.type}</span>
+                      <div className="flex flex-wrap gap-2 items-end">
+                        {(it.type === 'duration' || it.type === 'durationRepeated' || it.type === 'durationRestRepeated') && (
+                          <div>
+                            <label className="block text-xs text-gray-500">Work</label>
+                            <input
+                              type="text"
+                              placeholder="0:00"
+                              value={it.duration ?? ''}
+                              onChange={(e) => updateInterval(index, { duration: e.target.value })}
+                              className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+                            />
+                          </div>
+                        )}
+                        {(it.type === 'rest' || it.type === 'durationRestRepeated') && (
+                          <div>
+                            <label className="block text-xs text-gray-500">Rest</label>
+                            <input
+                              type="text"
+                              placeholder="0:00"
+                              value={it.restDuration ?? ''}
+                              onChange={(e) => updateInterval(index, { restDuration: e.target.value })}
+                              className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+                            />
+                          </div>
+                        )}
+                        {(it.type === 'durationRepeated' || it.type === 'durationRestRepeated') && (
+                          <div>
+                            <label className="block text-xs text-gray-500">Repeats</label>
+                            <input
+                              type="number"
+                              min={1}
+                              value={it.repeats ?? 1}
+                              onChange={(e) => updateInterval(index, { repeats: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+                              className="w-14 rounded border border-gray-300 px-2 py-1 text-sm"
+                            />
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex gap-0.5 shrink-0">
-                    <button type="button" onClick={() => moveInterval(index, 'up')} disabled={index === 0} className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40" aria-label="Move up">↑</button>
-                    <button type="button" onClick={() => moveInterval(index, 'down')} disabled={index === intervals.length - 1} className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40" aria-label="Move down">↓</button>
-                    <button
-                      type="button"
-                      onClick={() => removeInterval(index)}
-                      className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100"
-                      aria-label="Remove"
-                      title="Remove"
-                    >
-                      ×
-                    </button>
-                  </div>
-                </li>
+                    <div className="flex gap-0.5 shrink-0">
+                      <button type="button" onClick={() => moveInterval(index, 'up')} disabled={index === 0} className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40" aria-label="Move up">↑</button>
+                      <button type="button" onClick={() => moveInterval(index, 'down')} disabled={index === intervals.length - 1} className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40" aria-label="Move down">↓</button>
+                      <button
+                        type="button"
+                        onClick={() => removeInterval(index)}
+                        className="h-7 w-7 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100"
+                        aria-label="Remove"
+                        title="Remove"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </li>
+                </Fragment>
               ))}
             </ul>
             {intervals.length === 0 && (
               <p className="text-xs text-gray-500">Add at least one interval above.</p>
             )}
+            <div className="mt-3 flex items-center gap-2">
+              <label className="inline-flex items-center gap-2 text-xs text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={recurringRestEnabled}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      const current = String(getOpt('customIntervalRestBetweenIntervals', '')) || '1:00'
+                      setOpt('customIntervalRestBetweenIntervals', current)
+                    } else {
+                      setOpt('customIntervalRestBetweenIntervals', '0:00')
+                    }
+                  }}
+                  className="h-3 w-3 rounded border-gray-300 text-gymnext focus:ring-gymnext"
+                />
+                <span>Recurring Rest</span>
+              </label>
+              <input
+                type="text"
+                placeholder="0:00"
+                value={String(getOpt('customIntervalRestBetweenIntervals', recurringRestEnabled ? '1:00' : '0:00') ?? '')}
+                onChange={(e) => setOpt('customIntervalRestBetweenIntervals', e.target.value)}
+                disabled={!recurringRestEnabled}
+                className="w-20 rounded border border-gray-300 px-2 py-1 text-xs focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext disabled:bg-gray-100 disabled:text-gray-400"
+              />
+            </div>
           </div>
         </div>
       )
