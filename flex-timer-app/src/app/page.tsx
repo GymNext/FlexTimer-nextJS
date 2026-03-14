@@ -4883,6 +4883,8 @@ function PlansSection({
   const [editDetailsBusy, setEditDetailsBusy] = useState(false)
   const [editDetailsError, setEditDetailsError] = useState<string | null>(null)
 
+  const [showDetailsPlannedWorkout, setShowDetailsPlannedWorkout] = useState<PlannedWorkout | null>(null)
+
   const [createPlanName, setCreatePlanName] = useState('')
   const [createPlanDescription, setCreatePlanDescription] = useState('')
   const [createPlanBusy, setCreatePlanBusy] = useState(false)
@@ -5900,6 +5902,19 @@ function PlansSection({
                                         )}
                                         </>
                                         )}
+                                        {isPast && pw.workout.type !== 'MultiSegmentWorkout' && (
+                                          <button
+                                            type="button"
+                                            className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                                            onClick={() => {
+                                              setPlannedWorkoutMenuId(null)
+                                              setPlannedWorkoutMenuAnchorRect(null)
+                                              setShowDetailsPlannedWorkout(pw)
+                                            }}
+                                          >
+                                            Show workout details
+                                          </button>
+                                        )}
                                         <button
                                           type="button"
                                           className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
@@ -6895,6 +6910,35 @@ function PlansSection({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showDetailsPlannedWorkout && showDetailsPlannedWorkout.workout.type !== 'MultiSegmentWorkout' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => setShowDetailsPlannedWorkout(null)}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-800">Workout details</h3>
+            </div>
+            <div className="p-4">
+              <p className="text-sm text-gray-900 whitespace-pre-wrap">
+                {(showDetailsPlannedWorkout.workout as { workoutDetails?: string | null }).workoutDetails?.trim() || 'No workout details recorded.'}
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 px-4 pb-4">
+              <button
+                type="button"
+                onClick={() => setShowDetailsPlannedWorkout(null)}
+                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}
