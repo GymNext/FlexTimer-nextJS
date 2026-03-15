@@ -1477,12 +1477,62 @@ function CreateWorkoutDialog({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Multi-segment: pending segments before create (at least one required)
+  const [pendingSegments, setPendingSegments] = useState<WorkoutSegment[]>([])
+  const [addSegmentOpen, setAddSegmentOpen] = useState(false)
+  const [addSegmentStep, setAddSegmentStep] = useState<1 | 2 | 3>(1)
+  const [newSegmentMode, setNewSegmentMode] = useState(1)
+  const [newSegmentOptions, setNewSegmentOptions] = useState<Record<string, string | number>>(() => getDefaultOptionsForMode(1))
+  const [newSegmentName, setNewSegmentName] = useState('')
+  const [newSegmentDescription, setNewSegmentDescription] = useState('')
+  const [newSegmentDetails, setNewSegmentDetails] = useState('')
+  const [newSegmentError, setNewSegmentError] = useState<string | null>(null)
+
   const built = useMemo(() => {
     if (isMultiSegment(mode)) return { workoutSchedule: '', direction: false }
     return buildWorkoutFromCreateForm(mode, options) as { workoutSchedule: string; direction: boolean }
   }, [mode, options])
 
+  function handleAddSegmentNext() {
+    if (addSegmentStep === 1) {
+      if (!hasValidDurationForMode(newSegmentMode, newSegmentOptions, parseDurationInput)) {
+        setNewSegmentError('Warmup, Cooldown, Rest, and other segments require a valid duration.')
+        return
+      }
+      setNewSegmentError(null)
+      setAddSegmentStep(2)
+    } else if (addSegmentStep === 2 && newSegmentMode === 3) {
+      setAddSegmentStep(3)
+    }
+  }
+
+  function handleAddSegmentConfirm() {
+    if (!hasValidDurationForMode(newSegmentMode, newSegmentOptions, parseDurationInput)) {
+      setNewSegmentError('Warmup, Cooldown, Rest, and other segments require a valid duration.')
+      return
+    }
+    setNewSegmentError(null)
+    const builtSeg = buildWorkoutFromCreateForm(newSegmentMode, newSegmentOptions) as { workoutSchedule: string }
+    setPendingSegments((prev) => {
+      const index = prev.length
+      const next: WorkoutSegment = {
+        workoutId: `pending-seg-${index}`,
+        workoutName: newSegmentName.trim() || null,
+        workoutDescription: newSegmentDescription.trim() || null,
+        workoutDetails: newSegmentDetails.trim() || null,
+        workoutSchedule: builtSeg.workoutSchedule,
+      }
+      return [...prev, next]
+    })
+    setAddSegmentOpen(false)
+    setAddSegmentStep(1)
+  }
+
   async function handleCreate() {
+    if (isMultiSegment(mode) && pendingSegments.length === 0) {
+      setError('Add at least one segment before creating the workout.')
+      return
+    }
     if (!isMultiSegment(mode) && !hasValidDurationForMode(mode, options, parseDurationInput)) {
       setError(
         mode === 2
@@ -1504,16 +1554,20 @@ function CreateWorkoutDialog({
     try {
       if (isMultiSegment(mode)) {
         const created = await createWorkout({ workout: { type: 'MultiSegmentWorkout' } })
-        if (name.trim() || description.trim()) {
-          await onSaveWorkout(created.id, {
-            workoutName: name.trim() || null,
-            workoutDescription: description.trim() || null,
-          })
-        }
+        const segmentsWithIds = pendingSegments.map((seg, i) => ({
+          ...seg,
+          workoutId: `${created.id}-seg-${i}`,
+        }))
+        await onSaveWorkout(created.id, {
+          workoutName: name.trim() || null,
+          workoutDescription: description.trim() || null,
+          segments: segmentsWithIds,
+        })
         onCreated({
           ...created,
           workoutName: name.trim() || null,
           workoutDescription: description.trim() || null,
+          segments: segmentsWithIds,
         })
       } else {
         const created = await createWorkout({
@@ -1565,7 +1619,7 @@ function CreateWorkoutDialog({
           </h3>
           <p className="text-xs text-gray-500 mt-0.5">
             {step === 1 && 'Choose the workout type.'}
-            {step === 2 && (mode === 3 ? 'Add and order your intervals.' : 'Configure the timer settings for this workout.')}
+            {step === 2 && (isMultiSegment(mode) ? 'Add at least one segment.' : mode === 3 ? 'Add and order your intervals.' : 'Configure the timer settings for this workout.')}
             {step === 3 && (mode === 3 ? 'Set number of rounds, rest between rounds, and direction.' : 'Optionally set a name and description.')}
             {step === 4 && 'Optionally set a name and description.'}
           </p>
@@ -1582,6 +1636,7 @@ function CreateWorkoutDialog({
                   onChange={(e) => {
                     const newMode = Number(e.target.value)
                     setMode(newMode)
+                    if (newMode !== 100) setPendingSegments([])
                     setOptions(
                       getDefaultOptionsForMode(
                         newMode,
@@ -1614,9 +1669,88 @@ function CreateWorkoutDialog({
           {step === 2 && (
             <>
               {isMultiSegment(mode) ? (
-                <p className="text-sm text-gray-600">
-                  Multi-segment workout. You can add segments after creating.
-                </p>
+                <div className="space-y-3">
+                  <p className="text-sm text-gray-600">
+                    Add at least one segment. You can reorder or remove segments below.
+                  </p>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-gray-700">Segments ({pendingSegments.length})</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewSegmentMode(1)
+                        setNewSegmentOptions(getDefaultOptionsForMode(1))
+                        setNewSegmentName('')
+                        setNewSegmentDescription('')
+                        setNewSegmentDetails('')
+                        setNewSegmentError(null)
+                        setAddSegmentStep(1)
+                        setAddSegmentOpen(true)
+                      }}
+                      className="rounded text-white text-xs font-medium px-2 py-1.5 hover:opacity-90"
+                      style={{ backgroundColor: '#6B21A8' }}
+                    >
+                      Add segment
+                    </button>
+                  </div>
+                  <ul className="space-y-2 max-h-[30vh] overflow-y-auto rounded border border-gray-200 bg-gray-50/50 p-2">
+                    {pendingSegments.length === 0 ? (
+                      <li className="text-xs text-gray-500 py-2">No segments yet. Click &quot;Add segment&quot; to add one.</li>
+                    ) : (
+                      pendingSegments.map((seg, index) => (
+                        <li key={`${seg.workoutId}-${index}`} className="flex items-center justify-between gap-2 rounded border border-gray-200 bg-white p-2">
+                          <span className="text-sm text-gray-900 truncate min-w-0 flex-1">{getSegmentDisplayName(seg, index)}</span>
+                          <div className="inline-flex items-center gap-0.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (index <= 0) return
+                                setPendingSegments((prev) => {
+                                  const next = [...prev]
+                                  ;[next[index - 1], next[index]] = [next[index], next[index - 1]]
+                                  return next
+                                })
+                              }}
+                              disabled={index === 0}
+                              className="h-6 w-6 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40"
+                              aria-label="Move up"
+                              title="Move up"
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (index >= pendingSegments.length - 1) return
+                                setPendingSegments((prev) => {
+                                  const next = [...prev]
+                                  ;[next[index], next[index + 1]] = [next[index + 1], next[index]]
+                                  return next
+                                })
+                              }}
+                              disabled={index === pendingSegments.length - 1}
+                              className="h-6 w-6 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100 disabled:opacity-40"
+                              aria-label="Move down"
+                              title="Move down"
+                            >
+                              ↓
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPendingSegments((prev) => prev.filter((_, i) => i !== index))}
+                              className="h-6 w-6 inline-flex items-center justify-center rounded border border-gray-300 text-gray-600 hover:bg-gray-100"
+                              aria-label="Remove segment"
+                              title="Remove segment"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        </li>
+                      ))
+                    )}
+                  </ul>
+                  {error && pendingSegments.length === 0 && <p className="text-xs text-red-600">{error}</p>}
+                </div>
               ) : (
                 <CreateWorkoutOptions
                   mode={mode}
@@ -1638,7 +1772,7 @@ function CreateWorkoutDialog({
                 <button
                   type="button"
                   onClick={() => setStep(3)}
-                  disabled={!isMultiSegment(mode) && !hasValidDurationForMode(mode, options, parseDurationInput)}
+                  disabled={isMultiSegment(mode) ? pendingSegments.length === 0 : !hasValidDurationForMode(mode, options, parseDurationInput)}
                   className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
                   style={{ backgroundColor: '#6B21A8' }}
                 >
@@ -1792,6 +1926,168 @@ function CreateWorkoutDialog({
           )}
         </div>
       </div>
+
+      {addSegmentOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => { setAddSegmentOpen(false); setAddSegmentStep(1) }}
+          />
+          <div className="relative w-full max-w-lg rounded-lg bg-white shadow-lg p-4 space-y-4">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">Add segment</h3>
+                <p className="text-xs text-gray-600">
+                  {addSegmentStep === 1
+                    ? 'Choose the timer mode and configure the segment.'
+                    : addSegmentStep === 2 && newSegmentMode === 3
+                      ? 'Set repeats, rest between repeats, and timer direction.'
+                      : 'Name and description (optional).'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setAddSegmentOpen(false); setAddSegmentStep(1) }}
+                className="text-gray-400 hover:text-gray-600"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            {addSegmentStep === 1 ? (
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Timer mode</label>
+                  <select
+                    value={newSegmentMode}
+                    onChange={(e) => {
+                      const m = Number(e.target.value)
+                      setNewSegmentMode(m)
+                      setNewSegmentOptions(getDefaultOptionsForMode(m))
+                    }}
+                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                  >
+                    {SEGMENT_CREATABLE_TIMER_MODES.map((m) => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <CreateWorkoutOptions
+                  mode={newSegmentMode}
+                  options={newSegmentOptions}
+                  onChange={setNewSegmentOptions}
+                  parseDurationInput={parseDurationInput}
+                  mixedIntervalsStep={newSegmentMode === 3 ? 1 : undefined}
+                />
+                {newSegmentError && <p className="text-xs text-red-600">{newSegmentError}</p>}
+              </div>
+            ) : addSegmentStep === 2 && newSegmentMode === 3 ? (
+              <div className="space-y-3">
+                <CreateWorkoutOptions
+                  mode={3}
+                  options={newSegmentOptions}
+                  onChange={setNewSegmentOptions}
+                  parseDurationInput={parseDurationInput}
+                  mixedIntervalsStep={2}
+                />
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Segment name</label>
+                  <input
+                    type="text"
+                    value={newSegmentName}
+                    onChange={(e) => setNewSegmentName(e.target.value)}
+                    className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                    placeholder={`Segment ${pendingSegments.length + 1}`}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Description</label>
+                  <input
+                    type="text"
+                    value={newSegmentDescription}
+                    onChange={(e) => setNewSegmentDescription(e.target.value)}
+                    className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                    placeholder="Optional"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Workout details (optional)</label>
+                  <textarea
+                    rows={5}
+                    value={newSegmentDetails}
+                    onChange={(e) => setNewSegmentDetails(e.target.value)}
+                    className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                    placeholder="Rep scheme, weights, movements, etc."
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              {addSegmentStep === 1 ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => { setAddSegmentOpen(false); setAddSegmentStep(1) }}
+                    className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddSegmentNext}
+                    className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
+                    style={{ backgroundColor: '#6B21A8' }}
+                  >
+                    Next
+                  </button>
+                </>
+              ) : addSegmentStep === 2 && newSegmentMode === 3 ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setAddSegmentStep(1)}
+                    className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddSegmentNext}
+                    className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
+                    style={{ backgroundColor: '#6B21A8' }}
+                  >
+                    Next
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setAddSegmentStep(newSegmentMode === 3 ? 2 : 1)}
+                    className="rounded bg-gymnext-background px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddSegmentConfirm}
+                    className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
+                    style={{ backgroundColor: '#6B21A8' }}
+                  >
+                    Add segment
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
