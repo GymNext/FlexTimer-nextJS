@@ -579,7 +579,7 @@ export default function AdminUserProfilePage() {
                         href={`/admin/users/${userId}/collections/${encodeURIComponent(coll.id)}`}
                         className="text-blue-600 hover:text-blue-800"
                       >
-                        {coll.workoutCollectionName}
+                        {coll.workoutCollectionName?.trim() || '<empty>'}
                       </Link>
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-600">{coll.workoutIds.length}</td>
@@ -729,7 +729,7 @@ export default function AdminUserProfilePage() {
                             href={`/admin/users/${userId}/collections/${encodeURIComponent(coll.id)}`}
                             className="text-blue-600 hover:text-blue-800"
                           >
-                            {coll.workoutCollectionName}
+                            {coll.workoutCollectionName?.trim() || '<empty>'}
                           </Link>
                         </td>
                         <td className="px-4 py-3 text-sm text-amber-600">

@@ -165,6 +165,21 @@ export default function HomePage() {
   )
 }
 
+function providerLabel(providerId: string): string {
+  switch (providerId) {
+    case 'google.com':
+      return 'Google'
+    case 'apple.com':
+      return 'Apple'
+    case 'facebook.com':
+      return 'Facebook'
+    case 'password':
+      return 'Email / Password'
+    default:
+      return providerId
+  }
+}
+
 function AppHeader({
   user,
   subscriptionTier = 'basic',
@@ -175,6 +190,7 @@ function AppHeader({
   onLogoClick: () => void
 }) {
   const [upgradePromptOpen, setUpgradePromptOpen] = useState(false)
+  const [userInfoDialogOpen, setUserInfoDialogOpen] = useState(false)
 
   async function handleSignOut() {
     await signOut(auth)
@@ -217,9 +233,14 @@ function AppHeader({
         </button>
         <div className="flex items-center gap-3">
           <div className="hidden sm:flex flex-col items-end text-right">
-            <span className="text-xs font-medium text-gray-900">
+            <button
+              type="button"
+              onClick={() => setUserInfoDialogOpen(true)}
+              className="text-xs font-medium text-gray-900 hover:text-gymnext hover:underline cursor-pointer text-right"
+              title="View account info"
+            >
               {user.email ?? user.displayName ?? 'Signed in'}
-            </span>
+            </button>
             {isPro ? (
               <span className="text-xs text-gray-500">{tierLabel}</span>
             ) : (
@@ -261,6 +282,92 @@ function AppHeader({
                 className="rounded bg-gymnext px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
               >
                 OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {userInfoDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => setUserInfoDialogOpen(false)}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg overflow-hidden">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h2 className="text-sm font-semibold text-gray-800">Account info</h2>
+            </div>
+            <div className="p-4 space-y-4">
+              <div className="flex items-center gap-4">
+                {user.photoURL ? (
+                  <img
+                    src={user.photoURL}
+                    alt=""
+                    className="h-16 w-16 rounded-full object-cover bg-gray-100"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <div className="h-16 w-16 rounded-full bg-gymnext-muted/30 flex items-center justify-center text-xl font-medium text-gray-600">
+                    {(user.displayName?.[0] ?? user.email?.[0] ?? '?').toUpperCase()}
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-gray-900 truncate">
+                    {user.displayName || '—'}
+                  </p>
+                  {user.email && (
+                    <p className="text-xs text-gray-500 truncate">{user.email}</p>
+                  )}
+                </div>
+              </div>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-sm">
+                <dt className="text-gray-500 font-medium">User ID</dt>
+                <dd className="font-mono text-gray-900 break-all">{user.uid}</dd>
+
+                {user.phoneNumber && (
+                  <>
+                    <dt className="text-gray-500 font-medium">Phone</dt>
+                    <dd className="text-gray-900">{user.phoneNumber}</dd>
+                  </>
+                )}
+
+                <dt className="text-gray-500 font-medium">Email verified</dt>
+                <dd className="text-gray-900">{user.emailVerified ? 'Yes' : 'No'}</dd>
+
+                <dt className="text-gray-500 font-medium">Login providers</dt>
+                <dd className="text-gray-900">
+                  {user.providerData?.length
+                    ? user.providerData.map((p) => providerLabel(p.providerId)).join(', ')
+                    : '—'}
+                </dd>
+
+                {user.metadata?.creationTime && (
+                  <>
+                    <dt className="text-gray-500 font-medium">Account created</dt>
+                    <dd className="text-gray-900">
+                      {new Date(user.metadata.creationTime).toLocaleString()}
+                    </dd>
+                  </>
+                )}
+                {user.metadata?.lastSignInTime && (
+                  <>
+                    <dt className="text-gray-500 font-medium">Last sign-in</dt>
+                    <dd className="text-gray-900">
+                      {new Date(user.metadata.lastSignInTime).toLocaleString()}
+                    </dd>
+                  </>
+                )}
+              </dl>
+            </div>
+            <div className="flex justify-end gap-2 px-4 pb-4">
+              <button
+                type="button"
+                onClick={() => setUserInfoDialogOpen(false)}
+                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+              >
+                Close
               </button>
             </div>
           </div>
