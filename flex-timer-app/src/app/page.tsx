@@ -68,9 +68,15 @@ export default function HomePage() {
   const resetToDefaultRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
+    // Fail-safe: if Firebase auth init hangs (rare), don't trap the UI on Loading forever.
+    const authInitTimeout = window.setTimeout(() => {
+      setAuthLoading(false)
+      setAuthError((prev) => prev ?? 'Authentication is taking too long. Please reload.')
+    }, 15000)
     const unsubscribe = onAuthStateChanged(
       auth,
       (current) => {
+        window.clearTimeout(authInitTimeout)
         setUser(current)
         setAuthLoading(false)
         setAuthError(null)
@@ -79,12 +85,16 @@ export default function HomePage() {
         }
       },
       (error) => {
+        window.clearTimeout(authInitTimeout)
         console.error('[auth]', error)
         setAuthError(error.message ?? 'Failed to initialize authentication')
         setAuthLoading(false)
       }
     )
-    return unsubscribe
+    return () => {
+      window.clearTimeout(authInitTimeout)
+      unsubscribe()
+    }
   }, [])
 
   async function loadOverview(currentUser: User | null) {
@@ -93,11 +103,15 @@ export default function HomePage() {
     setOverviewError(null)
     try {
       const token = await currentUser.getIdToken()
+      const controller = new AbortController()
+      const timeoutId = window.setTimeout(() => controller.abort(), 20000)
       const res = await fetch('/api/app/overview', {
         headers: {
           Authorization: `Bearer ${token}`,
         },
+        signal: controller.signal,
       })
+      window.clearTimeout(timeoutId)
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || `HTTP ${res.status}`)
@@ -108,7 +122,11 @@ export default function HomePage() {
       console.error('[overview]', e)
       setOverview(null)
       setOverviewError(
-        e instanceof Error ? e.message : 'Failed to load your data'
+        e instanceof DOMException && e.name === 'AbortError'
+          ? 'Loading your data timed out. Please reload.'
+          : e instanceof Error
+            ? e.message
+            : 'Failed to load your data'
       )
     } finally {
       setOverviewLoading(false)
@@ -2181,8 +2199,7 @@ function FavoritesSection({
   const [optimisticOrderedIds, setOptimisticOrderedIds] = useState<string[] | null>(null)
   const detailPanelRef = useRef<{ save: () => Promise<void> }>(null)
 
-  /** Reorder: toIndex = gap index (0=before first, 1=before second, ..., n=after last).
-   *  After removing from fromIndex, insert at toIndex when moving up, toIndex-1 when moving down. */
+  /** Reorder: toIndex = gap index (0..n). Insert at toIndex when moving up, toIndex-1 when moving down. */
   function reorderIds(ids: string[], fromIndex: number, toIndex: number): string[] {
     if (fromIndex === toIndex) return ids
     const list = [...ids]
@@ -2213,10 +2230,14 @@ function FavoritesSection({
   function handleFavoriteDrop(draggedId: string, toIndex: number) {
     if (!favoritesCollection) return
     const currentIds = optimisticOrderedIds ?? favoritesCollection.workoutIds
-    const fromIndex = currentIds.indexOf(draggedId)
+    const visibleIdSet = new Set(favoriteWorkouts.map((w) => w.id))
+    const visibleIds = currentIds.filter((id) => visibleIdSet.has(id))
+    const deletedIds = currentIds.filter((id) => !visibleIdSet.has(id))
+    const fromIndex = visibleIds.indexOf(draggedId)
     if (fromIndex === -1) return
-    const toIndexClamped = Math.max(0, Math.min(toIndex, currentIds.length))
-    const newIds = reorderIds(currentIds, fromIndex, toIndexClamped)
+    const toIndexClamped = Math.max(0, Math.min(toIndex, visibleIds.length))
+    const newVisibleOrder = reorderIds(visibleIds, fromIndex, toIndexClamped)
+    const newIds = [...newVisibleOrder, ...deletedIds]
     setOptimisticOrderedIds(newIds)
     setDraggedFavoriteIndex(null)
     setDropIndicatorBeforeIndex(null)
@@ -2316,8 +2337,10 @@ function FavoritesSection({
               e.stopPropagation()
               const draggedId = e.dataTransfer.getData('text/plain')
               if (!draggedId || !favoritesCollection) return
-              const currentIds = optimisticOrderedIds ?? favoritesCollection.workoutIds
-              const toIndex = dropIndicatorBeforeIndex ?? currentIds.length
+              const visibleIds = (optimisticOrderedIds ?? favoritesCollection.workoutIds).filter((id) =>
+                favoriteWorkouts.some((w) => w.id === id)
+              )
+              const toIndex = dropIndicatorBeforeIndex ?? visibleIds.length
               handleFavoriteDrop(draggedId, toIndex)
             }}
           >
@@ -2360,18 +2383,14 @@ function FavoritesSection({
                 e.preventDefault()
                 e.stopPropagation()
                 const draggedId = e.dataTransfer.getData('text/plain')
-                if (!draggedId) {
-                  return
-                }
-                const currentIds = optimisticOrderedIds ?? favoritesCollection!.workoutIds
-                const fromIndex = currentIds.indexOf(draggedId)
-                if (fromIndex === -1) {
-                  return
-                }
+                if (!draggedId || !favoritesCollection) return
+                const visibleIds = (optimisticOrderedIds ?? favoritesCollection.workoutIds).filter((id) =>
+                  favoriteWorkouts.some((w) => w.id === id)
+                )
                 const rect = e.currentTarget.getBoundingClientRect()
                 const midY = rect.top + rect.height / 2
                 const toIndex = dropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
-                handleFavoriteDrop(draggedId, toIndex)
+                handleFavoriteDrop(draggedId, Math.max(0, Math.min(toIndex, visibleIds.length)))
               }
               return (
               <Fragment key={w.id}>

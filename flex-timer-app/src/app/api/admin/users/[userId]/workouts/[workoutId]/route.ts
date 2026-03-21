@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAdminAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
-import { clearWorkoutDeletedAt, deleteWorkout, getWorkoutById, setWorkoutDeletedAt } from '@/lib/firestore'
+import {
+  clearWorkoutDeletedAt,
+  deleteWorkout,
+  getWorkoutById,
+  getUserWorkoutCollections,
+  setWorkoutDeletedAt,
+  updateCollectionWorkoutIds,
+} from '@/lib/firestore'
 
 /**
  * GET /api/admin/users/[userId]/workouts/[workoutId]
@@ -85,6 +92,13 @@ export async function PATCH(
       return NextResponse.json({ error: 'Workout is already deleted' }, { status: 400 })
     }
     await setWorkoutDeletedAt(userId, workoutId)
+    const collections = await getUserWorkoutCollections(userId)
+    for (const c of collections) {
+      if (c.deletedAt) continue
+      if (!(c.workoutIds ?? []).includes(workoutId)) continue
+      const cleaned = (c.workoutIds ?? []).filter((id) => id !== workoutId)
+      await updateCollectionWorkoutIds(userId, c.id, cleaned)
+    }
     return NextResponse.json({ ok: true })
   } catch (err) {
     console.error('[admin workout patch]', err)
