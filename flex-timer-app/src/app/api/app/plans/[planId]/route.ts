@@ -78,7 +78,13 @@ export async function PATCH(
     return NextResponse.json({ error: 'planId required' }, { status: 400 })
   }
 
-  let body: { recover?: boolean; workoutPlanName?: string; workoutPlanDescription?: string | null }
+  let body: {
+    recover?: boolean
+    workoutPlanName?: string
+    workoutPlanDescription?: string | null
+    privacy?: number
+    handle?: string | null
+  }
   try {
     body = await request.json().catch(() => ({}))
   } catch {
@@ -91,16 +97,46 @@ export async function PATCH(
       return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
     }
 
-    // Update name/description when provided.
-    if (typeof body.workoutPlanName === 'string') {
-      const name = body.workoutPlanName.trim()
-      if (!name) {
-        return NextResponse.json({ error: 'Plan name is required' }, { status: 400 })
+    const hasNameUpdate = typeof body.workoutPlanName === 'string'
+    const hasSharingUpdate = typeof body.privacy === 'number' || 'handle' in body
+    // Update plan metadata/sharing when provided.
+    if (hasNameUpdate || hasSharingUpdate) {
+      const patch: {
+        name?: string
+        description?: string | null
+        privacy?: number
+        handle?: string | null
+      } = {}
+      if (hasNameUpdate) {
+        const name = body.workoutPlanName!.trim()
+        if (!name) {
+          return NextResponse.json({ error: 'Plan name is required' }, { status: 400 })
+        }
+        patch.name = name
+        patch.description = body.workoutPlanDescription
       }
-      await updatePlanMetadata(uid, planId, {
-        name,
-        description: body.workoutPlanDescription,
-      })
+      if (typeof body.privacy === 'number') {
+        if (![1, 2, 3].includes(body.privacy)) {
+          return NextResponse.json({ error: 'Invalid privacy value' }, { status: 400 })
+        }
+        if (plan.isPersonal && body.privacy !== 1) {
+          return NextResponse.json(
+            { error: 'Personal plans cannot be shared' },
+            { status: 400 }
+          )
+        }
+        patch.privacy = body.privacy
+      }
+      if ('handle' in body) {
+        if (plan.isPersonal && typeof body.handle === 'string' && body.handle.trim()) {
+          return NextResponse.json(
+            { error: 'Personal plans cannot be shared' },
+            { status: 400 }
+          )
+        }
+        patch.handle = typeof body.handle === 'string' ? body.handle : null
+      }
+      await updatePlanMetadata(uid, planId, patch)
       const updated = await getPlanById(uid, planId)
       return NextResponse.json(updated)
     }

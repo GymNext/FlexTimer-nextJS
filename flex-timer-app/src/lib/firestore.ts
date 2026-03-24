@@ -3,6 +3,21 @@ import { DocumentSnapshot, FieldPath, FieldValue, Timestamp } from 'firebase-adm
 import { adminDb } from '@/lib/firebase-admin'
 import { USER_COLLECTIONS, type UserDataCounts, type PlanDay, type PlanDayEntry, type PlannedWorkout, type Workout, type WorkoutCollection, type WorkoutPlan, type WorkoutSegment, type WorkoutType } from '@/types/user'
 
+export type WorkoutPlanSubscriptionStatus = 'pending' | 'active' | 'blocked'
+
+export interface WorkoutPlanSubscriptionRecord {
+  subscriptionDocumentId: string
+  subscriberUserId: string
+  ownerUserId: string
+  remotePlanId: string
+  status: WorkoutPlanSubscriptionStatus
+  remotePlanName: string | null
+  remotePlanHandle: string | null
+  ordinal: number
+  subscriberFullName: string | null
+  subscriberPublicHandle: string | null
+}
+
 function mapSegmentFromEntry(seg: Record<string, unknown>, index: number, fallbackWorkoutId: string): WorkoutSegment {
   const workoutId = typeof seg.workoutId === 'string' ? seg.workoutId : `${fallbackWorkoutId}-seg-${index}`
   const decodeInt = (key: string, def: number) => {
@@ -60,6 +75,96 @@ function parseTimestamp(value: unknown): string {
   return String(value)
 }
 
+function normalizeWorkoutPlanHandle(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null
+  let value = raw.trim().toLowerCase()
+  if (value.startsWith('@')) value = value.slice(1)
+  if (!value) return null
+  if (value.length > 64) return null
+  if (!/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/.test(value)) return null
+  return value
+}
+
+function mapWorkoutPlanSubscriptionDoc(
+  doc: DocumentSnapshot
+): WorkoutPlanSubscriptionRecord | null {
+  const d = doc.data() as Record<string, unknown> | undefined
+  if (!d) return null
+  const statusRaw = typeof d.status === 'string' ? d.status : ''
+  const status: WorkoutPlanSubscriptionStatus =
+    statusRaw === 'active' || statusRaw === 'blocked' ? statusRaw : 'pending'
+  const ownerUserId = typeof d.ownerUserId === 'string' ? d.ownerUserId : ''
+  const remotePlanId = typeof d.remotePlanId === 'string' ? d.remotePlanId : ''
+  const subscriberUserId = typeof d.subscriberUserId === 'string' ? d.subscriberUserId : ''
+  if (!ownerUserId || !remotePlanId || !subscriberUserId) return null
+  return {
+    subscriptionDocumentId: doc.id,
+    subscriberUserId,
+    ownerUserId,
+    remotePlanId,
+    status,
+    remotePlanName: typeof d.remotePlanName === 'string' ? d.remotePlanName : null,
+    remotePlanHandle: typeof d.remotePlanHandle === 'string' ? d.remotePlanHandle : null,
+    ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
+    subscriberFullName: typeof d.subscriberFullName === 'string' ? d.subscriberFullName : null,
+    subscriberPublicHandle: typeof d.subscriberPublicHandle === 'string' ? d.subscriberPublicHandle : null,
+  }
+}
+
+function isShareablePlanPrivacy(privacy: number | null | undefined): boolean {
+  return privacy === 2 || privacy === 3
+}
+
+async function syncWorkoutPlanHandleIndex(
+  userId: string,
+  planId: string,
+  workoutPlanName: string,
+  previousHandle: string | null | undefined,
+  nextHandle: string | null | undefined,
+  privacy: number | null | undefined,
+  planDeleted: boolean
+): Promise<void> {
+  if (!adminDb) return
+  const indexRef = adminDb.collection('workoutPlanHandleIndex')
+  const oldNorm = normalizeWorkoutPlanHandle(previousHandle)
+  const newNorm = normalizeWorkoutPlanHandle(nextHandle)
+  const shouldIndexNew = !!newNorm && isShareablePlanPrivacy(privacy) && !planDeleted
+
+  if (oldNorm && (!shouldIndexNew || oldNorm !== newNorm)) {
+    await indexRef.doc(oldNorm).delete().catch(() => {})
+  }
+
+  if (shouldIndexNew && newNorm) {
+    await indexRef.doc(newNorm).set(
+      {
+        ownerUserId: userId,
+        planId,
+        privacy,
+        handleKey: newNorm,
+        workoutPlanName: workoutPlanName || null,
+        planDeleted: false,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+  }
+
+  // Best-effort cleanup: remove stale duplicate handle-index docs for this plan.
+  const staleSnap = await indexRef
+    .where('ownerUserId', '==', userId)
+    .where('planId', '==', planId)
+    .get()
+  const cleanupBatch = adminDb.batch()
+  staleSnap.docs.forEach((doc) => {
+    if (!shouldIndexNew || doc.id !== newNorm) {
+      cleanupBatch.delete(doc.ref)
+    }
+  })
+  if (!staleSnap.empty) {
+    await cleanupBatch.commit()
+  }
+}
+
 /** Categories under users/<userId>/meta/ for user settings. */
 const USER_META_CATEGORIES = ['AppBehaviour', 'Audio', 'Backup', 'HeartRates', 'Internal', 'MultiPeer', 'TimerDefaults', 'Visual'] as const
 
@@ -82,6 +187,8 @@ export async function getUserDocument(
   firstName?: string | null
   lastName?: string | null
   email?: string | null
+  publicHandle?: string | null
+  basicBio?: string | null
   /** From user doc (UserDetails) */
   hasConnectedToDisplay?: boolean
   connectedToDisplayType?: string | null
@@ -113,6 +220,8 @@ export async function getUserDocument(
     firstName: typeof d.firstName === 'string' ? d.firstName : null,
     lastName: typeof d.lastName === 'string' ? d.lastName : null,
     email: typeof d.email === 'string' ? d.email : null,
+    publicHandle: typeof d.publicHandle === 'string' ? d.publicHandle : null,
+    basicBio: typeof d.basicBio === 'string' ? d.basicBio : null,
     hasConnectedToDisplay: typeof d.hasConnectedToDisplay === 'boolean' ? d.hasConnectedToDisplay : undefined,
     connectedToDisplayType: typeof d.connectedToDisplayType === 'string' ? d.connectedToDisplayType : null,
     classicEligibleOverride: typeof d.classicEligibleOverride === 'boolean' ? d.classicEligibleOverride : undefined,
@@ -123,6 +232,81 @@ export async function getUserDocument(
       : undefined,
     settings: Object.keys(settings).length > 0 ? settings : undefined,
   }
+}
+
+export async function updateUserProfileFields(
+  userId: string,
+  updates: { publicHandle?: string | null; basicBio?: string | null }
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const patch: Record<string, unknown> = {}
+  if ('publicHandle' in updates) {
+    patch.publicHandle =
+      updates.publicHandle != null && updates.publicHandle.trim() !== ''
+        ? updates.publicHandle.trim()
+        : null
+  }
+  if ('basicBio' in updates) {
+    patch.basicBio =
+      updates.basicBio != null && updates.basicBio.trim() !== ''
+        ? updates.basicBio.trim()
+        : null
+  }
+  if (Object.keys(patch).length === 0) return
+  await adminDb.collection('users').doc(userId).update(patch)
+}
+
+function normalizePublicHandle(raw: string): string | null {
+  let value = raw.trim().toLowerCase()
+  if (value.startsWith('@')) value = value.slice(1)
+  if (!value) return null
+  if (value.length > 32) return null
+  if (!/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/.test(value)) return null
+  return value
+}
+
+export async function updateUserPublicHandle(userId: string, rawHandle: string | null): Promise<string | null> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const normalized = rawHandle == null ? null : normalizePublicHandle(rawHandle)
+  if (rawHandle != null && normalized == null) {
+    throw new Error('Handle must be 1-32 characters and use letters, numbers, ".", "_" or "-"')
+  }
+  const usersRef = adminDb.collection('users').doc(userId)
+  const handleIndexRef = adminDb.collection('publicHandleIndex')
+  const userSnap = await usersRef.get()
+  const userData = userSnap.data() as Record<string, unknown> | undefined
+  const previousRaw = typeof userData?.publicHandle === 'string' ? userData.publicHandle : null
+  const previousNormalized = previousRaw ? normalizePublicHandle(previousRaw) : null
+
+  await adminDb.runTransaction(async (tx) => {
+    if (normalized) {
+      const targetRef = handleIndexRef.doc(normalized)
+      const targetSnap = await tx.get(targetRef)
+      if (targetSnap.exists) {
+        const ownerUserId = targetSnap.get('ownerUserId')
+        if (typeof ownerUserId === 'string' && ownerUserId !== userId) {
+          throw new Error('That handle is already taken')
+        }
+      }
+      tx.set(
+        targetRef,
+        {
+          ownerUserId: userId,
+          handleKey: normalized,
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      )
+    }
+
+    tx.update(usersRef, { publicHandle: normalized })
+
+    if (previousNormalized && previousNormalized !== normalized) {
+      tx.delete(handleIndexRef.doc(previousNormalized))
+    }
+  })
+
+  return normalized
 }
 
 export async function getUserDataCounts(userId: string): Promise<UserDataCounts> {
@@ -159,11 +343,103 @@ export async function getUserWorkoutPlans(userId: string): Promise<WorkoutPlan[]
       workoutPlanDescription: d.workoutPlanDescription ?? null,
       workoutPlanId: typeof d.workoutPlanId === 'string' ? d.workoutPlanId : '',
       workoutPlanName: typeof d.workoutPlanName === 'string' ? d.workoutPlanName : '',
+      privacy: typeof d.privacy === 'number' ? d.privacy : null,
+      handle: typeof d.handle === 'string' ? d.handle : null,
       deletedAt: parseDeletedAt(d),
     }
   })
   plans.sort((a, b) => a.ordinal - b.ordinal)
   return plans
+}
+
+export async function getWorkoutPlanSubscriptionsForPlan(
+  ownerUserId: string,
+  remotePlanId: string,
+  status: WorkoutPlanSubscriptionStatus,
+  opts?: { pageSize?: number; cursor?: string | null; query?: string | null }
+): Promise<{ items: WorkoutPlanSubscriptionRecord[]; nextCursor: string | null }> {
+  if (!adminDb) return { items: [], nextCursor: null }
+  const pageSize = Math.max(1, Math.min(opts?.pageSize ?? 25, 100))
+  const cursor = opts?.cursor?.trim() || null
+  const query = opts?.query?.trim().toLowerCase() || null
+
+  const base = adminDb
+    .collectionGroup('workoutPlanSubscriptions')
+    .where('ownerUserId', '==', ownerUserId)
+    .where('remotePlanId', '==', remotePlanId)
+    .where('status', '==', status)
+    .orderBy(FieldPath.documentId())
+
+  const items: WorkoutPlanSubscriptionRecord[] = []
+  let nextCursor: string | null = cursor
+  let exhausted = false
+  // Scan in chunks to support simple text filtering while still returning a paginated response.
+  for (let i = 0; i < 6 && items.length < pageSize && !exhausted; i += 1) {
+    let q = base.limit(pageSize * 2)
+    if (nextCursor) q = q.startAfter(nextCursor)
+    const snap = await q.get()
+    if (snap.empty) {
+      exhausted = true
+      nextCursor = null
+      break
+    }
+    for (const doc of snap.docs) {
+      const item = mapWorkoutPlanSubscriptionDoc(doc)
+      if (!item) continue
+      if (query) {
+        const hay = `${item.subscriberFullName ?? ''} ${item.subscriberPublicHandle ?? ''} ${item.subscriberUserId}`.toLowerCase()
+        if (!hay.includes(query)) continue
+      }
+      items.push(item)
+      if (items.length >= pageSize) break
+    }
+    nextCursor = snap.docs[snap.docs.length - 1]?.id ?? null
+    if (snap.size < pageSize * 2) {
+      exhausted = true
+      if (items.length < pageSize) nextCursor = null
+    }
+  }
+
+  return { items, nextCursor: items.length >= pageSize ? nextCursor : null }
+}
+
+export async function mutateWorkoutPlanSubscriptionForPlan(
+  ownerUserId: string,
+  remotePlanId: string,
+  subscriberUserId: string,
+  subscriptionDocumentId: string,
+  action: 'approve' | 'reject' | 'revoke' | 'block' | 'unblock'
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const ref = adminDb
+    .collection('users')
+    .doc(subscriberUserId)
+    .collection('workoutPlanSubscriptions')
+    .doc(subscriptionDocumentId)
+  const snap = await ref.get()
+  if (!snap.exists) throw new Error('Subscription not found')
+  const data = snap.data() as Record<string, unknown>
+  const owner = typeof data.ownerUserId === 'string' ? data.ownerUserId : ''
+  const planId = typeof data.remotePlanId === 'string' ? data.remotePlanId : ''
+  if (owner !== ownerUserId || planId !== remotePlanId) {
+    throw new Error('Subscription does not belong to this plan')
+  }
+  if (action === 'approve' || action === 'unblock') {
+    await ref.update({
+      status: 'active',
+      updatedAt: FieldValue.serverTimestamp(),
+    })
+    return
+  }
+  if (action === 'block') {
+    await ref.update({
+      status: 'blocked',
+      updatedAt: FieldValue.serverTimestamp(),
+    })
+    return
+  }
+  // reject/revoke => remove subscription
+  await ref.delete()
 }
 
 export async function getUserWorkoutCollections(userId: string): Promise<WorkoutCollection[]> {
@@ -598,7 +874,12 @@ export async function clearPlanDeletedAt(userId: string, planId: string): Promis
 export async function updatePlanMetadata(
   userId: string,
   planId: string,
-  data: { name: string; description?: string | null }
+  data: {
+    name?: string
+    description?: string | null
+    privacy?: number
+    handle?: string | null
+  }
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const ref = adminDb
@@ -606,10 +887,52 @@ export async function updatePlanMetadata(
     .doc(userId)
     .collection(USER_COLLECTIONS.workoutPlans)
     .doc(planId)
-  await ref.update({
-    workoutPlanName: data.name.trim() || 'Untitled plan',
-    workoutPlanDescription: data.description?.trim() || null,
-  })
+  const before = await ref.get()
+  const beforeData = before.exists ? (before.data() as Record<string, unknown>) : {}
+  const patch: Record<string, unknown> = {}
+  if (typeof data.name === 'string') {
+    patch.workoutPlanName = data.name.trim() || 'Untitled plan'
+    patch.workoutPlanDescription = data.description?.trim() || null
+  }
+  if (typeof data.privacy === 'number') {
+    patch.privacy = data.privacy
+  }
+  if ('handle' in data) {
+    patch.handle = typeof data.handle === 'string' ? data.handle.trim() || null : null
+    patch.handleNormalized = normalizeWorkoutPlanHandle(
+      typeof data.handle === 'string' ? data.handle : null
+    )
+  }
+  if (Object.keys(patch).length === 0) return
+  await ref.update(patch)
+
+  const previousHandle =
+    typeof beforeData.handle === 'string' ? beforeData.handle : null
+  const previousName =
+    typeof beforeData.workoutPlanName === 'string' ? beforeData.workoutPlanName : 'Untitled plan'
+  const previousPrivacy =
+    typeof beforeData.privacy === 'number' ? beforeData.privacy : null
+  const planDeleted = parseDeletedAt(beforeData) !== null
+  const nextHandle =
+    typeof patch.handle === 'string'
+      ? patch.handle
+      : patch.handle === null
+        ? null
+        : previousHandle
+  const nextName =
+    typeof patch.workoutPlanName === 'string' ? patch.workoutPlanName : previousName
+  const nextPrivacy =
+    typeof patch.privacy === 'number' ? patch.privacy : previousPrivacy
+
+  await syncWorkoutPlanHandleIndex(
+    userId,
+    planId,
+    nextName,
+    previousHandle,
+    nextHandle,
+    nextPrivacy,
+    planDeleted
+  )
 }
 
 /** Permanently delete a workout plan: deletes all planDays subcollection docs, then the plan document. */
@@ -674,6 +997,8 @@ export async function createWorkoutPlan(
     workoutPlanId: id,
     workoutPlanName: data.name.trim() || 'Untitled plan',
     workoutPlanDescription: data.description?.trim() || null,
+    privacy: 1, // private by default
+    handle: null,
   })
   const created = await getPlanById(userId, id)
   if (!created) throw new Error('Failed to read created plan')
@@ -729,6 +1054,8 @@ export async function getPlanById(userId: string, planId: string): Promise<Worko
     workoutPlanDescription: d.workoutPlanDescription ?? null,
     workoutPlanId: typeof d.workoutPlanId === 'string' ? d.workoutPlanId : '',
     workoutPlanName: typeof d.workoutPlanName === 'string' ? d.workoutPlanName : '',
+    privacy: typeof d.privacy === 'number' ? d.privacy : null,
+    handle: typeof d.handle === 'string' ? d.handle : null,
     deletedAt: parseDeletedAt(d),
   }
 }

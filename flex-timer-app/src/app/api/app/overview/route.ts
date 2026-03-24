@@ -89,6 +89,8 @@ export async function GET(request: NextRequest) {
       workouts,
       workoutPlans,
       workoutCollections,
+      publicHandle: userDoc?.publicHandle ?? null,
+      basicBio: userDoc?.basicBio ?? null,
       subscriptionLimits,
       timerDefaults,
       counts: {

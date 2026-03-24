@@ -39,6 +39,10 @@ export interface WorkoutPlan {
   workoutPlanDescription: string | null
   workoutPlanId: string
   workoutPlanName: string
+  /** Sharing privacy level from mobile app (private/protected/public as raw int). */
+  privacy?: number | null
+  /** Optional public handle used when sharing is enabled. */
+  handle?: string | null
   /** Set when plan is soft-deleted; used to filter from list and count */
   deletedAt?: string | null
 }
@@ -195,6 +199,8 @@ export interface UserDocumentFields {
   email?: string | null
   firstName?: string | null
   lastName?: string | null
+  publicHandle?: string | null
+  basicBio?: string | null
 }
 
 /** RevenueCat subscription summary for admin profile (entitlements from Firestore). */
@@ -208,6 +214,8 @@ export interface AdminUserProfile extends AdminUserRecord {
   /** From user document users/<userId> */
   firstName?: string | null
   lastName?: string | null
+  publicHandle?: string | null
+  basicBio?: string | null
   /** From UserDetails/settings: hasConnectedToDisplay -> "Connected User" | "Standalone User" */
   connectedUserDisplay?: string | null
   /** From UserDetails/settings: connectedToDisplayType (noDisplay | singleDisplay | multiDisplay) */

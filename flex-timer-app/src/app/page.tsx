@@ -43,6 +43,8 @@ interface OverviewData {
   workouts: Workout[]
   workoutPlans: WorkoutPlan[]
   workoutCollections: WorkoutCollection[]
+  publicHandle?: string | null
+  basicBio?: string | null
   subscriptionLimits?: SubscriptionLimits
   /** Timer Defaults from user settings (e.g. direction = count up/down, restDirection, warmup/cooldown). */
   timerDefaults?: {
@@ -54,6 +56,28 @@ interface OverviewData {
     cooldownDirection?: boolean
   }
   counts?: { favorites: number; collections: number; plans: number }
+}
+
+const PLAN_PRIVACY = {
+  private: 1,
+  protected: 2,
+  public: 3,
+} as const
+
+type PlanPrivacyKey = keyof typeof PLAN_PRIVACY
+type FollowerStatus = 'active' | 'pending' | 'blocked'
+
+interface PlanFollower {
+  subscriptionDocumentId: string
+  subscriberUserId: string
+  ownerUserId: string
+  remotePlanId: string
+  status: FollowerStatus
+  remotePlanName: string | null
+  remotePlanHandle: string | null
+  ordinal: number
+  subscriberFullName: string | null
+  subscriberPublicHandle: string | null
 }
 
 export default function HomePage() {
@@ -159,8 +183,13 @@ export default function HomePage() {
     <main className="min-h-screen bg-gymnext-page flex flex-col">
       <AppHeader
         user={user}
+        publicHandle={overview?.publicHandle}
+        basicBio={overview?.basicBio}
         subscriptionTier={overview?.subscriptionLimits?.tier ?? 'basic'}
         onLogoClick={() => resetToDefaultRef.current?.()}
+        onProfileUpdated={(profile) =>
+          setOverview((prev) => (prev ? { ...prev, ...profile } : prev))
+        }
       />
       <section className="flex-1 max-w-6xl mx-auto w-full px-4 py-6">
         <UserAppLayout
@@ -200,15 +229,35 @@ function providerLabel(providerId: string): string {
 
 function AppHeader({
   user,
+  publicHandle,
+  basicBio,
   subscriptionTier = 'basic',
   onLogoClick,
+  onProfileUpdated,
 }: {
   user: User
+  publicHandle?: string | null
+  basicBio?: string | null
   subscriptionTier?: SubscriptionTier
   onLogoClick: () => void
+  onProfileUpdated: (profile: { publicHandle?: string | null; basicBio?: string | null }) => void
 }) {
   const [upgradePromptOpen, setUpgradePromptOpen] = useState(false)
   const [userInfoDialogOpen, setUserInfoDialogOpen] = useState(false)
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [bioEditorOpen, setBioEditorOpen] = useState(false)
+  const [handleEditorOpen, setHandleEditorOpen] = useState(false)
+  const [handleDraft, setHandleDraft] = useState(publicHandle ?? '')
+  const [handleSaving, setHandleSaving] = useState(false)
+  const [bioDraft, setBioDraft] = useState(basicBio ?? '')
+  const [bioSaving, setBioSaving] = useState(false)
+
+  useEffect(() => {
+    setBioDraft(basicBio ?? '')
+  }, [basicBio])
+  useEffect(() => {
+    setHandleDraft(publicHandle ?? '')
+  }, [publicHandle])
 
   async function handleSignOut() {
     await signOut(auth)
@@ -221,6 +270,73 @@ function AppHeader({
         ? 'Classic Tier'
         : 'Basic Tier'
   const isPro = subscriptionTier === 'pro'
+  const preferredUserName = user.displayName?.trim() || user.email?.trim() || 'Signed in'
+  const headerUserLabel =
+    publicHandle?.trim()
+      ? `${preferredUserName} (@${publicHandle.trim()})`
+      : preferredUserName
+
+  async function handleSaveBio() {
+    if (bioSaving) return
+    setBioSaving(true)
+    try {
+      const token = await user.getIdToken()
+      const res = await fetch('/api/app/profile', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ basicBio: bioDraft }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${res.status}`)
+      }
+      const data = (await res.json()) as { publicHandle?: string | null; basicBio?: string | null }
+      onProfileUpdated({
+        publicHandle: data.publicHandle ?? publicHandle ?? null,
+        basicBio: data.basicBio ?? null,
+      })
+      setBioEditorOpen(false)
+      toast.success('Bio saved')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save bio')
+    } finally {
+      setBioSaving(false)
+    }
+  }
+
+  async function handleSaveHandle() {
+    if (handleSaving) return
+    setHandleSaving(true)
+    try {
+      const token = await user.getIdToken()
+      const res = await fetch('/api/app/profile', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ publicHandle: handleDraft }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${res.status}`)
+      }
+      const data = (await res.json()) as { publicHandle?: string | null; basicBio?: string | null }
+      onProfileUpdated({
+        publicHandle: data.publicHandle ?? null,
+        basicBio: data.basicBio ?? basicBio ?? null,
+      })
+      setHandleEditorOpen(false)
+      toast.success('Handle saved')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save handle')
+    } finally {
+      setHandleSaving(false)
+    }
+  }
 
   return (
     <header className="border-b border-gymnext-muted/30 bg-white">
@@ -257,7 +373,7 @@ function AppHeader({
               className="text-xs font-medium text-gray-900 hover:text-gymnext hover:underline cursor-pointer text-right"
               title="View account info"
             >
-              {user.email ?? user.displayName ?? 'Signed in'}
+              {headerUserLabel}
             </button>
             {isPro ? (
               <span className="text-xs text-gray-500">{tierLabel}</span>
@@ -314,8 +430,44 @@ function AppHeader({
             onClick={() => setUserInfoDialogOpen(false)}
           />
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg overflow-hidden">
-            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3 flex items-center justify-between gap-3">
               <h2 className="text-sm font-semibold text-gray-800">Account info</h2>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setAccountMenuOpen((open) => !open)}
+                  className="rounded px-2 py-1 text-sm font-semibold text-gray-500 hover:bg-gymnext-background hover:text-gray-800"
+                  aria-haspopup="menu"
+                  aria-expanded={accountMenuOpen}
+                  aria-label="Account actions"
+                >
+                  ...
+                </button>
+                {accountMenuOpen && (
+                  <div className="absolute right-0 mt-1 min-w-[8rem] rounded-md border border-gymnext-muted/40 bg-white py-1 shadow-lg z-10">
+                    <button
+                      type="button"
+                      className="block w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gymnext-background"
+                      onClick={() => {
+                        setAccountMenuOpen(false)
+                        setHandleEditorOpen(true)
+                      }}
+                    >
+                      Edit handle
+                    </button>
+                    <button
+                      type="button"
+                      className="block w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gymnext-background"
+                      onClick={() => {
+                        setAccountMenuOpen(false)
+                        setBioEditorOpen(true)
+                      }}
+                    >
+                      Edit bio
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
             <div className="p-4 space-y-4">
               <div className="flex items-center gap-4">
@@ -341,6 +493,18 @@ function AppHeader({
                 </div>
               </div>
               <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-sm">
+                {publicHandle?.trim() && (
+                  <>
+                    <dt className="text-gray-500 font-medium">Handle</dt>
+                    <dd className="text-gray-900">@{publicHandle.trim()}</dd>
+                  </>
+                )}
+                {basicBio?.trim() && (
+                  <>
+                    <dt className="text-gray-500 font-medium">Bio</dt>
+                    <dd className="text-gray-900 whitespace-pre-wrap">{basicBio.trim()}</dd>
+                  </>
+                )}
                 <dt className="text-gray-500 font-medium">User ID</dt>
                 <dd className="font-mono text-gray-900 break-all">{user.uid}</dd>
 
@@ -386,6 +550,113 @@ function AppHeader({
                 className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {bioEditorOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => {
+              if (bioSaving) return
+              setBioDraft(basicBio ?? '')
+              setBioEditorOpen(false)
+            }}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg overflow-hidden">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h2 className="text-sm font-semibold text-gray-800">Edit bio</h2>
+            </div>
+            <div className="p-4 space-y-3">
+              <label htmlFor="basic-bio" className="block text-xs font-medium text-gray-700">
+                Basic bio
+              </label>
+              <textarea
+                id="basic-bio"
+                value={bioDraft}
+                onChange={(e) => setBioDraft(e.target.value)}
+                rows={4}
+                className="w-full rounded border border-gymnext-muted/40 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gymnext/40"
+                placeholder="Tell people a little about yourself"
+              />
+            </div>
+            <div className="flex justify-end gap-2 px-4 pb-4">
+              <button
+                type="button"
+                disabled={bioSaving}
+                onClick={() => {
+                  setBioDraft(basicBio ?? '')
+                  setBioEditorOpen(false)
+                }}
+                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveBio}
+                disabled={bioSaving}
+                className="rounded bg-gymnext px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {bioSaving ? 'Saving…' : 'Save bio'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {handleEditorOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => {
+              if (handleSaving) return
+              setHandleDraft(publicHandle ?? '')
+              setHandleEditorOpen(false)
+            }}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg overflow-hidden">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h2 className="text-sm font-semibold text-gray-800">Edit handle</h2>
+            </div>
+            <div className="p-4 space-y-3">
+              <label htmlFor="public-handle" className="block text-xs font-medium text-gray-700">
+                Public handle
+              </label>
+              <input
+                id="public-handle"
+                type="text"
+                value={handleDraft}
+                onChange={(e) => setHandleDraft(e.target.value)}
+                className="w-full rounded border border-gymnext-muted/40 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gymnext/40"
+                placeholder="@yourname"
+              />
+              <p className="text-xs text-gray-500">
+                1-32 chars. Letters, numbers, period, underscore, and dash.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 px-4 pb-4">
+              <button
+                type="button"
+                disabled={handleSaving}
+                onClick={() => {
+                  setHandleDraft(publicHandle ?? '')
+                  setHandleEditorOpen(false)
+                }}
+                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveHandle}
+                disabled={handleSaving}
+                className="rounded bg-gymnext px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {handleSaving ? 'Saving…' : 'Save handle'}
               </button>
             </div>
           </div>
@@ -1064,6 +1335,29 @@ function UserAppLayout({
     await reloadOverview()
   }
 
+  async function handleUpdatePlanSharing(
+    planId: string,
+    privacy: number,
+    handle: string | null
+  ) {
+    const res = await authedFetch(
+      `/api/app/plans/${encodeURIComponent(planId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          privacy,
+          handle,
+        }),
+      }
+    )
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.error || 'Failed to update sharing options')
+    }
+    await reloadOverview()
+  }
+
   async function handleReorderPlans(planIds: string[]) {
     try {
       await authedFetch('/api/app/plans', {
@@ -1407,6 +1701,7 @@ function UserAppLayout({
               onPlannedWorkoutMetadataSaved={updatePlannedWorkoutMetadataInPlace}
               onCreatePlan={handleCreatePlan}
               onUpdatePlan={handleUpdatePlan}
+              onUpdatePlanSharing={handleUpdatePlanSharing}
               onDeletePlan={handleDeletePlan}
               maxPlans={overview?.subscriptionLimits?.maxPlans ?? UNLIMITED}
               plansCount={overview?.counts?.plans ?? 0}
@@ -5220,6 +5515,7 @@ function PlansSection({
   onPlannedWorkoutMetadataSaved,
   onCreatePlan,
   onUpdatePlan,
+  onUpdatePlanSharing,
   onDeletePlan,
   maxPlans,
   plansCount,
@@ -5259,6 +5555,7 @@ function PlansSection({
   ) => void
   onCreatePlan: (name: string, description: string | null) => Promise<WorkoutPlan>
   onUpdatePlan: (planId: string, name: string, description: string | null) => Promise<void>
+  onUpdatePlanSharing: (planId: string, privacy: number, handle: string | null) => Promise<void>
   onDeletePlan: (planId: string) => Promise<void>
   maxPlans?: number
   plansCount?: number
@@ -5292,6 +5589,23 @@ function PlansSection({
   const [editPlanDescription, setEditPlanDescription] = useState('')
   const [editPlanBusy, setEditPlanBusy] = useState(false)
   const [editPlanError, setEditPlanError] = useState<string | null>(null)
+  const [editSharingOpen, setEditSharingOpen] = useState(false)
+  const [editSharingPlan, setEditSharingPlan] = useState<WorkoutPlan | null>(null)
+  const [editSharingPrivacy, setEditSharingPrivacy] = useState<PlanPrivacyKey>('private')
+  const [editSharingHandle, setEditSharingHandle] = useState('')
+  const [editSharingBusy, setEditSharingBusy] = useState(false)
+  const [editSharingError, setEditSharingError] = useState<string | null>(null)
+  const [manageFollowersOpen, setManageFollowersOpen] = useState(false)
+  const [manageFollowersPlan, setManageFollowersPlan] = useState<WorkoutPlan | null>(null)
+  const [followersQuery, setFollowersQuery] = useState('')
+  const [followersActionBusy, setFollowersActionBusy] = useState<string | null>(null)
+  const [followersByStatus, setFollowersByStatus] = useState<
+    Record<FollowerStatus, { items: PlanFollower[]; nextCursor: string | null; loading: boolean; error: string | null }>
+  >({
+    active: { items: [], nextCursor: null, loading: false, error: null },
+    pending: { items: [], nextCursor: null, loading: false, error: null },
+    blocked: { items: [], nextCursor: null, loading: false, error: null },
+  })
 
   const [editPlannedOpen, setEditPlannedOpen] = useState(false)
   const [editPlannedWorkout, setEditPlannedWorkout] = useState<PlannedWorkout | null>(null)
@@ -5444,6 +5758,101 @@ function PlansSection({
     setEditPlanOpen(true)
   }
 
+  function privacyKeyFromValue(value: number | null | undefined): PlanPrivacyKey {
+    if (value === PLAN_PRIVACY.protected) return 'protected'
+    if (value === PLAN_PRIVACY.public) return 'public'
+    return 'private'
+  }
+
+  function openEditSharing(plan: WorkoutPlan) {
+    if (plan.isPersonal) return
+    setEditSharingPlan(plan)
+    setEditSharingPrivacy(privacyKeyFromValue(plan.privacy))
+    setEditSharingHandle(plan.handle ?? '')
+    setEditSharingError(null)
+    setEditSharingOpen(true)
+  }
+
+  async function loadFollowers(
+    status: FollowerStatus,
+    opts?: { reset?: boolean; planId?: string | null }
+  ) {
+    const planId = opts?.planId ?? manageFollowersPlan?.id ?? null
+    if (!planId) return
+    const reset = opts?.reset === true
+    const cursor = reset ? null : followersByStatus[status].nextCursor
+    setFollowersByStatus((prev) => ({
+      ...prev,
+      [status]: {
+        ...prev[status],
+        loading: true,
+        error: null,
+        ...(reset ? { items: [], nextCursor: null } : {}),
+      },
+    }))
+    try {
+      const params = new URLSearchParams()
+      params.set('status', status)
+      params.set('pageSize', '25')
+      if (cursor) params.set('cursor', cursor)
+      if (followersQuery.trim()) params.set('query', followersQuery.trim())
+      const res = await authedFetch(
+        `/api/app/plans/${encodeURIComponent(planId)}/followers?${params.toString()}`
+      )
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Failed to load followers')
+      }
+      const data = (await res.json()) as { items?: PlanFollower[]; nextCursor?: string | null }
+      const incoming = Array.isArray(data.items) ? data.items : []
+      setFollowersByStatus((prev) => {
+        const existing = reset ? [] : prev[status].items
+        const merged = [...existing]
+        incoming.forEach((item) => {
+          if (!merged.some((x) => x.subscriptionDocumentId === item.subscriptionDocumentId)) {
+            merged.push(item)
+          }
+        })
+        return {
+          ...prev,
+          [status]: {
+            ...prev[status],
+            items: merged,
+            nextCursor: data.nextCursor ?? null,
+            loading: false,
+            error: null,
+          },
+        }
+      })
+    } catch (e) {
+      setFollowersByStatus((prev) => ({
+        ...prev,
+        [status]: {
+          ...prev[status],
+          loading: false,
+          error: e instanceof Error ? e.message : 'Failed to load followers',
+        },
+      }))
+    }
+  }
+
+  function openManageFollowers(plan: WorkoutPlan) {
+    if (plan.isPersonal) return
+    setManageFollowersPlan(plan)
+    setManageFollowersOpen(true)
+    setFollowersQuery('')
+    setFollowersByStatus({
+      active: { items: [], nextCursor: null, loading: false, error: null },
+      pending: { items: [], nextCursor: null, loading: false, error: null },
+      blocked: { items: [], nextCursor: null, loading: false, error: null },
+    })
+    void Promise.all([
+      loadFollowers('active', { reset: true, planId: plan.id }),
+      loadFollowers('pending', { reset: true, planId: plan.id }),
+      loadFollowers('blocked', { reset: true, planId: plan.id }),
+    ])
+  }
+
   async function handleEditPlanSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!editPlan || !editPlanName.trim()) return
@@ -5459,6 +5868,79 @@ function PlansSection({
       setEditPlanError(e instanceof Error ? e.message : 'Failed to update plan')
     } finally {
       setEditPlanBusy(false)
+    }
+  }
+
+  async function handleEditSharingSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!editSharingPlan) return
+    setEditSharingError(null)
+    setEditSharingBusy(true)
+    try {
+      const privacy = PLAN_PRIVACY[editSharingPrivacy]
+      const normalizedHandle = editSharingHandle.trim()
+      if (privacy !== PLAN_PRIVACY.private && !normalizedHandle) {
+        throw new Error('Handle is required for protected/public sharing.')
+      }
+      await onUpdatePlanSharing(
+        editSharingPlan.id,
+        privacy,
+        normalizedHandle ? normalizedHandle : null
+      )
+      setEditSharingOpen(false)
+      setEditSharingPlan(null)
+      setEditSharingHandle('')
+      setEditSharingError(null)
+    } catch (e) {
+      setEditSharingError(
+        e instanceof Error ? e.message : 'Failed to update sharing options'
+      )
+    } finally {
+      setEditSharingBusy(false)
+    }
+  }
+
+  async function handleFollowersSearchSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!manageFollowersPlan) return
+    await Promise.all([
+      loadFollowers('active', { reset: true, planId: manageFollowersPlan.id }),
+      loadFollowers('pending', { reset: true, planId: manageFollowersPlan.id }),
+      loadFollowers('blocked', { reset: true, planId: manageFollowersPlan.id }),
+    ])
+  }
+
+  async function handleFollowerAction(
+    item: PlanFollower,
+    action: 'approve' | 'reject' | 'revoke' | 'block' | 'unblock'
+  ) {
+    if (!manageFollowersPlan) return
+    const busyKey = `${item.subscriptionDocumentId}:${action}`
+    setFollowersActionBusy(busyKey)
+    try {
+      const res = await authedFetch(
+        `/api/app/plans/${encodeURIComponent(manageFollowersPlan.id)}/followers`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subscriberUserId: item.subscriberUserId,
+            subscriptionDocumentId: item.subscriptionDocumentId,
+            action,
+          }),
+        }
+      )
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Failed to update follower')
+      }
+      await Promise.all([
+        loadFollowers('active', { reset: true, planId: manageFollowersPlan.id }),
+        loadFollowers('pending', { reset: true, planId: manageFollowersPlan.id }),
+        loadFollowers('blocked', { reset: true, planId: manageFollowersPlan.id }),
+      ])
+    } finally {
+      setFollowersActionBusy(null)
     }
   }
 
@@ -5968,6 +6450,30 @@ function PlansSection({
                     >
                       Edit plan
                     </button>
+                    {!selectedPlan.isPersonal && (
+                      <button
+                        type="button"
+                        className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        onClick={() => {
+                          setPlanMoreMenuOpen(false)
+                          openEditSharing(selectedPlan)
+                        }}
+                      >
+                        Edit sharing options
+                      </button>
+                    )}
+                    {!selectedPlan.isPersonal && (
+                      <button
+                        type="button"
+                        className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        onClick={() => {
+                          setPlanMoreMenuOpen(false)
+                          openManageFollowers(selectedPlan)
+                        }}
+                      >
+                        Manage followers
+                      </button>
+                    )}
                     {selectedPlan.id !== 'personal' && (
                       <>
                         <div className="my-1 border-t border-gray-200" aria-hidden />
@@ -7199,6 +7705,223 @@ function PlansSection({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {editSharingOpen && editSharingPlan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !editSharingBusy && setEditSharingOpen(false)}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-800">Edit sharing options</h3>
+            </div>
+            <form onSubmit={handleEditSharingSubmit} className="p-4 space-y-4">
+              <div>
+                <label htmlFor="edit-plan-privacy" className="block text-xs font-medium text-gray-700 mb-1">
+                  Sharing
+                </label>
+                <select
+                  id="edit-plan-privacy"
+                  value={editSharingPrivacy}
+                  onChange={(e) => setEditSharingPrivacy(e.target.value as PlanPrivacyKey)}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                  disabled={editSharingBusy}
+                >
+                  <option value="private">Private (not shared)</option>
+                  <option value="protected">Protected (approval required)</option>
+                  <option value="public">Public (no approval required)</option>
+                </select>
+              </div>
+              <div>
+                <label htmlFor="edit-plan-handle" className="block text-xs font-medium text-gray-700 mb-1">
+                  Handle {editSharingPrivacy === 'private' ? '(optional)' : ''}
+                </label>
+                <input
+                  id="edit-plan-handle"
+                  type="text"
+                  value={editSharingHandle}
+                  onChange={(e) => setEditSharingHandle(e.target.value)}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                  placeholder="e.g. my-team-plan"
+                  disabled={editSharingBusy}
+                />
+              </div>
+              {editSharingError && <p className="text-xs text-red-600">{editSharingError}</p>}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditSharingOpen(false)}
+                  disabled={editSharingBusy}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editSharingBusy}
+                  className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
+                  style={{ backgroundColor: '#6B21A8' }}
+                >
+                  {editSharingBusy ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {manageFollowersOpen && manageFollowersPlan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => setManageFollowersOpen(false)}
+          />
+          <div className="relative w-full max-w-3xl rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3 flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-gray-800">Manage followers</h3>
+              <button
+                type="button"
+                onClick={() => setManageFollowersOpen(false)}
+                className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <form onSubmit={handleFollowersSearchSubmit} className="px-4 py-3 border-b border-gymnext-muted/30 flex items-end gap-2">
+              <div className="flex-1">
+                <label htmlFor="followers-search" className="block text-xs font-medium text-gray-700 mb-1">
+                  Search followers
+                </label>
+                <input
+                  id="followers-search"
+                  type="text"
+                  value={followersQuery}
+                  onChange={(e) => setFollowersQuery(e.target.value)}
+                  placeholder="Name, handle, or user id"
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                />
+              </div>
+              <button
+                type="submit"
+                className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90"
+                style={{ backgroundColor: '#6B21A8' }}
+              >
+                Search
+              </button>
+            </form>
+            <div className="max-h-[70vh] overflow-y-auto p-4 space-y-4">
+              {(['active', 'pending', 'blocked'] as const).map((status) => {
+                const section = followersByStatus[status]
+                const title = status === 'active' ? 'Active' : status === 'pending' ? 'Pending' : 'Blocked'
+                return (
+                  <section key={status} className="rounded border border-gray-200">
+                    <div className="px-3 py-2 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
+                      <p className="text-sm font-medium text-gray-800">
+                        {title} ({section.items.length})
+                      </p>
+                      {section.loading && <span className="text-xs text-gray-500">Loading…</span>}
+                    </div>
+                    <div className="divide-y divide-gray-100">
+                      {section.error && (
+                        <p className="px-3 py-2 text-xs text-red-600">{section.error}</p>
+                      )}
+                      {!section.error && section.items.length === 0 && !section.loading && (
+                        <p className="px-3 py-3 text-xs text-gray-500">No followers in this group.</p>
+                      )}
+                      {section.items.map((item) => {
+                        const busyPrefix = `${item.subscriptionDocumentId}:`
+                        const isBusy = !!followersActionBusy && followersActionBusy.startsWith(busyPrefix)
+                        return (
+                          <div key={item.subscriptionDocumentId} className="px-3 py-2 flex items-center gap-2">
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm text-gray-900 truncate">
+                                {item.subscriberFullName || item.subscriberPublicHandle || item.subscriberUserId}
+                              </p>
+                              <p className="text-xs text-gray-500 truncate">
+                                {item.subscriberPublicHandle ? `@${item.subscriberPublicHandle}` : 'No handle'}
+                              </p>
+                            </div>
+                            <div className="shrink-0 flex items-center gap-1">
+                              {status === 'active' && (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => handleFollowerAction(item, 'revoke')}
+                                    className="rounded px-2 py-1 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 disabled:opacity-50"
+                                  >
+                                    Revoke
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => handleFollowerAction(item, 'block')}
+                                    className="rounded px-2 py-1 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 disabled:opacity-50"
+                                  >
+                                    Block
+                                  </button>
+                                </>
+                              )}
+                              {status === 'pending' && (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => handleFollowerAction(item, 'approve')}
+                                    className="rounded px-2 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                                    style={{ backgroundColor: '#6B21A8' }}
+                                  >
+                                    Approve
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => handleFollowerAction(item, 'reject')}
+                                    className="rounded px-2 py-1 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 disabled:opacity-50"
+                                  >
+                                    Reject
+                                  </button>
+                                </>
+                              )}
+                              {status === 'blocked' && (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => handleFollowerAction(item, 'unblock')}
+                                  className="rounded px-2 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+                                  style={{ backgroundColor: '#6B21A8' }}
+                                >
+                                  Unblock
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                    {section.nextCursor && (
+                      <div className="px-3 py-2 border-t border-gray-100">
+                        <button
+                          type="button"
+                          disabled={section.loading}
+                          onClick={() => loadFollowers(status)}
+                          className="rounded border border-gray-300 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          Load more
+                        </button>
+                      </div>
+                    )}
+                  </section>
+                )
+              })}
+            </div>
           </div>
         </div>
       )}
