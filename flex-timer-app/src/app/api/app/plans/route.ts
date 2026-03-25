@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
 /**
  * POST /api/app/plans
  * Create a new workout plan for the signed-in user.
- * Body: { name: string, description?: string }
+ * Body: { name: string, description?: string, isPersonal?: boolean }
  */
 export async function POST(request: NextRequest) {
   const authResult = await requireUserAuth(request.headers.get('authorization'))
@@ -56,7 +56,7 @@ export async function POST(request: NextRequest) {
 
   const { uid } = authResult
 
-  let body: { name?: string; description?: string }
+  let body: { name?: string; description?: string; isPersonal?: boolean }
   try {
     body = await request.json()
   } catch {
@@ -69,6 +69,7 @@ export async function POST(request: NextRequest) {
   }
 
   const description = typeof body.description === 'string' ? body.description : null
+  const isPersonal = body.isPersonal === true
 
   try {
     const [allPlans, limits] = await Promise.all([
@@ -92,7 +93,7 @@ export async function POST(request: NextRequest) {
     const plan = await createWorkoutPlan(uid, {
       name: name.trim(),
       description,
-      isPersonal: false,
+      isPersonal,
     })
     return NextResponse.json(plan, { status: 201 })
   } catch (err) {

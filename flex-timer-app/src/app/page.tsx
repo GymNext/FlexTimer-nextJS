@@ -37,7 +37,7 @@ import {
   timerModeToDisplayString,
 } from '@/lib/json-workout-format'
 
-type TabId = 'favorites' | 'collections' | 'plans'
+type TabId = 'favorites' | 'collections' | 'plans' | 'following'
 
 interface OverviewData {
   workouts: Workout[]
@@ -56,6 +56,17 @@ interface OverviewData {
     cooldownDirection?: boolean
   }
   counts?: { favorites: number; collections: number; plans: number }
+}
+
+interface FollowingPlan {
+  subscriptionDocumentId: string
+  subscriberUserId: string
+  ownerUserId: string
+  remotePlanId: string
+  status: 'active'
+  remotePlanName: string | null
+  remotePlanHandle: string | null
+  ordinal: number
 }
 
 const PLAN_PRIVACY = {
@@ -848,6 +859,7 @@ function UserAppLayout({
   const [activeTab, setActiveTab] = useState<TabId>('favorites')
   const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null)
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
+  const [selectedFollowingPlanId, setSelectedFollowingPlanId] = useState<string | null>(null)
   const [selectedFavoriteWorkout, setSelectedFavoriteWorkout] = useState<Workout | null>(null)
   const [reorderFavoritesError, setReorderFavoritesError] = useState<string | null>(null)
   const [reorderCollectionsError, setReorderCollectionsError] = useState<string | null>(null)
@@ -863,6 +875,9 @@ function UserAppLayout({
   const [optimisticPlannedWorkouts, setOptimisticPlannedWorkouts] = useState<PlannedWorkout[] | null>(null)
   const [plansLoading, setPlansLoading] = useState(false)
   const [plansError, setPlansError] = useState<string | null>(null)
+  const [followingPlans, setFollowingPlans] = useState<FollowingPlan[]>([])
+  const [followingPlansLoading, setFollowingPlansLoading] = useState(false)
+  const [followingPlansError, setFollowingPlansError] = useState<string | null>(null)
   const [weekStart, setWeekStart] = useState<string>(() => getLocalYYYYMMDD(new Date()))
   const [planViewMode, setPlanViewMode] = useState<'week' | '3day' | '1day'>('3day')
 
@@ -920,6 +935,12 @@ function UserAppLayout({
       ),
     [overview?.workoutPlans]
   )
+
+  useEffect(() => {
+    if (!overview) return
+    loadFollowingPlans()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overview])
 
   async function authedFetch(input: string, init?: RequestInit) {
     const token = await user.getIdToken()
@@ -1074,11 +1095,19 @@ function UserAppLayout({
     return created
   }
 
-  async function handleCreatePlan(name: string, description: string | null) {
+  async function handleCreatePlan(
+    name: string,
+    description: string | null,
+    isPersonal: boolean
+  ) {
     const res = await authedFetch('/api/app/plans', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name.trim(), description: description?.trim() || null }),
+      body: JSON.stringify({
+        name: name.trim(),
+        description: description?.trim() || null,
+        isPersonal,
+      }),
     })
     if (!res.ok) {
       const json = await res.json().catch(() => ({}))
@@ -1387,14 +1416,68 @@ function UserAppLayout({
     }
   }
 
+  async function loadFollowingPlans() {
+    setFollowingPlansLoading(true)
+    setFollowingPlansError(null)
+    try {
+      const res = await authedFetch('/api/app/following-plans')
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${res.status}`)
+      }
+      const data = (await res.json()) as { followingPlans?: FollowingPlan[] }
+      const items = Array.isArray(data.followingPlans) ? data.followingPlans : []
+      setFollowingPlans(items.sort((a, b) => a.ordinal - b.ordinal))
+    } catch (e) {
+      setFollowingPlansError(
+        e instanceof Error ? e.message : 'Failed to load followed plans'
+      )
+      setFollowingPlans([])
+    } finally {
+      setFollowingPlansLoading(false)
+    }
+  }
+
   async function loadPlannedWorkoutsForPlan(planId: string) {
     setSelectedPlanId(planId)
+    setSelectedFollowingPlanId(null)
     setPlansLoading(true)
     setPlansError(null)
     try {
       const res = await authedFetch(
         `/api/app/plans/${encodeURIComponent(
           planId
+        )}/planned-workouts?from=${encodeURIComponent(
+          weekStart
+        )}&to=${encodeURIComponent(weekEnd)}`
+      )
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${res.status}`)
+      }
+      const data = (await res.json()) as { plannedWorkouts: PlannedWorkout[] }
+      setPlannedWorkouts(data.plannedWorkouts ?? [])
+      setOptimisticPlannedWorkouts(null)
+    } catch (e) {
+      setPlansError(
+        e instanceof Error ? e.message : 'Failed to load planned workouts'
+      )
+      setPlannedWorkouts([])
+      setOptimisticPlannedWorkouts(null)
+    } finally {
+      setPlansLoading(false)
+    }
+  }
+
+  async function loadPlannedWorkoutsForFollowingPlan(subscriptionDocumentId: string) {
+    setSelectedFollowingPlanId(subscriptionDocumentId)
+    setSelectedPlanId(null)
+    setPlansLoading(true)
+    setPlansError(null)
+    try {
+      const res = await authedFetch(
+        `/api/app/following-plans/${encodeURIComponent(
+          subscriptionDocumentId
         )}/planned-workouts?from=${encodeURIComponent(
           weekStart
         )}&to=${encodeURIComponent(weekEnd)}`
@@ -1553,9 +1636,11 @@ function UserAppLayout({
   useEffect(() => {
     if (selectedPlanId) {
       loadPlannedWorkoutsForPlan(selectedPlanId)
+    } else if (selectedFollowingPlanId) {
+      loadPlannedWorkoutsForFollowingPlan(selectedFollowingPlanId)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [weekStart, planDayCount])
+  }, [weekStart, planDayCount, selectedFollowingPlanId])
 
   useEffect(() => {
     registerResetToDefault(() => {
@@ -1593,6 +1678,18 @@ function UserAppLayout({
             onClick={() => setActiveTab('plans')}
           >
             Planning
+          </TabButton>
+          <TabButton
+            id="following"
+            active={activeTab === 'following'}
+            onClick={() => {
+              const today = getLocalYYYYMMDD(new Date())
+              setPlanViewMode('1day')
+              setWeekStart(today)
+              setActiveTab('following')
+            }}
+          >
+            Following
           </TabButton>
         </div>
       </div>
@@ -1674,13 +1771,22 @@ function UserAppLayout({
               timerDefaultRestDirection={overview?.timerDefaults?.restDirection}
             />
           )}
-          {activeTab === 'plans' && (
+          {(activeTab === 'plans' || activeTab === 'following') && (
             <PlansSection
+              viewMode={activeTab === 'following' ? 'following' : 'owned'}
               plans={sortedPlans}
+              followingPlans={followingPlans}
+              followingPlansLoading={followingPlansLoading}
+              followingPlansError={followingPlansError}
               selectedPlanId={selectedPlanId}
+              selectedFollowingPlanId={selectedFollowingPlanId}
               setSelectedPlanId={(id) => {
                 setSelectedPlanId(id)
                 if (id) loadPlannedWorkoutsForPlan(id)
+              }}
+              setSelectedFollowingPlanId={(id) => {
+                setSelectedFollowingPlanId(id)
+                if (id) loadPlannedWorkoutsForFollowingPlan(id)
               }}
               weekStart={weekStart}
               setWeekStart={setWeekStart}
@@ -1697,7 +1803,9 @@ function UserAppLayout({
               user={user}
               reloadPlanned={() => {
                 if (selectedPlanId) loadPlannedWorkoutsForPlan(selectedPlanId)
+                if (selectedFollowingPlanId) loadPlannedWorkoutsForFollowingPlan(selectedFollowingPlanId)
               }}
+              reloadFollowingPlans={loadFollowingPlans}
               onPlannedWorkoutMetadataSaved={updatePlannedWorkoutMetadataInPlace}
               onCreatePlan={handleCreatePlan}
               onUpdatePlan={handleUpdatePlan}
@@ -1756,7 +1864,7 @@ function CreateWorkoutDialog({
   timerDefaultDirection,
   timerDefaultRestDirection,
   timerModeOptions,
-  title = 'Create new favorite workout',
+  title = 'Create favorite',
 }: {
   onClose: () => void
   createWorkout: (payload: {
@@ -2595,7 +2703,7 @@ function FavoritesSection({
               className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90 disabled:opacity-50"
               style={{ backgroundColor: '#6B21A8' }}
             >
-              Create new favorite workout
+              Create favorite
             </button>
           )}
         </div>
@@ -5495,9 +5603,15 @@ function CollectionsSection({
 }
 
 function PlansSection({
+  viewMode,
   plans,
+  followingPlans,
+  followingPlansLoading,
+  followingPlansError,
   selectedPlanId,
+  selectedFollowingPlanId,
   setSelectedPlanId,
+  setSelectedFollowingPlanId,
   weekStart,
   setWeekStart,
   weekEnd,
@@ -5512,6 +5626,7 @@ function PlansSection({
   onDeletePlanned,
   user,
   reloadPlanned,
+  reloadFollowingPlans,
   onPlannedWorkoutMetadataSaved,
   onCreatePlan,
   onUpdatePlan,
@@ -5528,9 +5643,15 @@ function PlansSection({
   workoutsById,
   timerDefaults,
 }: {
+  viewMode: 'owned' | 'following'
   plans: WorkoutPlan[]
+  followingPlans: FollowingPlan[]
+  followingPlansLoading: boolean
+  followingPlansError: string | null
   selectedPlanId: string | null
+  selectedFollowingPlanId: string | null
   setSelectedPlanId: (id: string | null) => void
+  setSelectedFollowingPlanId: (id: string | null) => void
   weekStart: string
   setWeekStart: (value: string) => void
   weekEnd: string
@@ -5549,11 +5670,16 @@ function PlansSection({
   onDeletePlanned: (pw: PlannedWorkout) => void
   user: User
   reloadPlanned: () => void
+  reloadFollowingPlans: () => void
   onPlannedWorkoutMetadataSaved: (
     plannedWorkoutId: string,
     patch: { workoutName?: string | null; workoutDescription?: string | null; workoutDetails?: string | null }
   ) => void
-  onCreatePlan: (name: string, description: string | null) => Promise<WorkoutPlan>
+  onCreatePlan: (
+    name: string,
+    description: string | null,
+    isPersonal: boolean
+  ) => Promise<WorkoutPlan>
   onUpdatePlan: (planId: string, name: string, description: string | null) => Promise<void>
   onUpdatePlanSharing: (planId: string, privacy: number, handle: string | null) => Promise<void>
   onDeletePlan: (planId: string) => Promise<void>
@@ -5582,6 +5708,7 @@ function PlansSection({
   const [expandedCollectionId, setExpandedCollectionId] = useState<string | null>(null)
   const [selectedWorkoutForPlan, setSelectedWorkoutForPlan] = useState<Workout | null>(null)
   const [createPlanOpen, setCreatePlanOpen] = useState(false)
+  const [createPlanType, setCreatePlanType] = useState<'personal' | 'group'>('group')
 
   const [editPlanOpen, setEditPlanOpen] = useState(false)
   const [editPlan, setEditPlan] = useState<WorkoutPlan | null>(null)
@@ -5626,6 +5753,7 @@ function PlansSection({
   const [createPlanBusy, setCreatePlanBusy] = useState(false)
   const [createPlanError, setCreatePlanError] = useState<string | null>(null)
   const todayYmd = getLocalYYYYMMDD(new Date())
+  const followingLatestDay = addDays(todayYmd, -1)
   const [createDate, setCreateDate] = useState<string>(() => todayYmd)
   const [createMode, setCreateMode] = useState<number>(1)
   const [createOptions, setCreateOptions] = useState<
@@ -5645,6 +5773,10 @@ function PlansSection({
 
   const [planMoreMenuOpen, setPlanMoreMenuOpen] = useState(false)
   const [planDeleteConfirmOpen, setPlanDeleteConfirmOpen] = useState(false)
+  const [followingMoreMenuOpen, setFollowingMoreMenuOpen] = useState(false)
+  const [stopFollowingConfirmOpen, setStopFollowingConfirmOpen] = useState(false)
+  const [stopFollowingBusy, setStopFollowingBusy] = useState(false)
+  const [stopFollowingError, setStopFollowingError] = useState<string | null>(null)
   const [expandedPlannedWorkoutId, setExpandedPlannedWorkoutId] = useState<string | null>(null)
   const [draggedPlanned, setDraggedPlanned] = useState<{ dateKey: string; index: number } | null>(null)
   const [plannedDropIndicator, setPlannedDropIndicator] = useState<{ dateKey: string; beforeIndex: number } | null>(null)
@@ -5714,6 +5846,52 @@ function PlansSection({
     selectedPlanId === null
       ? null
       : plans.find((p) => p.id === selectedPlanId) ?? null
+  const selectedFollowingPlan =
+    selectedFollowingPlanId === null
+      ? null
+      : followingPlans.find((p) => p.subscriptionDocumentId === selectedFollowingPlanId) ?? null
+  const isFollowingMode = viewMode === 'following'
+  const selectedPlanName = isFollowingMode
+    ? selectedFollowingPlan?.remotePlanName ?? 'Followed plan'
+    : selectedPlan?.workoutPlanName ?? ''
+  const selectedPlanDescription = isFollowingMode
+    ? selectedFollowingPlan?.remotePlanHandle
+      ? `@${selectedFollowingPlan.remotePlanHandle}`
+      : 'Read-only followed plan'
+    : (selectedPlan?.workoutPlanDescription || 'No description')
+
+  useEffect(() => {
+    setFollowingMoreMenuOpen(false)
+    setStopFollowingConfirmOpen(false)
+    setStopFollowingError(null)
+    setStopFollowingBusy(false)
+  }, [selectedFollowingPlanId])
+
+  async function handleStopFollowing() {
+    if (!selectedFollowingPlan) return
+    setStopFollowingBusy(true)
+    setStopFollowingError(null)
+    try {
+      const res = await authedFetch(
+        `/api/app/following-plans/${encodeURIComponent(
+          selectedFollowingPlan.subscriptionDocumentId
+        )}`,
+        { method: 'DELETE' }
+      )
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${res.status}`)
+      }
+      setStopFollowingConfirmOpen(false)
+      setSelectedFollowingPlanId(null)
+      reloadFollowingPlans()
+      toast.success('Stopped following')
+    } catch (e) {
+      setStopFollowingError(e instanceof Error ? e.message : 'Failed to stop following')
+    } finally {
+      setStopFollowingBusy(false)
+    }
+  }
 
   const maxP = maxPlans ?? UNLIMITED
   const planCount = plansCount ?? 0
@@ -5738,10 +5916,15 @@ function PlansSection({
     setCreatePlanError(null)
     setCreatePlanBusy(true)
     try {
-      const created = await onCreatePlan(createPlanName.trim(), createPlanDescription.trim() || null)
+      const created = await onCreatePlan(
+        createPlanName.trim(),
+        createPlanDescription.trim() || null,
+        createPlanType === 'personal'
+      )
       setCreatePlanOpen(false)
       setCreatePlanName('')
       setCreatePlanDescription('')
+      setCreatePlanType('group')
       setSelectedPlanId(created.id)
     } catch (e) {
       setCreatePlanError(e instanceof Error ? e.message : 'Failed to create plan')
@@ -6246,18 +6429,20 @@ function PlansSection({
         <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
           <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex items-center justify-between gap-2">
             <h3 className="text-sm font-medium text-gray-800">
-              Plans {plansLabel}
+              {isFollowingMode ? `Following (${followingPlans.length})` : `Plans ${plansLabel}`}
             </h3>
-            <button
-              type="button"
-              onClick={() => setCreatePlanOpen(true)}
-              disabled={atPlansLimit}
-              title={atPlansLimit ? `Your plan allows up to ${maxP} plan${maxP === 1 ? '' : 's'}. Upgrade to add more.` : undefined}
-              className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90 disabled:opacity-50"
-              style={{ backgroundColor: '#6B21A8' }}
-            >
-              Create plan
-            </button>
+            {!isFollowingMode && (
+              <button
+                type="button"
+                onClick={() => setCreatePlanOpen(true)}
+                disabled={atPlansLimit}
+                title={atPlansLimit ? `Your plan allows up to ${maxP} plan${maxP === 1 ? '' : 's'}. Upgrade to add more.` : undefined}
+                className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90 disabled:opacity-50"
+                style={{ backgroundColor: '#6B21A8' }}
+              >
+                Create plan
+              </button>
+            )}
           </div>
           {reorderPlansError && onDismissReorderPlansError && (
             <div className="px-4 py-2 flex items-center justify-between gap-2 bg-red-50 border-b border-red-200">
@@ -6271,9 +6456,15 @@ function PlansSection({
               </button>
             </div>
           )}
-          {plans.length === 0 ? (
+          {isFollowingMode && followingPlansError ? (
+            <p className="px-4 py-3 text-xs text-red-700 bg-red-50">{followingPlansError}</p>
+          ) : isFollowingMode && followingPlansLoading ? (
+            <p className="px-4 py-6 text-sm text-gray-500">Loading followed plans…</p>
+          ) : (isFollowingMode ? followingPlans.length === 0 : plans.length === 0) ? (
             <p className="px-4 py-6 text-sm text-gray-500">
-              You do not have any plans yet. Create one to get started.
+              {isFollowingMode
+                ? 'You are not following any plans yet.'
+                : 'You do not have any plans yet. Create one to get started.'}
             </p>
           ) : (
             <ul
@@ -6292,10 +6483,12 @@ function PlansSection({
                 handlePlanDrop(draggedId, toIndex)
               }}
             >
-              {orderedPlans.map((p, index) => {
-                const isSelected = selectedPlan?.id === p.id
+              {(isFollowingMode ? followingPlans : orderedPlans).map((p, index) => {
+                const isSelected = isFollowingMode
+                  ? selectedFollowingPlan?.subscriptionDocumentId === (p as FollowingPlan).subscriptionDocumentId
+                  : selectedPlan?.id === (p as WorkoutPlan).id
                 return (
-                <Fragment key={p.id}>
+                <Fragment key={isFollowingMode ? (p as FollowingPlan).subscriptionDocumentId : (p as WorkoutPlan).id}>
                   {dropIndicatorBeforeIndex === index && (
                     <li
                       className="flex items-center px-3 py-1 list-none border-t-0"
@@ -6321,7 +6514,13 @@ function PlansSection({
                       isSelected ? '' : 'hover:bg-gray-100'
                     } ${draggedPlanIndex === index ? 'opacity-50' : ''}`}
                     style={{ borderLeftColor: isSelected ? '#6B21A8' : '#d1d5db' }}
-                    onClick={() => setSelectedPlanId(isSelected ? null : p.id)}
+                    onClick={() =>
+                      isFollowingMode
+                        ? setSelectedFollowingPlanId(
+                            isSelected ? null : (p as FollowingPlan).subscriptionDocumentId
+                          )
+                        : setSelectedPlanId(isSelected ? null : (p as WorkoutPlan).id)
+                    }
                     onDragOver={(e) => {
                       e.preventDefault()
                       e.dataTransfer.dropEffect = 'move'
@@ -6346,10 +6545,11 @@ function PlansSection({
                     }}
                   >
                     <span
-                      draggable
+                      draggable={!isFollowingMode}
                       onDragStart={(e) => {
+                        if (isFollowingMode) return
                         e.dataTransfer.effectAllowed = 'move'
-                        e.dataTransfer.setData('text/plain', p.id)
+                        e.dataTransfer.setData('text/plain', (p as WorkoutPlan).id)
                         setDraggedPlanIndex(index)
                         setDropIndicatorBeforeIndex(null)
                       }}
@@ -6373,17 +6573,23 @@ function PlansSection({
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-medium text-gray-900 truncate">
-                        {p.workoutPlanName}
+                        {isFollowingMode
+                          ? ((p as FollowingPlan).remotePlanName || 'Followed plan')
+                          : (p as WorkoutPlan).workoutPlanName}
                       </p>
                       <p className="text-xs text-gray-500 truncate">
-                        {p.workoutPlanDescription || 'No description'}
+                        {isFollowingMode
+                          ? ((p as FollowingPlan).remotePlanHandle
+                              ? `@${(p as FollowingPlan).remotePlanHandle}`
+                              : 'Read-only followed plan')
+                          : ((p as WorkoutPlan).workoutPlanDescription || 'No description')}
                       </p>
                     </div>
                   </li>
                 </Fragment>
               )
               })}
-              {dropIndicatorBeforeIndex === orderedPlans.length && (
+              {!isFollowingMode && dropIndicatorBeforeIndex === orderedPlans.length && (
                 <li
                   className="flex items-center px-3 py-1 list-none border-t-0"
                   aria-hidden
@@ -6407,7 +6613,7 @@ function PlansSection({
         </div>
 
         <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
-          {!selectedPlan ? (
+          {(!isFollowingMode && !selectedPlan) || (isFollowingMode && !selectedFollowingPlan) ? (
             <p className="px-4 py-8 text-sm text-gray-500 text-center">
               Select a plan from the list to view its schedule.
             </p>
@@ -6416,12 +6622,13 @@ function PlansSection({
           <div className="px-4 py-3 border-b border-gray-100 flex items-start justify-between gap-2 relative">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium text-gray-900">
-                {selectedPlan.workoutPlanName}
+                {selectedPlanName}
               </p>
               <p className="text-xs text-gray-600 mt-1">
-                {selectedPlan.workoutPlanDescription || 'No description'}
+                {selectedPlanDescription}
               </p>
             </div>
+            {!isFollowingMode && selectedPlan && (
             <div className="shrink-0">
               <button
                 type="button"
@@ -6493,12 +6700,48 @@ function PlansSection({
                 </>
               )}
             </div>
+            )}
+            {isFollowingMode && selectedFollowingPlan && (
+              <div className="shrink-0 relative">
+                <button
+                  type="button"
+                  onClick={() => setFollowingMoreMenuOpen((open) => !open)}
+                  className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                  aria-label="More options"
+                  aria-expanded={followingMoreMenuOpen}
+                >
+                  ⋯
+                </button>
+                {followingMoreMenuOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      aria-hidden
+                      onClick={() => setFollowingMoreMenuOpen(false)}
+                    />
+                    <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                      <button
+                        type="button"
+                        className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
+                        onClick={() => {
+                          setFollowingMoreMenuOpen(false)
+                          setStopFollowingError(null)
+                          setStopFollowingConfirmOpen(true)
+                        }}
+                      >
+                        Stop following
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
           <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex flex-col gap-2">
             <div className="flex flex-wrap items-center justify-center gap-2">
               <button
                 type="button"
-                onClick={() => setWeekStart(addDays(weekStart, -planDayCount))}
+                onClick={() => setWeekStart(addDays(weekStart, -(isFollowingMode ? 1 : planDayCount)))}
                 className="rounded border border-gymnext-muted/50 bg-white px-2.5 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-background"
               >
                 ← Prev
@@ -6525,7 +6768,8 @@ function PlansSection({
               </span>
               <button
                 type="button"
-                onClick={() => setWeekStart(addDays(weekStart, planDayCount))}
+                onClick={() => setWeekStart(addDays(weekStart, isFollowingMode ? 1 : planDayCount))}
+                disabled={isFollowingMode && weekStart >= followingLatestDay}
                 className="rounded border border-gymnext-muted/50 bg-white px-2.5 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-background"
               >
                 Next →
@@ -6542,7 +6786,7 @@ function PlansSection({
               {plansError}
             </div>
           )}
-          {selectedPlan && !plansLoading && (
+          {((isFollowingMode ? selectedFollowingPlan : selectedPlan) && !plansLoading) && (
             <div className="grid grid-cols-1 divide-y divide-gray-200">
               {Array.from({ length: planDayCount }, (_, i) => {
                 const dateKey = addDays(weekStart, i)
@@ -6567,7 +6811,7 @@ function PlansSection({
                         </div>
                       </div>
                       <div className="flex-1 min-w-0 flex justify-end">
-                        {dateKey >= todayYmd && (
+                        {!isFollowingMode && dateKey >= todayYmd && (
                           <button
                             type="button"
                             onClick={() => {
@@ -6591,19 +6835,26 @@ function PlansSection({
                           Rest day
                         </p>
                       )}
-                      {items.length === 0 && dateKey >= todayYmd && (
+                      {items.length === 0 && dateKey >= todayYmd && !isFollowingMode && (
                         <p className="text-[11px] text-gray-500 px-1 py-2">
                           No workouts currently. Add a workout using the button above.
+                        </p>
+                      )}
+                      {items.length === 0 && dateKey >= todayYmd && isFollowingMode && (
+                        <p className="text-[11px] text-gray-400 italic px-1 py-2">
+                          Rest day
                         </p>
                       )}
                       {items.length > 0 && (
                         <ul
                           className=""
                           onDragOver={(e) => {
+                            if (isFollowingMode) return
                             e.preventDefault()
                             e.dataTransfer.dropEffect = 'move'
                           }}
                           onDrop={(e) => {
+                            if (isFollowingMode) return
                             e.preventDefault()
                             e.stopPropagation()
                             const raw = e.dataTransfer.getData('text/plain')
@@ -6635,6 +6886,7 @@ function PlansSection({
                           const w = pw.workout
                           const barColor = getWorkoutBarColor(w)
                           const isPast = dateKey < todayYmd
+                          const isReadOnly = isFollowingMode || isPast
                           const isDragging =
                             draggedPlanned?.dateKey === dateKey && draggedPlanned?.index === index
                           return (
@@ -6644,7 +6896,7 @@ function PlansSection({
                                 className={`flex items-center list-none border-t-0 -mt-1 pt-1 ${plannedDropIndicator?.dateKey === dateKey && plannedDropIndicator.beforeIndex === index ? 'px-3 pb-1 relative z-10' : 'px-3'}`}
                                 aria-hidden
                                 onDragOver={(ev) => {
-                                  if (isPast) return
+                                  if (isReadOnly) return
                                   ev.preventDefault()
                                   ev.stopPropagation()
                                   ev.dataTransfer.dropEffect = 'move'
@@ -6677,7 +6929,7 @@ function PlansSection({
                                 style={{ borderLeftColor: barColor }}
                                 data-index={index}
                                 onDragOver={(e) => {
-                                  if (isPast) return
+                                  if (isReadOnly) return
                                   e.preventDefault()
                                   e.dataTransfer.dropEffect = 'move'
                                   if (draggedPlanned === null) return
@@ -6713,7 +6965,7 @@ function PlansSection({
                                   }
                                 }}
                               >
-                                {!isPast ? (
+                                {!isReadOnly ? (
                                   <span
                                     draggable
                                     onDragStart={(e) => {
@@ -6748,6 +7000,7 @@ function PlansSection({
                                   className="min-w-0 flex-1 py-0.5 cursor-pointer"
                                   onClick={(e) => {
                                     e.stopPropagation()
+                                    if (isFollowingMode) return
                                     if (expandedPlannedWorkoutId === pw.id) {
                                       setExpandedPlannedWorkoutId(null)
                                       setEditSchedulePlannedWorkout(null)
@@ -6764,6 +7017,7 @@ function PlansSection({
                                     {getWorkoutDetailDescription(w) || '—'}
                                   </div>
                                 </div>
+                                {!isFollowingMode && (
                                 <div className="shrink-0 relative" onClick={(e) => e.stopPropagation()}>
                                   <button
                                     type="button"
@@ -6891,14 +7145,17 @@ function PlansSection({
                                     document.body
                                   )}
                                 </div>
+                                )}
                               </li>
                               {expandedPlannedWorkoutId === pw.id && (
                                 <li className="border-t border-gray-200 bg-gray-50/80 list-none">
                                   <div className="p-4">
-                                    {dateKey < todayYmd ? (
+                                    {isReadOnly ? (
                                       <div className="space-y-4">
                                         <p className="text-xs text-gray-500">
-                                          This workout is in the past and cannot be edited.
+                                          {isFollowingMode
+                                            ? 'Followed plan workouts are read-only.'
+                                            : 'This workout is in the past and cannot be edited.'}
                                         </p>
                                         <fieldset disabled className="space-y-4 opacity-90">
                                           <CreateWorkoutOptions
@@ -6968,7 +7225,7 @@ function PlansSection({
                                 className={`flex items-center list-none border-t-0 -mt-1 pt-1 ${plannedDropIndicator?.dateKey === dateKey && plannedDropIndicator.beforeIndex === items.length ? 'px-3 pb-1 relative z-10' : 'px-3'}`}
                                 aria-hidden
                                 onDragOver={(ev) => {
-                                  if (dateKey >= todayYmd) {
+                                  if (!isFollowingMode && dateKey >= todayYmd) {
                                     ev.preventDefault()
                                     ev.stopPropagation()
                                     ev.dataTransfer.dropEffect = 'move'
@@ -7005,7 +7262,7 @@ function PlansSection({
               })}
             </div>
           )}
-          {selectedPlan && !plansLoading && (
+          {!isFollowingMode && ((selectedPlan && !plansLoading)) && (
             <div className="flex justify-center py-3 border-b border-gymnext-muted/30 bg-gymnext-background">
               <div className="inline-flex rounded border border-gymnext-muted/50 bg-white p-0.5">
                 {(['1day', '3day', 'week'] as const).map((mode) => (
@@ -7528,7 +7785,11 @@ function PlansSection({
           <div
             className="absolute inset-0 bg-black/50"
             aria-hidden
-            onClick={() => !createPlanBusy && setCreatePlanOpen(false)}
+            onClick={() => {
+              if (createPlanBusy) return
+              setCreatePlanOpen(false)
+              setCreatePlanType('group')
+            }}
           />
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
@@ -7558,11 +7819,45 @@ function PlansSection({
                   placeholder="Optional description"
                 />
               </div>
+              <div>
+                <p className="block text-xs font-medium text-gray-700 mb-1">Plan type</p>
+                <div className="inline-flex rounded border border-gymnext-muted/50 bg-white p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setCreatePlanType('personal')}
+                    disabled={createPlanBusy}
+                    className={`rounded px-3 py-1.5 text-xs font-medium ${
+                      createPlanType === 'personal'
+                        ? 'text-white'
+                        : 'text-gray-600 hover:bg-gymnext-background'
+                    } disabled:opacity-50`}
+                    style={createPlanType === 'personal' ? { backgroundColor: '#6B21A8' } : undefined}
+                  >
+                    Personal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCreatePlanType('group')}
+                    disabled={createPlanBusy}
+                    className={`rounded px-3 py-1.5 text-xs font-medium ${
+                      createPlanType === 'group'
+                        ? 'text-white'
+                        : 'text-gray-600 hover:bg-gymnext-background'
+                    } disabled:opacity-50`}
+                    style={createPlanType === 'group' ? { backgroundColor: '#6B21A8' } : undefined}
+                  >
+                    Group
+                  </button>
+                </div>
+              </div>
               {createPlanError && <p className="text-xs text-red-600">{createPlanError}</p>}
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setCreatePlanOpen(false)}
+                  onClick={() => {
+                    setCreatePlanOpen(false)
+                    setCreatePlanType('group')
+                  }}
                   disabled={createPlanBusy}
                   className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
                 >
@@ -7610,6 +7905,46 @@ function PlansSection({
                 className="rounded px-3 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700"
               >
                 Delete plan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {stopFollowingConfirmOpen && selectedFollowingPlan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !stopFollowingBusy && setStopFollowingConfirmOpen(false)}
+          />
+          <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg p-4">
+            <p className="text-sm text-gray-800">
+              Stop following{' '}
+              <span className="font-semibold">
+                {selectedFollowingPlan.remotePlanName || 'this plan'}
+              </span>
+              ?
+            </p>
+            {stopFollowingError && (
+              <p className="mt-2 text-xs text-red-600">{stopFollowingError}</p>
+            )}
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                type="button"
+                onClick={() => setStopFollowingConfirmOpen(false)}
+                disabled={stopFollowingBusy}
+                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleStopFollowing}
+                disabled={stopFollowingBusy}
+                className="rounded bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+              >
+                {stopFollowingBusy ? 'Stopping…' : 'Stop following'}
               </button>
             </div>
           </div>

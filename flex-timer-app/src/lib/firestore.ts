@@ -403,6 +403,40 @@ export async function getWorkoutPlanSubscriptionsForPlan(
   return { items, nextCursor: items.length >= pageSize ? nextCursor : null }
 }
 
+export async function getActiveWorkoutPlanSubscriptionsForUser(
+  subscriberUserId: string
+): Promise<WorkoutPlanSubscriptionRecord[]> {
+  if (!adminDb) return []
+  const snapshot = await adminDb
+    .collection('users')
+    .doc(subscriberUserId)
+    .collection('workoutPlanSubscriptions')
+    .where('status', '==', 'active')
+    .get()
+  const items = snapshot.docs
+    .map((doc) => mapWorkoutPlanSubscriptionDoc(doc))
+    .filter((item): item is WorkoutPlanSubscriptionRecord => item !== null)
+  items.sort((a, b) => a.ordinal - b.ordinal)
+  return items
+}
+
+export async function getActiveWorkoutPlanSubscriptionById(
+  subscriberUserId: string,
+  subscriptionDocumentId: string
+): Promise<WorkoutPlanSubscriptionRecord | null> {
+  if (!adminDb) return null
+  const ref = adminDb
+    .collection('users')
+    .doc(subscriberUserId)
+    .collection('workoutPlanSubscriptions')
+    .doc(subscriptionDocumentId)
+  const snap = await ref.get()
+  if (!snap.exists) return null
+  const item = mapWorkoutPlanSubscriptionDoc(snap)
+  if (!item || item.status !== 'active') return null
+  return item
+}
+
 export async function mutateWorkoutPlanSubscriptionForPlan(
   ownerUserId: string,
   remotePlanId: string,
