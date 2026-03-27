@@ -69,6 +69,14 @@ interface FollowingPlan {
   ordinal: number
 }
 
+interface FollowPlanSearchResult {
+  handleKey: string
+  ownerUserId: string
+  planId: string
+  privacy: number | null
+  workoutPlanName: string | null
+}
+
 const PLAN_PRIVACY = {
   private: 1,
   protected: 2,
@@ -1683,9 +1691,6 @@ function UserAppLayout({
             id="following"
             active={activeTab === 'following'}
             onClick={() => {
-              const today = getLocalYYYYMMDD(new Date())
-              setPlanViewMode('1day')
-              setWeekStart(today)
               setActiveTab('following')
             }}
           >
@@ -5753,7 +5758,6 @@ function PlansSection({
   const [createPlanBusy, setCreatePlanBusy] = useState(false)
   const [createPlanError, setCreatePlanError] = useState<string | null>(null)
   const todayYmd = getLocalYYYYMMDD(new Date())
-  const followingLatestDay = addDays(todayYmd, -1)
   const [createDate, setCreateDate] = useState<string>(() => todayYmd)
   const [createMode, setCreateMode] = useState<number>(1)
   const [createOptions, setCreateOptions] = useState<
@@ -5777,6 +5781,12 @@ function PlansSection({
   const [stopFollowingConfirmOpen, setStopFollowingConfirmOpen] = useState(false)
   const [stopFollowingBusy, setStopFollowingBusy] = useState(false)
   const [stopFollowingError, setStopFollowingError] = useState<string | null>(null)
+  const [followSearchOpen, setFollowSearchOpen] = useState(false)
+  const [followSearchQuery, setFollowSearchQuery] = useState('')
+  const [followSearchBusy, setFollowSearchBusy] = useState(false)
+  const [followSearchError, setFollowSearchError] = useState<string | null>(null)
+  const [followSearchResults, setFollowSearchResults] = useState<FollowPlanSearchResult[]>([])
+  const [followActionBusyHandle, setFollowActionBusyHandle] = useState<string | null>(null)
   const [expandedPlannedWorkoutId, setExpandedPlannedWorkoutId] = useState<string | null>(null)
   const [draggedPlanned, setDraggedPlanned] = useState<{ dateKey: string; index: number } | null>(null)
   const [plannedDropIndicator, setPlannedDropIndicator] = useState<{ dateKey: string; beforeIndex: number } | null>(null)
@@ -5890,6 +5900,64 @@ function PlansSection({
       setStopFollowingError(e instanceof Error ? e.message : 'Failed to stop following')
     } finally {
       setStopFollowingBusy(false)
+    }
+  }
+
+  async function runFollowSearch(q: string) {
+    const query = q.trim()
+    setFollowSearchQuery(q)
+    setFollowSearchError(null)
+    if (query.replace(/^@/, '').length < 2) {
+      setFollowSearchResults([])
+      return
+    }
+    setFollowSearchBusy(true)
+    try {
+      const res = await authedFetch(
+        `/api/app/plans/handle-search?query=${encodeURIComponent(query)}`
+      )
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${res.status}`)
+      }
+      const data = (await res.json()) as { items?: FollowPlanSearchResult[] }
+      setFollowSearchResults(Array.isArray(data.items) ? data.items : [])
+    } catch (e) {
+      setFollowSearchError(e instanceof Error ? e.message : 'Failed to search plans')
+      setFollowSearchResults([])
+    } finally {
+      setFollowSearchBusy(false)
+    }
+  }
+
+  async function handleFollowByHandle(handleKey: string) {
+    const handle = handleKey.trim()
+    if (!handle) return
+    setFollowActionBusyHandle(handle)
+    try {
+      const res = await authedFetch('/api/app/following-plans', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ handleKey: handle }),
+      })
+      const json = (await res.json().catch(() => ({}))) as { error?: string; status?: string }
+      if (!res.ok) {
+        throw new Error(json.error || `HTTP ${res.status}`)
+      }
+      const status = json.status === 'pending' ? 'pending' : 'active'
+      setFollowSearchOpen(false)
+      setFollowSearchQuery('')
+      setFollowSearchResults([])
+      await Promise.resolve(reloadFollowingPlans())
+      toast.success(
+        status === 'active'
+          ? 'Now following plan'
+          : 'Follow request sent (pending approval)'
+      )
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to follow plan')
+    } finally {
+      setFollowActionBusyHandle(null)
     }
   }
 
@@ -6443,6 +6511,21 @@ function PlansSection({
                 Create plan
               </button>
             )}
+            {isFollowingMode && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFollowSearchError(null)
+                  setFollowSearchResults([])
+                  setFollowSearchQuery('')
+                  setFollowSearchOpen(true)
+                }}
+                className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
+                style={{ backgroundColor: '#6B21A8' }}
+              >
+                + Follow
+              </button>
+            )}
           </div>
           {reorderPlansError && onDismissReorderPlansError && (
             <div className="px-4 py-2 flex items-center justify-between gap-2 bg-red-50 border-b border-red-200">
@@ -6741,7 +6824,7 @@ function PlansSection({
             <div className="flex flex-wrap items-center justify-center gap-2">
               <button
                 type="button"
-                onClick={() => setWeekStart(addDays(weekStart, -(isFollowingMode ? 1 : planDayCount)))}
+                onClick={() => setWeekStart(addDays(weekStart, -planDayCount))}
                 className="rounded border border-gymnext-muted/50 bg-white px-2.5 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-background"
               >
                 ← Prev
@@ -6768,9 +6851,8 @@ function PlansSection({
               </span>
               <button
                 type="button"
-                onClick={() => setWeekStart(addDays(weekStart, isFollowingMode ? 1 : planDayCount))}
-                disabled={isFollowingMode && weekStart >= followingLatestDay}
-                className="rounded border border-gymnext-muted/50 bg-white px-2.5 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-background"
+                onClick={() => setWeekStart(addDays(weekStart, planDayCount))}
+                className="rounded border border-gymnext-muted/50 bg-white px-2.5 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-background disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
               >
                 Next →
               </button>
@@ -6830,17 +6912,27 @@ function PlansSection({
                       </div>
                     </div>
                     <div className="p-2 flex-1 space-y-0">
-                      {items.length === 0 && dateKey < todayYmd && (
+                      {isFollowingMode && dateKey > todayYmd && (
+                        <p className="text-[11px] text-gray-500 px-1 py-2">
+                          Will be available{' '}
+                          {new Date(dateKey + 'T12:00:00').toLocaleDateString(undefined, {
+                            month: 'short',
+                            day: 'numeric',
+                            year: 'numeric',
+                          })}
+                        </p>
+                      )}
+                      {!isFollowingMode && items.length === 0 && dateKey < todayYmd && (
                         <p className="text-[11px] text-gray-400 italic px-1 py-2">
                           Rest day
                         </p>
                       )}
-                      {items.length === 0 && dateKey >= todayYmd && !isFollowingMode && (
+                      {!isFollowingMode && items.length === 0 && dateKey >= todayYmd && (
                         <p className="text-[11px] text-gray-500 px-1 py-2">
                           No workouts currently. Add a workout using the button above.
                         </p>
                       )}
-                      {items.length === 0 && dateKey >= todayYmd && isFollowingMode && (
+                      {isFollowingMode && items.length === 0 && dateKey <= todayYmd && (
                         <p className="text-[11px] text-gray-400 italic px-1 py-2">
                           Rest day
                         </p>
@@ -7262,7 +7354,7 @@ function PlansSection({
               })}
             </div>
           )}
-          {!isFollowingMode && ((selectedPlan && !plansLoading)) && (
+          {((isFollowingMode && selectedFollowingPlan) || (!isFollowingMode && selectedPlan)) && !plansLoading && (
             <div className="flex justify-center py-3 border-b border-gymnext-muted/30 bg-gymnext-background">
               <div className="inline-flex rounded border border-gymnext-muted/50 bg-white p-0.5">
                 {(['1day', '3day', 'week'] as const).map((mode) => (
@@ -7946,6 +8038,88 @@ function PlansSection({
               >
                 {stopFollowingBusy ? 'Stopping…' : 'Stop following'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {followSearchOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !followSearchBusy && setFollowSearchOpen(false)}
+          />
+          <div className="relative w-full max-w-lg rounded-lg border border-gymnext-muted/30 bg-white shadow-lg max-h-[85vh] flex flex-col">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3 shrink-0 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-gray-800">Follow a plan</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Search by plan handle to follow someone’s plan. Some plans require approval.
+                </p>
+              </div>
+            </div>
+            <div className="p-4 space-y-3 overflow-y-auto min-h-0">
+              <div>
+                <label htmlFor="follow-handle" className="block text-xs font-medium text-gray-700 mb-1">
+                  Plan handle
+                </label>
+                <input
+                  id="follow-handle"
+                  type="text"
+                  value={followSearchQuery}
+                  onChange={(e) => void runFollowSearch(e.target.value)}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                  placeholder="@some-handle"
+                />
+                <p className="text-[11px] text-gray-500 mt-1">
+                  Type at least 2 characters.
+                </p>
+              </div>
+
+              {followSearchError && (
+                <div className="text-xs text-red-700 rounded border border-red-200 bg-red-50 px-3 py-2">
+                  {followSearchError}
+                </div>
+              )}
+
+              {followSearchBusy && (
+                <p className="text-sm text-gray-500">Searching…</p>
+              )}
+
+              {!followSearchBusy && !followSearchError && followSearchResults.length === 0 && followSearchQuery.replace(/^@/, '').trim().length >= 2 && (
+                <p className="text-sm text-gray-500">No plans found.</p>
+              )}
+
+              {followSearchResults.length > 0 && (
+                <ul className="divide-y divide-gray-200 border border-gray-200 rounded-lg overflow-hidden">
+                  {followSearchResults.map((item) => {
+                    const isProtected = item.privacy === 2
+                    const busy = followActionBusyHandle === item.handleKey
+                    return (
+                      <li key={item.handleKey} className="px-3 py-3 flex items-center gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium text-gray-900 truncate">
+                            {item.workoutPlanName || 'Untitled plan'}
+                          </p>
+                          <p className="text-xs text-gray-500 truncate">
+                            @{item.handleKey}{isProtected ? ' • protected' : ' • public'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleFollowByHandle(item.handleKey)}
+                          disabled={busy}
+                          className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90 disabled:opacity-50"
+                          style={{ backgroundColor: '#6B21A8' }}
+                        >
+                          {busy ? 'Following…' : (isProtected ? 'Request' : 'Follow')}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
             </div>
           </div>
         </div>
