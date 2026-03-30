@@ -472,7 +472,7 @@ function AppHeader({
                         setHandleEditorOpen(true)
                       }}
                     >
-                      Edit handle
+                      {publicHandle?.trim() ? 'Change handle' : 'Set handle'}
                     </button>
                     <button
                       type="button"
@@ -2692,7 +2692,7 @@ function FavoritesSection({
   }
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1.5fr)]">
+    <div className="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.8fr)]">
       <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
         <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex items-center justify-between gap-2">
           <h3 className="text-sm font-medium text-gray-800">

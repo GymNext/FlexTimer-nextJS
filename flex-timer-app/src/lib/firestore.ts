@@ -273,6 +273,7 @@ export async function updateUserPublicHandle(userId: string, rawHandle: string |
   }
   const usersRef = adminDb.collection('users').doc(userId)
   const handleIndexRef = adminDb.collection('publicHandleIndex')
+  const publicProfileRef = adminDb.collection('publicUserProfiles').doc(userId)
   const userSnap = await usersRef.get()
   const userData = userSnap.data() as Record<string, unknown> | undefined
   const previousRaw = typeof userData?.publicHandle === 'string' ? userData.publicHandle : null
@@ -300,6 +301,15 @@ export async function updateUserPublicHandle(userId: string, rawHandle: string |
     }
 
     tx.update(usersRef, { publicHandle: normalized })
+    tx.set(
+      publicProfileRef,
+      {
+        userId,
+        publicHandle: normalized,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
 
     if (previousNormalized && previousNormalized !== normalized) {
       tx.delete(handleIndexRef.doc(previousNormalized))
