@@ -37,7 +37,9 @@ import {
   timerModeToDisplayString,
 } from '@/lib/json-workout-format'
 
-type TabId = 'favorites' | 'collections' | 'plans' | 'following'
+type MainNavId = 'home' | 'library' | 'planning'
+type LibrarySubTabId = 'favorites' | 'collections'
+type PlanningSubTabId = 'plans' | 'following'
 
 interface OverviewData {
   workouts: Workout[]
@@ -107,6 +109,9 @@ export default function HomePage() {
   const [overview, setOverview] = useState<OverviewData | null>(null)
   const [overviewLoading, setOverviewLoading] = useState(false)
   const [overviewError, setOverviewError] = useState<string | null>(null)
+
+  const [mainNav, setMainNav] = useState<MainNavId>('home')
+  const [mainNavDrawerOpen, setMainNavDrawerOpen] = useState(false)
 
   const resetToDefaultRef = useRef<(() => void) | null>(null)
 
@@ -205,10 +210,21 @@ export default function HomePage() {
         publicHandle={overview?.publicHandle}
         basicBio={overview?.basicBio}
         subscriptionTier={overview?.subscriptionLimits?.tier ?? 'basic'}
-        onLogoClick={() => resetToDefaultRef.current?.()}
+        onLogoClick={() => {
+          setMainNavDrawerOpen(false)
+          resetToDefaultRef.current?.()
+        }}
+        onOpenMainNav={() => setMainNavDrawerOpen(true)}
+        mainNavDrawerOpen={mainNavDrawerOpen}
         onProfileUpdated={(profile) =>
           setOverview((prev) => (prev ? { ...prev, ...profile } : prev))
         }
+      />
+      <MainNavDrawer
+        open={mainNavDrawerOpen}
+        onClose={() => setMainNavDrawerOpen(false)}
+        mainNav={mainNav}
+        setMainNav={setMainNav}
       />
       <section className="flex-1 max-w-6xl mx-auto w-full px-4 py-6">
         <UserAppLayout
@@ -217,6 +233,8 @@ export default function HomePage() {
           overviewLoading={overviewLoading}
           overviewError={overviewError}
           reloadOverview={() => loadOverview(user)}
+          mainNav={mainNav}
+          setMainNav={setMainNav}
           registerResetToDefault={(fn) => {
             resetToDefaultRef.current = fn
           }}
@@ -252,6 +270,8 @@ function AppHeader({
   basicBio,
   subscriptionTier = 'basic',
   onLogoClick,
+  onOpenMainNav,
+  mainNavDrawerOpen = false,
   onProfileUpdated,
 }: {
   user: User
@@ -259,6 +279,8 @@ function AppHeader({
   basicBio?: string | null
   subscriptionTier?: SubscriptionTier
   onLogoClick: () => void
+  onOpenMainNav?: () => void
+  mainNavDrawerOpen?: boolean
   onProfileUpdated: (profile: { publicHandle?: string | null; basicBio?: string | null }) => void
 }) {
   const [upgradePromptOpen, setUpgradePromptOpen] = useState(false)
@@ -358,32 +380,60 @@ function AppHeader({
   }
 
   return (
-    <header className="border-b border-gymnext-muted/30 bg-white">
+    <header className="relative z-[102] border-b border-gymnext-muted/30 bg-white">
       <div className="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between gap-4">
-        <button
-          type="button"
-          onClick={onLogoClick}
-          className="flex items-center gap-2 rounded-md hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-gymnext/50"
-          aria-label="Back to default view"
-        >
-          <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center bg-white">
-            <Image
-              src={headerIcon}
-              alt="Flex Timer"
-              width={32}
-              height={32}
-              className="h-8 w-8 object-contain"
-            />
-          </span>
-          <div className="flex flex-col items-start">
-            <span className="text-sm font-semibold text-gray-900">
-              GymNext Flex Timer
+        <div className="flex items-center gap-1 min-w-0">
+          {onOpenMainNav && (
+            <button
+              type="button"
+              onClick={onOpenMainNav}
+              className="shrink-0 rounded-md p-2 text-gray-700 hover:bg-gymnext-background focus:outline-none focus:ring-2 focus:ring-gymnext/50"
+              aria-label="Open navigation menu"
+              aria-expanded={mainNavDrawerOpen}
+              aria-controls="main-nav-drawer"
+            >
+              <svg
+                className="h-6 w-6"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={1.5}
+                stroke="currentColor"
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5"
+                />
+              </svg>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onLogoClick}
+            className="flex items-center gap-2 rounded-md hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-gymnext/50 min-w-0"
+            aria-label="Go to home"
+          >
+            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center bg-white">
+              <Image
+                src={headerIcon}
+                alt="Flex Timer"
+                width={32}
+                height={32}
+                className="h-8 w-8 object-contain"
+              />
             </span>
-            <span className="text-xs text-gray-500">
-              The world's most advanced interval timer
-            </span>
-          </div>
-        </button>
+            <div className="flex flex-col items-start min-w-0">
+              <span className="text-sm font-semibold text-gray-900 truncate">
+                GymNext Flex Timer
+              </span>
+              <span className="text-xs text-gray-500 truncate max-w-[12rem] sm:max-w-none">
+                The world's most advanced interval timer
+              </span>
+            </div>
+          </button>
+        </div>
         <div className="flex items-center gap-3">
           <div className="hidden sm:flex flex-col items-end text-right">
             <button
@@ -855,6 +905,8 @@ function UserAppLayout({
   overviewLoading,
   overviewError,
   reloadOverview,
+  mainNav,
+  setMainNav,
   registerResetToDefault,
 }: {
   user: User
@@ -862,9 +914,12 @@ function UserAppLayout({
   overviewLoading: boolean
   overviewError: string | null
   reloadOverview: () => void
+  mainNav: MainNavId
+  setMainNav: (id: MainNavId) => void
   registerResetToDefault: (fn: () => void) => void
 }) {
-  const [activeTab, setActiveTab] = useState<TabId>('favorites')
+  const [libraryTab, setLibraryTab] = useState<LibrarySubTabId>('favorites')
+  const [planningTab, setPlanningTab] = useState<PlanningSubTabId>('plans')
   const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null)
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
   const [selectedFollowingPlanId, setSelectedFollowingPlanId] = useState<string | null>(null)
@@ -1652,7 +1707,9 @@ function UserAppLayout({
 
   useEffect(() => {
     registerResetToDefault(() => {
-      setActiveTab('favorites')
+      setMainNav('home')
+      setLibraryTab('favorites')
+      setPlanningTab('plans')
       setSelectedCollectionId(null)
       setCollectionDetail(null)
       setSelectedPlanId(null)
@@ -1664,40 +1721,48 @@ function UserAppLayout({
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-end gap-3">
-        <div className="inline-flex rounded-md border border-gymnext-muted/40 bg-white p-0.5">
-          <TabButton
-            id="favorites"
-            active={activeTab === 'favorites'}
-            onClick={() => setActiveTab('favorites')}
-          >
-            Favorites
-          </TabButton>
-          <TabButton
-            id="collections"
-            active={activeTab === 'collections'}
-            onClick={() => setActiveTab('collections')}
-          >
-            Collections
-          </TabButton>
-          <TabButton
-            id="plans"
-            active={activeTab === 'plans'}
-            onClick={() => setActiveTab('plans')}
-          >
-            Planning
-          </TabButton>
-          <TabButton
-            id="following"
-            active={activeTab === 'following'}
-            onClick={() => {
-              setActiveTab('following')
-            }}
-          >
-            Following
-          </TabButton>
+      {(mainNav === 'library' || mainNav === 'planning') && (
+        <div
+          className="flex flex-wrap items-center justify-end gap-2"
+          role="navigation"
+          aria-label="Section tabs"
+        >
+          {mainNav === 'library' && (
+            <div className="inline-flex rounded-md border border-gymnext-muted/40 bg-white p-0.5">
+              <SubNavTab
+                active={libraryTab === 'favorites'}
+                onClick={() => setLibraryTab('favorites')}
+              >
+                Favorites
+              </SubNavTab>
+              <SubNavTab
+                active={libraryTab === 'collections'}
+                onClick={() => setLibraryTab('collections')}
+              >
+                Collections
+              </SubNavTab>
+            </div>
+          )}
+          {mainNav === 'planning' && (
+            <div className="inline-flex rounded-md border border-gymnext-muted/40 bg-white p-0.5">
+              <SubNavTab
+                active={planningTab === 'plans'}
+                onClick={() => setPlanningTab('plans')}
+              >
+                My Plans
+              </SubNavTab>
+              <SubNavTab
+                active={planningTab === 'following'}
+                onClick={() => setPlanningTab('following')}
+              >
+                Following Plans
+              </SubNavTab>
+            </div>
+          )}
         </div>
-      </div>
+      )}
+
+      {mainNav === 'home' && <HomeSection setMainNav={setMainNav} />}
 
       {overviewLoading && !overview && (
         <p className="text-sm text-gray-500">Loading your data…</p>
@@ -1717,7 +1782,7 @@ function UserAppLayout({
 
       {overview && (
         <>
-          {activeTab === 'favorites' && (
+          {mainNav === 'library' && libraryTab === 'favorites' && (
             <FavoritesSection
               favoritesCollection={favoritesCollection}
               favoriteWorkouts={favoriteWorkouts}
@@ -1747,7 +1812,7 @@ function UserAppLayout({
               favoritesCount={overview?.counts?.favorites ?? 0}
             />
           )}
-          {activeTab === 'collections' && (
+          {mainNav === 'library' && libraryTab === 'collections' && (
             <CollectionsSection
               collections={collectionsExcludingFavorites}
               collectionDetail={collectionDetail}
@@ -1776,9 +1841,9 @@ function UserAppLayout({
               timerDefaultRestDirection={overview?.timerDefaults?.restDirection}
             />
           )}
-          {(activeTab === 'plans' || activeTab === 'following') && (
+          {mainNav === 'planning' && (
             <PlansSection
-              viewMode={activeTab === 'following' ? 'following' : 'owned'}
+              viewMode={planningTab === 'following' ? 'following' : 'owned'}
               plans={sortedPlans}
               followingPlans={followingPlans}
               followingPlansLoading={followingPlansLoading}
@@ -1834,13 +1899,233 @@ function UserAppLayout({
   )
 }
 
-function TabButton({
-  id,
+function IconPlanningCalendar({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={1.5}
+      stroke="currentColor"
+      aria-hidden
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0121 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5a2.25 2.25 0 012.25 2.25v7.5m-16.5 0a.75.75 0 01.75-.75h2.25a.75.75 0 01.75.75v2.25a.75.75 0 01-.75.75h-2.25a.75.75 0 01-.75-.75v-2.25z"
+      />
+    </svg>
+  )
+}
+
+function IconLibraryBooks({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={1.5}
+      stroke="currentColor"
+      aria-hidden
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 018 18c-2.305 0-4.408.867-6 2.292m0-14.25v14.25"
+      />
+    </svg>
+  )
+}
+
+function IconHome({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={1.5}
+      stroke="currentColor"
+      aria-hidden
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"
+      />
+    </svg>
+  )
+}
+
+function HomeSection({ setMainNav }: { setMainNav: (id: MainNavId) => void }) {
+  return (
+    <div className="rounded-lg border border-gymnext-muted/30 bg-white p-6 shadow-sm">
+      <h2 className="text-sm font-semibold text-gray-900 mb-1">Home</h2>
+      <p className="text-xs text-gray-500 mb-4 max-w-xl">
+        Open a section to work with your workouts and collections, or manage plans and followed plans.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2 max-w-2xl">
+        <button
+          type="button"
+          onClick={() => setMainNav('planning')}
+          className="flex items-center gap-3 rounded-lg border border-gymnext-muted/40 bg-gymnext-background/40 px-4 py-4 text-left transition-colors hover:bg-gymnext-background hover:border-gymnext-muted/60 focus:outline-none focus:ring-2 focus:ring-gymnext/40"
+        >
+          <span
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-white text-gray-800 border border-gymnext-muted/30"
+            aria-hidden
+          >
+            <IconPlanningCalendar className="h-6 w-6" />
+          </span>
+          <span className="min-w-0">
+            <span className="block text-sm font-semibold text-gray-900">Planning</span>
+            <span className="block text-xs text-gray-600 mt-0.5">Your plans and followed plans</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setMainNav('library')}
+          className="flex items-center gap-3 rounded-lg border border-gymnext-muted/40 bg-gymnext-background/40 px-4 py-4 text-left transition-colors hover:bg-gymnext-background hover:border-gymnext-muted/60 focus:outline-none focus:ring-2 focus:ring-gymnext/40"
+        >
+          <span
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-white text-gray-800 border border-gymnext-muted/30"
+            aria-hidden
+          >
+            <IconLibraryBooks className="h-6 w-6" />
+          </span>
+          <span className="min-w-0">
+            <span className="block text-sm font-semibold text-gray-900">Library</span>
+            <span className="block text-xs text-gray-600 mt-0.5">Favorites and collections</span>
+          </span>
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function MainNavDrawer({
+  open,
+  onClose,
+  mainNav,
+  setMainNav,
+}: {
+  open: boolean
+  onClose: () => void
+  mainNav: MainNavId
+  setMainNav: (id: MainNavId) => void
+}) {
+  useEffect(() => {
+    if (!open) return
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = prevOverflow
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open, onClose])
+
+  if (!open) return null
+
+  const select = (id: MainNavId) => {
+    setMainNav(id)
+    onClose()
+  }
+
+  return createPortal(
+    <>
+      <div
+        className="fixed top-14 left-0 right-0 bottom-0 z-[100] bg-black/40"
+        aria-hidden
+        onClick={onClose}
+      />
+      <aside
+        id="main-nav-drawer"
+        className="fixed left-0 top-14 bottom-0 z-[101] flex w-[min(100vw-0.5rem,18.5rem)] max-w-[min(100vw-0.5rem,85vw)] flex-col bg-white shadow-xl border-r border-gymnext-muted/40"
+        role="dialog"
+        aria-modal="true"
+        aria-label="App sections"
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-gymnext-muted/30 px-3 py-2.5">
+          <span className="text-sm font-semibold text-gray-900">Sections</span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md p-1.5 text-gray-600 hover:bg-gymnext-background hover:text-gray-900"
+            aria-label="Close menu"
+          >
+            <svg
+              className="h-5 w-5"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+              aria-hidden
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div className="flex flex-col gap-2 p-3">
+          <button
+            type="button"
+            onClick={() => select('home')}
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+              mainNav === 'home'
+                ? 'text-white shadow-sm'
+                : 'text-gray-800 hover:bg-gymnext-background'
+            }`}
+            style={mainNav === 'home' ? { backgroundColor: '#6B21A8' } : undefined}
+            aria-current={mainNav === 'home' ? 'page' : undefined}
+          >
+            <IconHome className="h-5 w-5 shrink-0 opacity-90" />
+            Home
+          </button>
+          <button
+            type="button"
+            onClick={() => select('planning')}
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+              mainNav === 'planning'
+                ? 'text-white shadow-sm'
+                : 'text-gray-800 hover:bg-gymnext-background'
+            }`}
+            style={mainNav === 'planning' ? { backgroundColor: '#6B21A8' } : undefined}
+            aria-current={mainNav === 'planning' ? 'page' : undefined}
+          >
+            <IconPlanningCalendar className="h-5 w-5 shrink-0 opacity-90" />
+            Planning
+          </button>
+          <button
+            type="button"
+            onClick={() => select('library')}
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+              mainNav === 'library'
+                ? 'text-white shadow-sm'
+                : 'text-gray-800 hover:bg-gymnext-background'
+            }`}
+            style={mainNav === 'library' ? { backgroundColor: '#6B21A8' } : undefined}
+            aria-current={mainNav === 'library' ? 'page' : undefined}
+          >
+            <IconLibraryBooks className="h-5 w-5 shrink-0 opacity-90" />
+            Library
+          </button>
+        </div>
+      </aside>
+    </>,
+    document.body
+  )
+}
+
+function SubNavTab({
   active,
   onClick,
   children,
 }: {
-  id: TabId
   active: boolean
   onClick: () => void
   children: React.ReactNode
@@ -1849,12 +2134,13 @@ function TabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`px-3 py-1.5 text-xs font-medium rounded-md ${
+      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
         active
           ? 'text-white shadow-sm'
           : 'text-gray-700 hover:bg-gymnext-background'
       }`}
       style={active ? { backgroundColor: '#6B21A8' } : undefined}
+      aria-current={active ? 'true' : undefined}
     >
       {children}
     </button>
@@ -6497,7 +6783,9 @@ function PlansSection({
         <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
           <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex items-center justify-between gap-2">
             <h3 className="text-sm font-medium text-gray-800">
-              {isFollowingMode ? `Following (${followingPlans.length})` : `Plans ${plansLabel}`}
+              {isFollowingMode
+                ? `Following Plans (${followingPlans.length})`
+                : `My Plans ${plansLabel}`}
             </h3>
             {!isFollowingMode && (
               <button
