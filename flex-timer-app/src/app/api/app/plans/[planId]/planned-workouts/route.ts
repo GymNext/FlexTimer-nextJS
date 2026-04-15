@@ -2,12 +2,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireUserAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
 import { createPlannedWorkout, getPlannedWorkouts, userOwnsActiveWorkoutPlan } from '@/lib/firestore'
+import { isValidIanaTimeZone } from '@/lib/planned-workout-day-timestamp'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
 
 type RouteParams = Promise<{ planId: string }>
 
 /**
- * GET /api/app/plans/[planId]/planned-workouts?from=YYYY-MM-DD&to=YYYY-MM-DD
+ * GET /api/app/plans/[planId]/planned-workouts?from=YYYY-MM-DD&to=YYYY-MM-DD&planDayTimeZone=IANA (optional)
  * Returns planned workouts for the signed-in user's plan in the given date range.
  */
 export async function GET(
@@ -46,7 +47,14 @@ export async function GET(
     if (!(await userOwnsActiveWorkoutPlan(uid, planId))) {
       return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
     }
-    const plannedWorkouts = await getPlannedWorkouts(uid, planId, fromDate, toDate)
+    const planDayTzRaw = searchParams.get('planDayTimeZone')
+    const planDayTimeZoneId =
+      typeof planDayTzRaw === 'string' && planDayTzRaw.trim() && isValidIanaTimeZone(planDayTzRaw.trim())
+        ? planDayTzRaw.trim()
+        : null
+    const plannedWorkouts = await getPlannedWorkouts(uid, planId, fromDate, toDate, {
+      planDayTimeZoneId,
+    })
     return NextResponse.json({ plannedWorkouts })
   } catch (err) {
     console.error('[app planned-workouts GET]', err)
@@ -61,7 +69,7 @@ export async function GET(
  * POST /api/app/plans/[planId]/planned-workouts
  * Create a planned workout for the signed-in user's plan.
  * plannedWorkoutId is auto-generated. planId and day come from the URL and body.
- * Body: { day: string (YYYY-MM-DD), ordinal?: number (default: end of list), workout: object, sourceWorkoutId?: string | null, clientToday?: string }.
+ * Body: { day: string (YYYY-MM-DD), ordinal?: number (default: end of list), workout: object, sourceWorkoutId?: string | null, clientToday?: string, planDayTimeZone?: string (IANA) }.
  * - sourceWorkoutId: set to the workout id when adding from a favorite or collection; null when creating from scratch.
  * - ordinal: 0-based index; use count of existing workouts for that plan/day to append at end.
  */
@@ -106,6 +114,10 @@ export async function POST(
       body.workout != null && typeof body.workout === 'object'
         ? (body.workout as Record<string, unknown>)
         : undefined
+    const planDayTzBody =
+      typeof body.planDayTimeZone === 'string' && body.planDayTimeZone.trim() && isValidIanaTimeZone(body.planDayTimeZone.trim())
+        ? body.planDayTimeZone.trim()
+        : null
 
     if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
       return NextResponse.json({ error: 'day required (YYYY-MM-DD)' }, { status: 400 })
@@ -135,6 +147,7 @@ export async function POST(
       ordinal: ordinal ?? 0,
       workout,
       sourceWorkoutId: sourceWorkoutId ?? undefined,
+      planDayTimeZoneId: planDayTzBody,
     })
     return NextResponse.json(plannedWorkout)
   } catch (err) {

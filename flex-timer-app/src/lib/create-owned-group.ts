@@ -29,6 +29,8 @@ export type CreateOwnedGroupParams = {
   city: string | null
   /** When set, creates a subgroup under this owned group id (also written to `publicGroupProfiles`). */
   parentGroupId?: string | null
+  /** When true (default false), non-owner members may share library content for private/restricted hubs. Ignored for public. */
+  membersMayShareContent?: boolean
   organizationTypeId?: string | null
   gymTypeId?: string | null
   trainingModeId?: string | null
@@ -92,6 +94,9 @@ export async function createOwnedGroup(params: CreateOwnedGroupParams): Promise<
   const region = trimOrNull(params.region)
   const city = trimOrNull(params.city)
 
+  const membersMayShareStored =
+    params.joinPolicy === 'public' ? false : Boolean(params.membersMayShareContent)
+
   const groupData: Record<string, unknown> = {
     groupId,
     ownerUserId: params.ownerUserId,
@@ -100,6 +105,7 @@ export async function createOwnedGroup(params: CreateOwnedGroupParams): Promise<
     handle: handleForStore,
     handleKey,
     name,
+    membersMayShareContent: membersMayShareStored,
     updatedAt: now,
   }
 
@@ -148,6 +154,7 @@ export async function createOwnedGroup(params: CreateOwnedGroupParams): Promise<
     nameSearch: nameSearch ?? null,
     handle: handleForStore,
     handleKey,
+    membersMayShareContent: membersMayShareStored,
     updatedAt: now,
   }
 

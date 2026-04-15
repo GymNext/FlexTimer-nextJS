@@ -9,6 +9,7 @@ import {
   updatePlannedWorkoutWorkoutMetadata,
   userOwnsActiveWorkoutPlan,
 } from '@/lib/firestore'
+import { isValidIanaTimeZone } from '@/lib/planned-workout-day-timestamp'
 
 type RouteParams = Promise<{ planId: string; plannedWorkoutId: string }>
 
@@ -141,6 +142,12 @@ export async function PATCH(
       typeof body.day === 'string'
         ? (body.day as string).slice(0, 10)
         : undefined
+    const planDayTzBody =
+      typeof (body as { planDayTimeZone?: unknown }).planDayTimeZone === 'string' &&
+      String((body as { planDayTimeZone?: string }).planDayTimeZone).trim() &&
+      isValidIanaTimeZone(String((body as { planDayTimeZone?: string }).planDayTimeZone).trim())
+        ? String((body as { planDayTimeZone?: string }).planDayTimeZone).trim()
+        : null
     const ordinal =
       typeof body.ordinal === 'number'
         ? (body.ordinal as number)
@@ -201,6 +208,7 @@ export async function PATCH(
       day,
       ordinal,
       planId: planIdPatch,
+      planDayTimeZoneId: planDayTzBody,
     })
     const updated = await getPlannedWorkout(uid, plannedWorkoutId)
     return NextResponse.json(updated ?? plannedWorkout)

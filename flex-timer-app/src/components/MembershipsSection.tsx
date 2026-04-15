@@ -16,6 +16,8 @@ type ListItem = {
   name: string
   groupType: AppGroupType | null
   handle: string | null
+  joinPolicy?: string
+  membersMayShareContent?: boolean
 }
 
 type HubMemberRow = {
@@ -39,6 +41,8 @@ type Detail = ListItem & {
   ownerUserId?: string | null
   /** ISO timestamp from the viewer's `groups/{id}/members/{uid}` doc (`joinedAt` or `createdAt`). */
   memberJoinedAt?: string | null
+  /** From hub settings: whether members (not only the owner) may share library content to the hub. */
+  membersMayShareContent?: boolean
 }
 
 function hubOwnerUserIdFromDetail(detail: Detail | null): string | null {
@@ -596,6 +600,24 @@ export function MembershipsSection({ user }: { user: User }) {
                   </div>
                 </div>
               )}
+              <div className="space-y-3">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Member content sharing
+                </h4>
+                <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                  {detail.joinPolicy === 'public' ? (
+                    <p className="text-sm text-gray-700">
+                      Not available on public hubs. Only the hub owner can share content to this hub
+                    </p>
+                  ) : detail.membersMayShareContent === true ? (
+                    <p className="text-sm text-gray-700">
+                      Members can share workouts, collections, and plans to this hub
+                    </p>
+                  ) : (
+                    <p className="text-sm text-gray-700">Only the hub owner can share content to this hub</p>
+                  )}
+                </div>
+              </div>
               {detail.joinPolicy !== 'public' && (
                 <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
                   <h4 className="mb-2 shrink-0 text-xs font-semibold uppercase tracking-wide text-gray-500">

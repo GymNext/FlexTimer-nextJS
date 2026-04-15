@@ -36,6 +36,26 @@ function handleForDisplayGroup(groupDoc: Record<string, unknown>): string | null
   return display || null
 }
 
+/** Index `handle`: `@handle` for root hubs (iOS parity); empty for sub hubs. */
+function handleForMembershipIndex(
+  groupDoc: Record<string, unknown>,
+  publicProfileDoc: Record<string, unknown>,
+): string {
+  if (str(groupDoc, 'parentGroupId').trim()) return ''
+  const raw = str(publicProfileDoc, 'handle').trim() || str(groupDoc, 'handle').trim()
+  if (!raw) return ''
+  return raw.startsWith('@') ? raw : `@${raw}`
+}
+
+function groupTypeForMembershipIndex(
+  groupDoc: Record<string, unknown>,
+  publicProfileDoc: Record<string, unknown>,
+): string {
+  const validated = groupTypeFromData(groupDoc) ?? groupTypeFromData(publicProfileDoc)
+  if (validated) return validated
+  return str(publicProfileDoc, 'groupType').trim() || str(groupDoc, 'groupType').trim()
+}
+
 function membershipIndexBoolish(d: Record<string, unknown>, key: string): boolean {
   const v = d[key]
   if (typeof v === 'boolean') return v
@@ -71,11 +91,10 @@ export function setGroupMembershipIndexForMemberInBatch(
   const name = str(pd, 'name').trim() || str(gd, 'name').trim()
   if (!name) return
 
-  const groupType = str(pd, 'groupType').trim() || str(gd, 'groupType').trim()
-  const handle = str(pd, 'handle').trim() || handleForDisplayGroup(gd) || ''
+  const groupType = groupTypeForMembershipIndex(gd, pd)
+  const handle = handleForMembershipIndex(gd, pd)
   const photoUrl = pickGroupPhotoUrl(gd, pd)
   const idxParent = str(gd, 'parentGroupId').trim()
-  const joinPolicyRaw = str(gd, 'joinPolicy').trim() || joinPolicy
 
   const idxRef = adminDb.collection('users').doc(uid).collection(USER_GROUP_MEMBERSHIP_INDEX).doc(gid)
   batch.set(
@@ -83,14 +102,14 @@ export function setGroupMembershipIndexForMemberInBatch(
     {
       groupId: gid,
       groupType,
+      handle,
+      joinPolicy,
+      membersMayShareContent: memberShareIdx,
+      name,
+      parentGroupId: idxParent ? idxParent : null,
+      photoUrl: photoUrl ?? null,
       role: 'member',
       status: 'active',
-      name,
-      handle,
-      photoUrl: photoUrl ?? null,
-      parentGroupId: idxParent ? idxParent : null,
-      joinPolicy: joinPolicyRaw,
-      membersMayShareContent: memberShareIdx,
       updatedAt: params.updatedAt,
     },
     { merge: true },
@@ -687,4 +706,52 @@ export async function rejectPendingHubInvite(inviteeUserId: string, groupId: str
     throw new RespondGroupInviteError('Invalid invitation', 400)
   }
   await inviteRef.delete()
+}
+
+/**
+ * After the owner updates hub join policy or `membersMayShareContent`, push the effective flag and
+ * `joinPolicy` onto each active non-owner member’s `groupMembershipIndex` doc (used by plan share checks).
+ */
+export async function refreshGroupMembershipIndexShareSettings(params: {
+  groupId: string
+  ownerUserId: string
+  joinPolicy: AppGroupJoinPolicy
+  effectiveMembersMayShareContent: boolean
+}): Promise<void> {
+  if (!adminDb) return
+  const gid = params.groupId.trim()
+  const ownerUserId = params.ownerUserId.trim()
+  if (!gid || !ownerUserId) return
+
+  const now = FieldValue.serverTimestamp()
+  const membersSnap = await adminDb.collection(GROUPS).doc(gid).collection('members').get()
+  const sliceSize = 450
+  let batch = adminDb.batch()
+  let n = 0
+
+  for (const doc of membersSnap.docs) {
+    const memberUid = doc.id
+    if (memberUid === ownerUserId) continue
+    const mData = doc.data() as Record<string, unknown>
+    const st = typeof mData.status === 'string' ? mData.status.trim() : ''
+    if (st !== 'active') continue
+
+    const idxRef = adminDb.collection('users').doc(memberUid).collection(USER_GROUP_MEMBERSHIP_INDEX).doc(gid)
+    batch.set(
+      idxRef,
+      {
+        membersMayShareContent: params.effectiveMembersMayShareContent,
+        joinPolicy: params.joinPolicy,
+        updatedAt: now,
+      },
+      { merge: true },
+    )
+    n++
+    if (n >= sliceSize) {
+      await batch.commit()
+      batch = adminDb.batch()
+      n = 0
+    }
+  }
+  if (n > 0) await batch.commit()
 }

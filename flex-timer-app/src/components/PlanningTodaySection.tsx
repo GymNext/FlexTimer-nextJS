@@ -8,6 +8,7 @@ import {
   getWorkoutDetailDescription,
   getWorkoutDisplayName,
 } from '@/lib/json-workout-format'
+import { planDayTimeZoneQuerySuffix } from '@/lib/client-plan-day-timezone'
 
 function trimWorkoutDetailsForPreview(entry: PlanDayEntry): string {
   if (entry.type === 'MultiSegmentWorkout') return ''
@@ -117,7 +118,7 @@ export function PlanningTodaySection({
       const headers = { Authorization: `Bearer ${token}` }
       const ownedFetches = plans.map(async (plan) => {
         const res = await fetch(
-          `/api/app/plans/${encodeURIComponent(plan.id)}/planned-workouts?from=${encodeURIComponent(day)}&to=${encodeURIComponent(day)}`,
+          `/api/app/plans/${encodeURIComponent(plan.id)}/planned-workouts?from=${encodeURIComponent(day)}&to=${encodeURIComponent(day)}${planDayTimeZoneQuerySuffix()}`,
           { headers }
         )
         if (!res.ok) {
@@ -131,7 +132,7 @@ export function PlanningTodaySection({
       })
       const followedFetches = followedPlans.map(async ({ subscriptionDocumentId, plan }) => {
         const res = await fetch(
-          `/api/app/following-plans/${encodeURIComponent(subscriptionDocumentId)}/planned-workouts?from=${encodeURIComponent(day)}&to=${encodeURIComponent(day)}`,
+          `/api/app/following-plans/${encodeURIComponent(subscriptionDocumentId)}/planned-workouts?from=${encodeURIComponent(day)}&to=${encodeURIComponent(day)}${planDayTimeZoneQuerySuffix()}`,
           { headers }
         )
         if (!res.ok) {

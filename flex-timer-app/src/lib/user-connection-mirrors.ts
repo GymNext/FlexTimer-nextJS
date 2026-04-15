@@ -19,7 +19,12 @@ const WORKOUT_GROUP_SHARES_ROOT = 'workoutGroupShares'
 const WORKOUT_USER_SHARES_ROOT = 'workoutUserShares'
 const COLLECTION_USER_SHARES_ROOT = 'collectionUserShares'
 const PLAN_USER_SHARES_ROOT = 'planUserShares'
+const PLAN_GROUP_SHARES_ROOT = 'planGroupShares'
 const SHARE_ITEMS_SUB = 'items'
+
+/** Top-level fields on `sharedPlans` mirrors (matches iOS / `plan-share.ts`). */
+const PLAN_SHARE_ALLOW_EDITING_FIELD = 'allowEditing'
+const PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD = 'hideFutureWorkouts'
 
 const BATCH = 450
 
@@ -50,6 +55,21 @@ function groupMirrorEnvelope(groupId: string, ownerUid: string, payload: Record<
     payload,
     updatedAt: FieldValue.serverTimestamp(),
   }
+}
+
+async function listGroupIdsForPlanShare(ownerUid: string, planId: string): Promise<string[]> {
+  if (!adminDb) return []
+  const oid = planId.trim()
+  const uid = ownerUid.trim()
+  if (!oid || !uid) return []
+  const snap = await adminDb
+    .collection('users')
+    .doc(uid)
+    .collection(PLAN_GROUP_SHARES_ROOT)
+    .doc(oid)
+    .collection(SHARE_ITEMS_SUB)
+    .get()
+  return snap.docs.map((d) => d.id.trim()).filter(Boolean)
 }
 
 async function listGroupIdsForWorkoutShare(ownerUid: string, workoutId: string): Promise<string[]> {
@@ -301,15 +321,82 @@ export async function syncPlanUserConnectionMirrors(ownerUserId: string, planId:
     const payload = { ...(pSnap.data() ?? {}) } as Record<string, unknown>
     sanitizeTrainingIntentOnPlanPayloadForFirestoreWrite(payload)
     const mirrorId = groupShareMirrorDocumentId(uid, pid)
-    const ops = peers.map((peer) => ({
-      ref: db.collection('users').doc(peer).collection(SHARED_PLANS_SUB).doc(mirrorId),
-      data: userConnectionMirrorEnvelope(peer, uid, payload),
-      merge: true,
-    }))
+    const itemsCol = db.collection('users').doc(uid).collection(PLAN_USER_SHARES_ROOT).doc(pid).collection(SHARE_ITEMS_SUB)
+    const itemSnaps = await Promise.all(peers.map((peer) => itemsCol.doc(peer).get()))
+    const ops = peers.map((peer, i) => {
+      const d = itemSnaps[i]?.exists ? (itemSnaps[i].data() as Record<string, unknown>) : {}
+      const allowRaw = d[PLAN_SHARE_ALLOW_EDITING_FIELD]
+      const allowEditing = typeof allowRaw === 'boolean' ? allowRaw : false
+      const hideRaw = d[PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]
+      const hideFutureWorkouts = typeof hideRaw === 'boolean' ? hideRaw : true
+      return {
+        ref: db.collection('users').doc(peer).collection(SHARED_PLANS_SUB).doc(mirrorId),
+        data: {
+          ...userConnectionMirrorEnvelope(peer, uid, payload),
+          [PLAN_SHARE_ALLOW_EDITING_FIELD]: allowEditing,
+          [PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]: hideFutureWorkouts,
+        },
+        merge: true,
+      }
+    })
     await commitInBatches(ops)
   } catch (e) {
     logMirrorErr('syncPlanUserConnectionMirrors', e)
   }
+}
+
+/**
+ * Push canonical plan fields to each `groups/{gid}/sharedPlans/{mirrorId}` for hubs in
+ * `users/{owner}/planGroupShares/{planId}/items/*`, preserving per-hub `hideFutureWorkouts` from each item doc
+ * (iOS `_syncPlanMirrorsForCurrentUser` group branch).
+ */
+export async function syncPlanGroupShareMirrors(ownerUserId: string, planId: string): Promise<void> {
+  const db = adminDb
+  if (!db) return
+  try {
+    const uid = ownerUserId.trim()
+    const pid = planId.trim()
+    if (!uid || !pid) return
+
+    const gids = await listGroupIdsForPlanShare(uid, pid)
+    if (gids.length === 0) return
+
+    const pRef = db.collection('users').doc(uid).collection(USER_COLLECTIONS.workoutPlans).doc(pid)
+    const pSnap = await pRef.get()
+    if (!pSnap.exists) {
+      return
+    }
+    const payload = { ...(pSnap.data() ?? {}) } as Record<string, unknown>
+    sanitizeTrainingIntentOnPlanPayloadForFirestoreWrite(payload)
+    const mirrorId = groupShareMirrorDocumentId(uid, pid)
+    const itemsCol = db.collection('users').doc(uid).collection(PLAN_GROUP_SHARES_ROOT).doc(pid).collection(SHARE_ITEMS_SUB)
+    const itemSnaps = await Promise.all(gids.map((gid) => itemsCol.doc(gid).get()))
+    const ops = gids.map((gid, i) => {
+      const d = itemSnaps[i]?.exists ? (itemSnaps[i].data() as Record<string, unknown>) : {}
+      const hideRaw = d[PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]
+      const hideFutureWorkouts = typeof hideRaw === 'boolean' ? hideRaw : true
+      return {
+        ref: db.collection(GROUPS_COLLECTION).doc(gid).collection(SHARED_PLANS_SUB).doc(mirrorId),
+        data: {
+          ...groupMirrorEnvelope(gid, uid, payload),
+          [PLAN_SHARE_ALLOW_EDITING_FIELD]: false,
+          [PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]: hideFutureWorkouts,
+        },
+        merge: true,
+      }
+    })
+    await commitInBatches(ops)
+  } catch (e) {
+    logMirrorErr('syncPlanGroupShareMirrors', e)
+  }
+}
+
+/** After the owner’s canonical `workoutPlans/{planId}` doc changes, refresh all hub + connection `sharedPlans` mirrors. */
+export async function syncPlanShareMirrorsForOwner(ownerUserId: string, planId: string): Promise<void> {
+  await Promise.all([
+    syncPlanUserConnectionMirrors(ownerUserId, planId),
+    syncPlanGroupShareMirrors(ownerUserId, planId),
+  ])
 }
 
 export async function deletePlanUserConnectionMirrors(ownerUserId: string, planId: string): Promise<void> {

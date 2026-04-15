@@ -22,6 +22,8 @@ import {
   CalendarRange,
   ChevronDown,
   ChevronUp,
+  Droplet,
+  Flame,
   Star,
   LayoutGrid,
   Library,
@@ -29,6 +31,7 @@ import {
   Newspaper,
   Settings,
   Share2,
+  Trash2,
   Users,
 } from 'lucide-react'
 import headerIcon from './icon.png'
@@ -44,13 +47,14 @@ import {
   type User,
 } from 'firebase/auth'
 import { auth } from '@/lib/firebase'
+import { planDayTimeZoneBody, planDayTimeZoneQuerySuffix } from '@/lib/client-plan-day-timezone'
 import {
   PENDING_INVITES_NAV_CHANGED_EVENT,
   usePendingInvitationsNavBadges,
 } from '@/hooks/usePendingInvitationsNavBadges'
 import { useHubJoinRequestNavBadges } from '@/hooks/useHubJoinRequestNavBadges'
 import { NavCountBadge } from '@/components/NavCountBadge'
-import { workoutToPlanDayEntry } from '@/lib/workout-to-plan-day-entry'
+import { sharedBookmarkWorkoutToPlanDayEntry, workoutToPlanDayEntry } from '@/lib/workout-to-plan-day-entry'
 import { ConnectFeedSection } from '@/components/ConnectFeedSection'
 import { ConnectSharedContentSection } from '@/components/ConnectSharedContentSection'
 import { LibraryBookmarksSection } from '@/components/LibraryBookmarksSection'
@@ -93,6 +97,7 @@ import {
   getCollectionDisplayDescription,
 } from '@/lib/json-workout-format'
 import { formatSharedOnLine } from '@/lib/format-shared-at'
+import type { SharedCollectionBookmarkRow, SharedWorkoutBookmarkRow } from '@/lib/bookmarks'
 
 type MainNavId = 'home' | 'library' | 'planning' | 'connect' | 'connections' | 'settings' | 'support'
 type LibrarySubTabId = 'favorites' | 'collections' | 'bookmarks'
@@ -121,6 +126,8 @@ type FollowingPlanRow = {
   remotePlanIsPersonal?: boolean
   /** 0 = private training, 1 = group training; omitted when personal or plan unavailable. */
   remotePlanTrainingIntent?: 0 | 1
+  /** True when the owner’s plan doc is missing or soft-deleted (follow entry is stale). */
+  remotePlanUnavailable?: boolean
 }
 
 function normalizeFollowingPlanRows(raw: FollowingPlanRow[] | undefined): FollowingPlanRow[] {
@@ -128,7 +135,52 @@ function normalizeFollowingPlanRows(raw: FollowingPlanRow[] | undefined): Follow
     ...r,
     shareAllowEditing: Boolean(r.shareAllowEditing),
     shareHideFutureWorkouts: r.shareHideFutureWorkouts !== false,
+    remotePlanUnavailable: Boolean(r.remotePlanUnavailable),
   }))
+}
+
+/** When the primary column is a followed plan, planned-workout reads/writes use the following-plans API (coach calendar); the server enforces edit permission. */
+function plannedWorkoutsCollectionUrl(
+  targetPlanId: string,
+  plannedWorkoutId: string | undefined,
+  o: {
+    selectedPlanId: string | null
+    selectedFollowingSubscriptionId: string | null
+    followingRow: FollowingPlanRow | null | undefined
+  }
+): string {
+  const useFollowing =
+    Boolean(o.selectedFollowingSubscriptionId) &&
+    Boolean(o.selectedPlanId) &&
+    targetPlanId === o.selectedPlanId
+  if (useFollowing && o.selectedFollowingSubscriptionId) {
+    const base = `/api/app/following-plans/${encodeURIComponent(o.selectedFollowingSubscriptionId)}/planned-workouts`
+    return plannedWorkoutId ? `${base}/${encodeURIComponent(plannedWorkoutId)}` : base
+  }
+  const base = `/api/app/plans/${encodeURIComponent(targetPlanId)}/planned-workouts`
+  return plannedWorkoutId ? `${base}/${encodeURIComponent(plannedWorkoutId)}` : base
+}
+
+function plannedWorkoutsRangeUrl(
+  targetPlanId: string,
+  fromDate: string,
+  toDate: string,
+  tzSuffix: string,
+  o: {
+    selectedPlanId: string | null
+    selectedFollowingSubscriptionId: string | null
+    followingRow: FollowingPlanRow | null | undefined
+  }
+): string {
+  const qs = `?from=${encodeURIComponent(fromDate)}&to=${encodeURIComponent(toDate)}${tzSuffix}`
+  const useFollowing =
+    Boolean(o.selectedFollowingSubscriptionId) &&
+    Boolean(o.selectedPlanId) &&
+    targetPlanId === o.selectedPlanId
+  if (useFollowing && o.selectedFollowingSubscriptionId) {
+    return `/api/app/following-plans/${encodeURIComponent(o.selectedFollowingSubscriptionId)}/planned-workouts${qs}`
+  }
+  return `/api/app/plans/${encodeURIComponent(targetPlanId)}/planned-workouts${qs}`
 }
 type ConnectionsSubTabId = 'connections' | 'memberships'
 
@@ -1210,6 +1262,26 @@ function UserAppLayout({
     [weekStartSecondary, planDayCountSecondary]
   )
 
+  const selectedFollowingRowForLayout = useMemo(
+    () =>
+      selectedFollowingSubscriptionId === null
+        ? null
+        : followingPlans.find((f) => f.subscriptionDocumentId === selectedFollowingSubscriptionId) ?? null,
+    [followingPlans, selectedFollowingSubscriptionId]
+  )
+
+  const planScheduleReadOnly =
+    selectedFollowingSubscriptionId !== null && !selectedFollowingRowForLayout?.shareAllowEditing
+
+  const plannedWorkoutsApiCtx = useMemo(
+    () => ({
+      selectedPlanId,
+      selectedFollowingSubscriptionId,
+      followingRow: selectedFollowingRowForLayout,
+    }),
+    [selectedPlanId, selectedFollowingSubscriptionId, selectedFollowingRowForLayout]
+  )
+
   useEffect(() => {
     setOptimisticPlannedWorkouts(null)
   }, [selectedPlanId, weekStart, planDayCount])
@@ -1898,12 +1970,12 @@ function UserAppLayout({
     try {
       const res = followingSubId
         ? await authedFetch(
-            `/api/app/following-plans/${encodeURIComponent(followingSubId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+            `/api/app/following-plans/${encodeURIComponent(followingSubId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}${planDayTimeZoneQuerySuffix()}`
           )
         : await authedFetch(
             `/api/app/plans/${encodeURIComponent(
               ownedPlanId!
-            )}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+            )}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}${planDayTimeZoneQuerySuffix()}`
           )
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
@@ -1936,7 +2008,7 @@ function UserAppLayout({
     try {
       if (selectedPlanId) {
         const res = await authedFetch(
-          `/api/app/plans/${encodeURIComponent(selectedPlanId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+          `/api/app/plans/${encodeURIComponent(selectedPlanId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}${planDayTimeZoneQuerySuffix()}`
         )
         if (res.ok) {
           const data = (await res.json()) as { plannedWorkouts?: PlannedWorkout[] }
@@ -1949,7 +2021,7 @@ function UserAppLayout({
         selectedPlanIdSecondary && selectedPlanIdSecondary !== selectedPlanId ? selectedPlanIdSecondary : null
       if (secId) {
         const res2 = await authedFetch(
-          `/api/app/plans/${encodeURIComponent(secId)}/planned-workouts?from=${encodeURIComponent(weekStartSecondary)}&to=${encodeURIComponent(weekEndSecondary)}`
+          `/api/app/plans/${encodeURIComponent(secId)}/planned-workouts?from=${encodeURIComponent(weekStartSecondary)}&to=${encodeURIComponent(weekEndSecondary)}${planDayTimeZoneQuerySuffix()}`
         )
         if (res2.ok) {
           const data2 = (await res2.json()) as { plannedWorkouts?: PlannedWorkout[] }
@@ -2041,7 +2113,7 @@ function UserAppLayout({
     direction: 'up' | 'down',
     planId?: string | null
   ) {
-    if (selectedFollowingSubscriptionId) return
+    if (planScheduleReadOnly) return
     const pid = planId ?? selectedPlanId
     if (!pid) return
     const columnByDay = pid === selectedPlanId ? byDay : pid === selectedPlanIdSecondary ? byDaySecondary : null
@@ -2054,16 +2126,11 @@ function UserAppLayout({
     try {
       await Promise.all(
         items.map((pw, idx) =>
-          authedFetch(
-            `/api/app/plans/${encodeURIComponent(
-              pw.planId
-            )}/planned-workouts/${encodeURIComponent(pw.id)}`,
-            {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ordinal: idx }),
-            }
-          )
+          authedFetch(plannedWorkoutsCollectionUrl(pw.planId, pw.id, plannedWorkoutsApiCtx), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ordinal: idx }),
+          })
         )
       )
       await refreshPlannedWorkoutsDisplay()
@@ -2078,7 +2145,7 @@ function UserAppLayout({
     toIndex: number,
     planId?: string | null
   ) {
-    if (selectedFollowingSubscriptionId) return
+    if (planScheduleReadOnly) return
     const pid = planId ?? selectedPlanId
     if (!pid) return
     const columnByDay = pid === selectedPlanId ? byDay : pid === selectedPlanIdSecondary ? byDaySecondary : null
@@ -2103,14 +2170,11 @@ function UserAppLayout({
       setOptimisticPlannedWorkouts(fullList)
       Promise.all(
         items.map((pw, idx) =>
-          authedFetch(
-            `/api/app/plans/${encodeURIComponent(pw.planId)}/planned-workouts/${encodeURIComponent(pw.id)}`,
-            {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ordinal: idx }),
-            }
-          )
+          authedFetch(plannedWorkoutsCollectionUrl(pw.planId, pw.id, plannedWorkoutsApiCtx), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ordinal: idx }),
+          })
         )
       )
         .then(() => {
@@ -2124,14 +2188,11 @@ function UserAppLayout({
     } else {
       Promise.all(
         items.map((pw, idx) =>
-          authedFetch(
-            `/api/app/plans/${encodeURIComponent(pw.planId)}/planned-workouts/${encodeURIComponent(pw.id)}`,
-            {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ordinal: idx }),
-            }
-          )
+          authedFetch(plannedWorkoutsCollectionUrl(pw.planId, pw.id, plannedWorkoutsApiCtx), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ordinal: idx }),
+          })
         )
       )
         .then(() => void refreshPlannedWorkoutsDisplay())
@@ -2142,14 +2203,11 @@ function UserAppLayout({
   }
 
   async function handleDeletePlanned(pw: PlannedWorkout) {
-    if (selectedFollowingSubscriptionId) return
+    if (planScheduleReadOnly) return
     try {
-      await authedFetch(
-        `/api/app/plans/${encodeURIComponent(
-          pw.planId
-        )}/planned-workouts/${encodeURIComponent(pw.id)}`,
-        { method: 'DELETE' }
-      )
+      await authedFetch(plannedWorkoutsCollectionUrl(pw.planId, pw.id, plannedWorkoutsApiCtx), {
+        method: 'DELETE',
+      })
       await refreshPlannedWorkoutsDisplay()
     } catch (e) {
       console.error('[planned delete]', e)
@@ -2190,10 +2248,10 @@ function UserAppLayout({
         if (dualPlanAhead) {
           const [res1, res2] = await Promise.all([
             authedFetch(
-              `/api/app/plans/${encodeURIComponent(selectedPlanId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+              `/api/app/plans/${encodeURIComponent(selectedPlanId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}${planDayTimeZoneQuerySuffix()}`
             ),
             authedFetch(
-              `/api/app/plans/${encodeURIComponent(selectedPlanIdSecondary!)}/planned-workouts?from=${encodeURIComponent(weekStartSecondary)}&to=${encodeURIComponent(weekEndSecondary)}`
+              `/api/app/plans/${encodeURIComponent(selectedPlanIdSecondary!)}/planned-workouts?from=${encodeURIComponent(weekStartSecondary)}&to=${encodeURIComponent(weekEndSecondary)}${planDayTimeZoneQuerySuffix()}`
             ),
           ])
           if (!res1.ok) {
@@ -2215,7 +2273,7 @@ function UserAppLayout({
         } else if (planAheadOwned) {
           if (selectedPlanId) {
             const res = await authedFetch(
-              `/api/app/plans/${encodeURIComponent(selectedPlanId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+              `/api/app/plans/${encodeURIComponent(selectedPlanId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}${planDayTimeZoneQuerySuffix()}`
             )
             const payload = (await res.json().catch(() => ({}))) as { error?: string; plannedWorkouts?: PlannedWorkout[] }
             if (!res.ok) {
@@ -2232,7 +2290,7 @@ function UserAppLayout({
               : null
           if (secId) {
             const res2 = await authedFetch(
-              `/api/app/plans/${encodeURIComponent(secId)}/planned-workouts?from=${encodeURIComponent(weekStartSecondary)}&to=${encodeURIComponent(weekEndSecondary)}`
+              `/api/app/plans/${encodeURIComponent(secId)}/planned-workouts?from=${encodeURIComponent(weekStartSecondary)}&to=${encodeURIComponent(weekEndSecondary)}${planDayTimeZoneQuerySuffix()}`
             )
             const payload2 = (await res2.json().catch(() => ({}))) as {
               error?: string
@@ -2250,12 +2308,12 @@ function UserAppLayout({
         } else {
           const res = selectedFollowingSubscriptionId
             ? await authedFetch(
-                `/api/app/following-plans/${encodeURIComponent(selectedFollowingSubscriptionId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+                `/api/app/following-plans/${encodeURIComponent(selectedFollowingSubscriptionId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}${planDayTimeZoneQuerySuffix()}`
               )
             : await authedFetch(
                 `/api/app/plans/${encodeURIComponent(
                   selectedPlanId!
-                )}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+                )}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}${planDayTimeZoneQuerySuffix()}`
               )
           if (!res.ok) {
             const data = await res.json().catch(() => ({}))
@@ -2385,12 +2443,24 @@ function UserAppLayout({
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col gap-6">
       {mainNav === 'home' && (
-        <div className="rounded-lg border border-gymnext-muted/30 bg-white p-6 shadow-sm max-w-xl">
-          <h2 className="text-sm font-semibold text-gray-900">Welcome</h2>
-          <p className="mt-2 text-sm text-gray-600">
-            Use the menu on the left for Planning, Connect, Library, account sections, or settings. Choose the
-            app name in the header anytime to return to this welcome screen.
-          </p>
+        <div className="max-w-2xl rounded-lg border border-gymnext-muted/30 bg-white p-6 shadow-sm">
+          <h2 className="text-sm font-semibold text-gray-900">Welcome to Flex Timer!</h2>
+          <div className="mt-3 space-y-3 text-sm text-gray-600 leading-relaxed">
+            <p>
+              You’re now using the web app—your hub for managing everything with more space, speed, and control.
+              While the mobile app is perfect for workouts on the go, the desktop experience makes it easier to view,
+              edit, and organize your data all in one place.
+            </p>
+            <p>
+              From here, you can quickly update workouts and collections, manage workout plans, and manage your
+              connections and memberships. Everything is fully connected, so any updates you make here are instantly
+              reflected in your mobile app.
+            </p>
+            <p>
+              Whether you’re fine-tuning details or managing your entire setup, Flex Timer on the web gives you the
+              flexibility to do it all—seamlessly.
+            </p>
+          </div>
         </div>
       )}
       {mainNav === 'connect' && (
@@ -2614,6 +2684,8 @@ function UserAppLayout({
               collectionsExcludingFavorites={collectionsExcludingFavorites}
               workoutsById={overview?.workouts ? new Map(overview.workouts.map((w) => [w.id, w])) : new Map()}
               timerDefaults={overview?.timerDefaults}
+              planScheduleReadOnly={planScheduleReadOnly}
+              selectedFollowingPlanRow={selectedFollowingRowForLayout}
             />
           )}
         </div>
@@ -7208,17 +7280,22 @@ function orderFollowingRows(
   rows: FollowingPlanRow[],
   optimisticIds: string[] | null
 ): FollowingPlanRow[] {
+  /** Private / personal follows first; group-training follows second (matches owned plan sections). */
+  const groupRank = (r: FollowingPlanRow) => (followedPlanIsGroupTraining(r) ? 1 : 0)
   if (!optimisticIds?.length) {
-    return [...rows].sort(
-      (a, b) =>
-        a.ordinal - b.ordinal || a.subscriptionDocumentId.localeCompare(b.subscriptionDocumentId)
-    )
+    return [...rows].sort((a, b) => {
+      const tier = groupRank(a) - groupRank(b)
+      if (tier !== 0) return tier
+      return a.ordinal - b.ordinal || a.subscriptionDocumentId.localeCompare(b.subscriptionDocumentId)
+    })
   }
   const orderMap = new Map(optimisticIds.map((id, i) => [id, i]))
   return [...rows].sort((a, b) => {
+    const tier = groupRank(a) - groupRank(b)
+    if (tier !== 0) return tier
     const ai = orderMap.get(a.subscriptionDocumentId) ?? 1e9
     const bi = orderMap.get(b.subscriptionDocumentId) ?? 1e9
-    return ai - bi
+    return ai - bi || a.subscriptionDocumentId.localeCompare(b.subscriptionDocumentId)
   })
 }
 
@@ -7276,6 +7353,8 @@ function PlansSection({
   collectionsExcludingFavorites,
   workoutsById,
   timerDefaults,
+  planScheduleReadOnly,
+  selectedFollowingPlanRow,
 }: {
   /** Shown in the left panel header (e.g. "Plans" vs "Plan Ahead"); UI is otherwise the same for now. */
   listSurfaceTitle?: string
@@ -7363,13 +7442,41 @@ function PlansSection({
     cooldownDuration?: number
     cooldownDirection?: boolean
   }
+  /** Subscribed primary column: no write access unless connection share allows editing. */
+  planScheduleReadOnly: boolean
+  /** Resolved row for the selected subscription (share flags); null when not following a plan. */
+  selectedFollowingPlanRow: FollowingPlanRow | null
 }) {
+  const selectedFollowingRow = selectedFollowingPlanRow
+  const plannedApiCtx = useMemo(
+    () => ({
+      selectedPlanId,
+      selectedFollowingSubscriptionId,
+      followingRow: selectedFollowingPlanRow,
+    }),
+    [selectedPlanId, selectedFollowingSubscriptionId, selectedFollowingPlanRow]
+  )
+
   const [createOpen, setCreateOpen] = useState(false)
   const [addWorkoutSource, setAddWorkoutSource] = useState<
-    'choice' | 'favorites' | 'collection' | 'createNew'
+    'choice' | 'favorites' | 'collection' | 'bookmarks' | 'createNew'
   >('choice')
   const [expandedCollectionId, setExpandedCollectionId] = useState<string | null>(null)
   const [selectedWorkoutForPlan, setSelectedWorkoutForPlan] = useState<Workout | null>(null)
+  /** Add from Bookmarks: list from GET /api/app/bookmarks (null = not loaded for this dialog visit). */
+  const [bookmarksPlanList, setBookmarksPlanList] = useState<{
+    collections: SharedCollectionBookmarkRow[]
+    workouts: SharedWorkoutBookmarkRow[]
+  } | null>(null)
+  const [bookmarksPlanListLoading, setBookmarksPlanListLoading] = useState(false)
+  const [bookmarksPlanListError, setBookmarksPlanListError] = useState<string | null>(null)
+  const [expandedBookmarkCollectionRow, setExpandedBookmarkCollectionRow] =
+    useState<SharedCollectionBookmarkRow | null>(null)
+  const [bookmarkCollectionWorkouts, setBookmarkCollectionWorkouts] = useState<Workout[]>([])
+  const [bookmarkCollectionDetailLoading, setBookmarkCollectionDetailLoading] = useState(false)
+  const [bookmarkCollectionDetailError, setBookmarkCollectionDetailError] = useState<string | null>(null)
+  const [bookmarkCollectionWorkoutsTruncated, setBookmarkCollectionWorkoutsTruncated] = useState(false)
+  const [selectedBookmarkWorkoutRow, setSelectedBookmarkWorkoutRow] = useState<SharedWorkoutBookmarkRow | null>(null)
   const [createPlanOpen, setCreatePlanOpen] = useState(false)
   /** Create flow: personal plan vs coach plan private/group training (maps to API isPersonal + trainingIntent). */
   const [createPlanKind, setCreatePlanKind] = useState<
@@ -7465,6 +7572,7 @@ function PlansSection({
   const [planSharingConnectionProfileUserId, setPlanSharingConnectionProfileUserId] = useState<string | null>(null)
   const [stopFollowingConfirmOpen, setStopFollowingConfirmOpen] = useState(false)
   const [stopFollowingBusy, setStopFollowingBusy] = useState(false)
+  const [followingRemoveBusyId, setFollowingRemoveBusyId] = useState<string | null>(null)
   const [expandedPlannedWorkoutId, setExpandedPlannedWorkoutId] = useState<string | null>(null)
   const [draggedPlanned, setDraggedPlanned] = useState<{
     dateKey: string
@@ -7657,18 +7765,11 @@ function PlansSection({
     void onReorderSubscriptions(newIds)
   }
 
-  const selectedFollowingRow =
-    selectedFollowingSubscriptionId === null
-      ? null
-      : followingPlans.find((f) => f.subscriptionDocumentId === selectedFollowingSubscriptionId) ?? null
-
   const selectedPlan: WorkoutPlan | null = selectedFollowingRow
     ? followingSubscriptionToWorkoutPlan(selectedFollowingRow)
     : selectedPlanId === null
       ? null
       : plans.find((p) => p.id === selectedPlanId) ?? null
-
-  const planScheduleReadOnly = selectedFollowingSubscriptionId !== null
 
   useEffect(() => {
     if (rightPanelMode === 'schedule' || !setSelectedPlanIdSecondary) return
@@ -7682,6 +7783,13 @@ function PlansSection({
     setAddWorkoutSource('choice')
     setExpandedCollectionId(null)
     setSelectedWorkoutForPlan(null)
+    setBookmarksPlanList(null)
+    setBookmarksPlanListError(null)
+    setExpandedBookmarkCollectionRow(null)
+    setBookmarkCollectionWorkouts([])
+    setBookmarkCollectionWorkoutsTruncated(false)
+    setBookmarkCollectionDetailError(null)
+    setSelectedBookmarkWorkoutRow(null)
     setExpandedPlannedWorkoutId(null)
     setPlannedWorkoutMenuId(null)
     setPlannedWorkoutMenuAnchorRect(null)
@@ -7804,7 +7912,7 @@ function PlansSection({
 
   const planSharesBelowHeader = useMemo(() => {
     if (rightPanelMode === 'schedule') return null
-    if (planScheduleReadOnly || !selectedPlanId) return null
+    if (selectedFollowingSubscriptionId || !selectedPlanId) return null
     if (selectedPlan?.isPersonal) return null
     const allowsHubShare = selectedPlan?.trainingIntent === 1
     const sharingHeading = (
@@ -7876,9 +7984,9 @@ function PlansSection({
                         </button>
                         {hubShareLine ? <p className="text-xs text-gray-500">{hubShareLine}</p> : null}
                         <p className="text-xs text-gray-600">
-                          {h.hideFutureWorkouts
-                            ? 'Cannot view future workouts (sees up to today).'
-                            : 'Can view future workouts (sees beyond today).'}
+                          {!h.hideFutureWorkouts
+                            ? 'Future workouts are visible on dates after today.'
+                            : 'Future workouts are hidden (shared calendar stops at today).'}
                         </p>
                       </div>
                       <div className="flex shrink-0 items-start gap-1">
@@ -7910,7 +8018,7 @@ function PlansSection({
                               >
                                 {h.hideFutureWorkouts
                                   ? 'Show future workouts'
-                                  : 'Hide future workouts'}
+                                  : "Don't show future workouts"}
                               </button>
                             </div>
                           ) : null}
@@ -7986,9 +8094,9 @@ function PlansSection({
                           </p>
                         ) : (
                           <p className="text-xs text-gray-600">
-                            {p.hideFutureWorkouts
-                              ? 'Cannot view future workouts (sees up to today).'
-                              : 'Can view future workouts (sees beyond today).'}
+                            {!p.hideFutureWorkouts
+                              ? 'Future workouts are visible on dates after today.'
+                              : 'Future workouts are hidden (shared calendar stops at today).'}
                           </p>
                         )}
                       </div>
@@ -8039,7 +8147,7 @@ function PlansSection({
                                 >
                                   {p.hideFutureWorkouts
                                     ? 'Show future workouts'
-                                    : 'Hide future workouts'}
+                                    : "Don't show future workouts"}
                                 </button>
                               )}
                             </div>
@@ -8074,7 +8182,7 @@ function PlansSection({
     )
   }, [
     rightPanelMode,
-    planScheduleReadOnly,
+    selectedFollowingSubscriptionId,
     selectedPlanId,
     planSharesLoading,
     planSharesError,
@@ -8208,7 +8316,7 @@ function PlansSection({
         body.workoutDetails = editScheduleWorkoutDetails.trim() || null
       }
       const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(editSchedulePlannedWorkout.planId)}/planned-workouts/${encodeURIComponent(editSchedulePlannedWorkout.id)}`,
+        plannedWorkoutsCollectionUrl(editSchedulePlannedWorkout.planId, editSchedulePlannedWorkout.id, plannedApiCtx),
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -8242,7 +8350,7 @@ function PlansSection({
         workoutDescription: editPlannedDescription.trim() || null,
       }
       const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(editPlannedWorkout.planId)}/planned-workouts/${encodeURIComponent(editPlannedWorkout.id)}`,
+        plannedWorkoutsCollectionUrl(editPlannedWorkout.planId, editPlannedWorkout.id, plannedApiCtx),
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -8281,14 +8389,16 @@ function PlansSection({
         typeof w.timerMode === 'number'
           ? w
           : { ...w, timerMode: (Array.isArray(w.timerModes) ? (w.timerModes as number[])[0] : 1) }
-      const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(copyTargetPlanId)}/planned-workouts`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ day: copyTargetDay.slice(0, 10), ordinal: 0, workout }),
-        }
-      )
+      const res = await authedFetch(plannedWorkoutsCollectionUrl(copyTargetPlanId, undefined, plannedApiCtx), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          day: copyTargetDay.slice(0, 10),
+          ordinal: 0,
+          workout,
+          ...planDayTimeZoneBody(),
+        }),
+      })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || 'Failed to copy workout')
@@ -8322,7 +8432,13 @@ function PlansSection({
         return
       }
       const countRes = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(copyAllTargetPlanId)}/planned-workouts?from=${encodeURIComponent(dayStr)}&to=${encodeURIComponent(dayStr)}`
+        plannedWorkoutsRangeUrl(
+          copyAllTargetPlanId,
+          dayStr,
+          dayStr,
+          planDayTimeZoneQuerySuffix(),
+          plannedApiCtx
+        )
       )
       if (!countRes.ok) {
         const data = await countRes.json().catch(() => ({}))
@@ -8338,18 +8454,16 @@ function PlansSection({
           typeof w.timerMode === 'number'
             ? w
             : { ...w, timerMode: (Array.isArray(w.timerModes) ? (w.timerModes as number[])[0] : 1) }
-        const res = await authedFetch(
-          `/api/app/plans/${encodeURIComponent(copyAllTargetPlanId)}/planned-workouts`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              day: dayStr,
-              ordinal: baseOrdinal + i,
-              workout,
-            }),
-          }
-        )
+        const res = await authedFetch(plannedWorkoutsCollectionUrl(copyAllTargetPlanId, undefined, plannedApiCtx), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            day: dayStr,
+            ordinal: baseOrdinal + i,
+            workout,
+            ...planDayTimeZoneBody(),
+          }),
+        })
         if (!res.ok) {
           const data = await res.json().catch(() => ({}))
           throw new Error(
@@ -8410,7 +8524,13 @@ function PlansSection({
         return
       }
       const countRes = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(targetPlanId)}/planned-workouts?from=${encodeURIComponent(dayStr)}&to=${encodeURIComponent(dayStr)}`
+        plannedWorkoutsRangeUrl(
+          targetPlanId,
+          dayStr,
+          dayStr,
+          planDayTimeZoneQuerySuffix(),
+          plannedApiCtx
+        )
       )
       if (!countRes.ok) {
         const data = await countRes.json().catch(() => ({}))
@@ -8426,18 +8546,16 @@ function PlansSection({
           typeof w.timerMode === 'number'
             ? w
             : { ...w, timerMode: (Array.isArray(w.timerModes) ? (w.timerModes as number[])[0] : 1) }
-        const res = await authedFetch(
-          `/api/app/plans/${encodeURIComponent(targetPlanId)}/planned-workouts`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              day: dayStr,
-              ordinal: baseOrdinal + i,
-              workout,
-            }),
-          }
-        )
+        const res = await authedFetch(plannedWorkoutsCollectionUrl(targetPlanId, undefined, plannedApiCtx), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            day: dayStr,
+            ordinal: baseOrdinal + i,
+            workout,
+            ...planDayTimeZoneBody(),
+          }),
+        })
         if (!res.ok) {
           const data = await res.json().catch(() => ({}))
           throw new Error(
@@ -8498,7 +8616,13 @@ function PlansSection({
       }
       const moveTargetPlanId = moveAllSourcePlanId ?? selectedPlan.id
       const countRes = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(moveTargetPlanId)}/planned-workouts?from=${encodeURIComponent(dayStr)}&to=${encodeURIComponent(dayStr)}`
+        plannedWorkoutsRangeUrl(
+          moveTargetPlanId,
+          dayStr,
+          dayStr,
+          planDayTimeZoneQuerySuffix(),
+          plannedApiCtx
+        )
       )
       if (!countRes.ok) {
         const data = await countRes.json().catch(() => ({}))
@@ -8509,15 +8633,12 @@ function PlansSection({
 
       for (let i = 0; i < sourceItems.length; i++) {
         const pw = sourceItems[i]!
-        const body = { day: dayStr, ordinal: baseOrdinal + i }
-        const res = await authedFetch(
-          `/api/app/plans/${encodeURIComponent(pw.planId)}/planned-workouts/${encodeURIComponent(pw.id)}`,
-          {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          }
-        )
+        const body = { day: dayStr, ordinal: baseOrdinal + i, ...planDayTimeZoneBody() }
+        const res = await authedFetch(plannedWorkoutsCollectionUrl(pw.planId, pw.id, plannedApiCtx), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
         if (!res.ok) {
           const data = await res.json().catch(() => ({}))
           throw new Error(
@@ -8549,11 +8670,11 @@ function PlansSection({
     setMoveBusy(true)
     try {
       const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(selectedPlan.id)}/planned-workouts/${encodeURIComponent(movePlannedWorkout.id)}`,
+        plannedWorkoutsCollectionUrl(selectedPlan.id, movePlannedWorkout.id, plannedApiCtx),
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ day }),
+          body: JSON.stringify({ day, ...planDayTimeZoneBody() }),
         }
       )
       if (!res.ok) {
@@ -8578,6 +8699,90 @@ function PlansSection({
     }
     return fetch(input, { ...init, headers })
   }
+
+  useEffect(() => {
+    if (!createOpen || addWorkoutSource !== 'bookmarks') return
+    let cancelled = false
+    setBookmarksPlanListLoading(true)
+    setBookmarksPlanListError(null)
+    ;(async () => {
+      try {
+        const res = await authedFetch('/api/app/bookmarks')
+        const j = (await res.json().catch(() => ({}))) as {
+          error?: string
+          collections?: SharedCollectionBookmarkRow[]
+          workouts?: SharedWorkoutBookmarkRow[]
+        }
+        if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`)
+        if (cancelled) return
+        setBookmarksPlanList({
+          collections: Array.isArray(j.collections) ? j.collections : [],
+          workouts: Array.isArray(j.workouts) ? j.workouts : [],
+        })
+      } catch (e) {
+        if (!cancelled) {
+          setBookmarksPlanListError(e instanceof Error ? e.message : 'Failed to load bookmarks')
+          setBookmarksPlanList({ collections: [], workouts: [] })
+        }
+      } finally {
+        if (!cancelled) setBookmarksPlanListLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- authedFetch uses latest user token
+  }, [createOpen, addWorkoutSource])
+
+  useEffect(() => {
+    if (!expandedBookmarkCollectionRow) {
+      setBookmarkCollectionWorkouts([])
+      setBookmarkCollectionWorkoutsTruncated(false)
+      setBookmarkCollectionDetailError(null)
+      setBookmarkCollectionDetailLoading(false)
+      return
+    }
+    let cancelled = false
+    const row = expandedBookmarkCollectionRow
+    setBookmarkCollectionDetailLoading(true)
+    setBookmarkCollectionDetailError(null)
+    setBookmarkCollectionWorkouts([])
+    ;(async () => {
+      try {
+        const qs = new URLSearchParams()
+        if (row.mirrorGroupId?.trim()) qs.set('groupId', row.mirrorGroupId.trim())
+        const q = qs.toString()
+        const res = await authedFetch(
+          `/api/app/shared-content/${encodeURIComponent(row.ownerUserId)}/collection/${encodeURIComponent(row.remoteCollectionId)}${q ? `?${q}` : ''}`,
+        )
+        const json = (await res.json().catch(() => ({}))) as {
+          error?: string
+          kind?: string
+          workouts?: Workout[]
+          workoutsTruncated?: boolean
+        }
+        if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+        if (json.kind !== 'collection' || !Array.isArray(json.workouts)) {
+          throw new Error('Unexpected response')
+        }
+        if (!cancelled) {
+          setBookmarkCollectionWorkouts(json.workouts)
+          setBookmarkCollectionWorkoutsTruncated(Boolean(json.workoutsTruncated))
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setBookmarkCollectionDetailError(e instanceof Error ? e.message : 'Failed to load collection')
+          setBookmarkCollectionWorkouts([])
+        }
+      } finally {
+        if (!cancelled) setBookmarkCollectionDetailLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- authedFetch uses latest user token
+  }, [expandedBookmarkCollectionRow])
 
   useEffect(() => {
     setStopFollowingConfirmOpen(false)
@@ -8639,11 +8844,43 @@ function PlansSection({
       setPlanAdminMoreOpen(false)
       setSelectedFollowingSubscriptionId(null)
       await reloadFollowingPlans?.()
-      toast.success('Your subscription to this plan has ended.')
+      toast.success('You are no longer following this plan.')
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Could not unsubscribe')
+      toast.error(e instanceof Error ? e.message : 'Could not unfollow')
     } finally {
       setStopFollowingBusy(false)
+    }
+  }
+
+  async function removeFollowingSubscriptionWithConfirm(subscriptionDocumentId: string) {
+    if (
+      !window.confirm(
+        'Remove this follow? The coach’s plan is no longer available at this link. You can follow again later if it returns.',
+      )
+    ) {
+      return
+    }
+    setFollowingRemoveBusyId(subscriptionDocumentId)
+    try {
+      const res = await authedFetch(
+        `/api/app/following-plans/${encodeURIComponent(subscriptionDocumentId)}`,
+        { method: 'DELETE' },
+      )
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(j.error || `HTTP ${res.status}`)
+      }
+      setPlanAdminMoreOpen(false)
+      setStopFollowingConfirmOpen(false)
+      if (selectedFollowingSubscriptionId === subscriptionDocumentId) {
+        setSelectedFollowingSubscriptionId(null)
+      }
+      await reloadFollowingPlans?.()
+      toast.success('Removed from Following.')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not remove follow')
+    } finally {
+      setFollowingRemoveBusyId(null)
     }
   }
 
@@ -8793,20 +9030,18 @@ function PlansSection({
     try {
       const dayKey = createDate.slice(0, 10)
       const ordinal = (byDayForTarget[dayKey] ?? []).length
-      const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(targetPlanId)}/planned-workouts`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            day: createDate,
-            ordinal,
-            workout: workoutToPlanDayEntry(workout),
-            sourceWorkoutId: workout.id,
-            clientToday: todayYmd,
-          }),
-        }
-      )
+      const res = await authedFetch(plannedWorkoutsCollectionUrl(targetPlanId, undefined, plannedApiCtx), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          day: createDate,
+          ordinal,
+          workout: workoutToPlanDayEntry(workout),
+          sourceWorkoutId: workout.id,
+          clientToday: todayYmd,
+          ...planDayTimeZoneBody(),
+        }),
+      })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || `HTTP ${res.status}`)
@@ -8815,6 +9050,63 @@ function PlansSection({
       setAddWorkoutSource('choice')
       setExpandedCollectionId(null)
       setSelectedWorkoutForPlan(null)
+      setBookmarksPlanList(null)
+      setBookmarksPlanListError(null)
+      setExpandedBookmarkCollectionRow(null)
+      setBookmarkCollectionWorkouts([])
+      setBookmarkCollectionWorkoutsTruncated(false)
+      setBookmarkCollectionDetailError(null)
+      setSelectedBookmarkWorkoutRow(null)
+      setScheduleAddTargetPlanId(null)
+      reloadPlanned()
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : 'Failed to add to plan')
+    } finally {
+      setCreateBusy(false)
+    }
+  }
+
+  /** Add from shared bookmarks: snapshot only (`sourceWorkoutId` null); name never prefixed with "Copy of ". */
+  async function addPlannedFromBookmarkWorkout(workout: Workout) {
+    if (planScheduleReadOnly) return
+    const targetPlanId = scheduleAddTargetPlanId ?? selectedPlanId ?? selectedPlanIdSecondary ?? selectedPlan?.id
+    if (!targetPlanId) return
+    const byDayForTarget =
+      selectedPlanIdSecondary && targetPlanId === selectedPlanIdSecondary
+        ? scheduleSecondByDay ?? {}
+        : byDay
+    setCreateBusy(true)
+    setCreateError(null)
+    try {
+      const dayKey = createDate.slice(0, 10)
+      const ordinal = (byDayForTarget[dayKey] ?? []).length
+      const res = await authedFetch(plannedWorkoutsCollectionUrl(targetPlanId, undefined, plannedApiCtx), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          day: createDate,
+          ordinal,
+          workout: sharedBookmarkWorkoutToPlanDayEntry(workout),
+          sourceWorkoutId: null,
+          clientToday: todayYmd,
+          ...planDayTimeZoneBody(),
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${res.status}`)
+      }
+      setCreateOpen(false)
+      setAddWorkoutSource('choice')
+      setExpandedCollectionId(null)
+      setSelectedWorkoutForPlan(null)
+      setBookmarksPlanList(null)
+      setBookmarksPlanListError(null)
+      setExpandedBookmarkCollectionRow(null)
+      setBookmarkCollectionWorkouts([])
+      setBookmarkCollectionWorkoutsTruncated(false)
+      setBookmarkCollectionDetailError(null)
+      setSelectedBookmarkWorkoutRow(null)
       setScheduleAddTargetPlanId(null)
       reloadPlanned()
     } catch (e) {
@@ -8856,22 +9148,18 @@ function PlansSection({
       )
       const dayKey = createDate.slice(0, 10)
       const ordinal = (byDayForTarget[dayKey] ?? []).length
-      const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(
-          targetPlanId
-        )}/planned-workouts`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            day: createDate,
-            ordinal,
-            workout,
-            sourceWorkoutId: null,
-            clientToday: todayYmd,
-          }),
-        }
-      )
+      const res = await authedFetch(plannedWorkoutsCollectionUrl(targetPlanId, undefined, plannedApiCtx), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          day: createDate,
+          ordinal,
+          workout,
+          sourceWorkoutId: null,
+          clientToday: todayYmd,
+          ...planDayTimeZoneBody(),
+        }),
+      })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || `HTTP ${res.status}`)
@@ -8880,7 +9168,7 @@ function PlansSection({
       const hasMeta = createPlannedName.trim() || createPlannedDescription.trim() || createPlannedDetails.trim()
       if (created?.id && hasMeta) {
         const patchRes = await authedFetch(
-          `/api/app/plans/${encodeURIComponent(targetPlanId)}/planned-workouts/${encodeURIComponent(created.id)}`,
+          plannedWorkoutsCollectionUrl(targetPlanId, created.id, plannedApiCtx),
           {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -8898,6 +9186,13 @@ function PlansSection({
       }
       setCreateOpen(false)
       setAddWorkoutSource('choice')
+      setBookmarksPlanList(null)
+      setBookmarksPlanListError(null)
+      setExpandedBookmarkCollectionRow(null)
+      setBookmarkCollectionWorkouts([])
+      setBookmarkCollectionWorkoutsTruncated(false)
+      setBookmarkCollectionDetailError(null)
+      setSelectedBookmarkWorkoutRow(null)
       setCreateOptions({})
       setCreateNewNameStep(false)
       setCreatePlannedName('')
@@ -8914,6 +9209,80 @@ function PlansSection({
     }
   }
 
+  /** Choice screen: add Warmup (10) or Cooldown (11) using timer defaults (duration + direction). */
+  async function addPlannedQuickWarmupCooldown(mode: 10 | 11) {
+    if (planScheduleReadOnly) return
+    if (!canAddPlannedForSelectedDate) return
+    const targetPlanId = scheduleAddTargetPlanId ?? selectedPlanId ?? selectedPlanIdSecondary ?? selectedPlan?.id
+    if (!targetPlanId) return
+    const byDayForTarget =
+      selectedPlanIdSecondary && targetPlanId === selectedPlanIdSecondary
+        ? scheduleSecondByDay ?? {}
+        : byDay
+    const opts = getDefaultOptionsForMode(
+      mode,
+      timerDefaults?.direction,
+      timerDefaults?.restDirection,
+      timerDefaults?.warmupDuration,
+      timerDefaults?.warmupDirection,
+      timerDefaults?.cooldownDuration,
+      timerDefaults?.cooldownDirection
+    )
+    if (!hasValidDurationForMode(mode, opts, parseDurationInput)) {
+      setCreateError(
+        mode === 10
+          ? 'Warmup needs a duration greater than 0:00. Check Timer settings defaults.'
+          : 'Cooldown needs a duration greater than 0:00. Check Timer settings defaults.'
+      )
+      return
+    }
+    setCreateError(null)
+    setCreateBusy(true)
+    try {
+      const workout = buildWorkoutFromCreateForm(mode, opts, parseDurationInput)
+      const dayKey = createDate.slice(0, 10)
+      const ordinal = (byDayForTarget[dayKey] ?? []).length
+      const res = await authedFetch(plannedWorkoutsCollectionUrl(targetPlanId, undefined, plannedApiCtx), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          day: createDate,
+          ordinal,
+          workout,
+          sourceWorkoutId: null,
+          clientToday: todayYmd,
+          ...planDayTimeZoneBody(),
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${res.status}`)
+      }
+      setCreateOpen(false)
+      setAddWorkoutSource('choice')
+      setExpandedCollectionId(null)
+      setSelectedWorkoutForPlan(null)
+      setBookmarksPlanList(null)
+      setBookmarksPlanListError(null)
+      setExpandedBookmarkCollectionRow(null)
+      setBookmarkCollectionWorkouts([])
+      setBookmarkCollectionWorkoutsTruncated(false)
+      setBookmarkCollectionDetailError(null)
+      setSelectedBookmarkWorkoutRow(null)
+      setCreateOptions({})
+      setCreateNewNameStep(false)
+      setCreatePlannedName('')
+      setCreatePlannedDescription('')
+      setCreatePlannedDetails('')
+      setScheduleAddTargetPlanId(null)
+      reloadPlanned()
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : 'Failed to add to plan')
+    } finally {
+      setCreateBusy(false)
+    }
+  }
+
   const scheduleWeekColumns = useMemo(() => {
     if (rightPanelMode !== 'schedule') {
       return [] as {
@@ -8922,6 +9291,7 @@ function PlansSection({
         excludePlanId: string | null
         byDayMap: Record<string, PlannedWorkout[]>
         headerPlan: WorkoutPlan | null
+        subscriptionScheduleRow: FollowingPlanRow | null
         columnWeekStart: string
         setColumnWeekStart: (value: string) => void
         columnWeekEnd: string
@@ -8930,13 +9300,9 @@ function PlansSection({
         setColumnPlanViewMode: (mode: 'week' | '3day' | '1day') => void
       }[]
     }
-    const followingRowForSchedule =
-      selectedFollowingSubscriptionId === null
-        ? null
-        : followingPlans.find((f) => f.subscriptionDocumentId === selectedFollowingSubscriptionId) ?? null
     const primaryPlan =
-      followingRowForSchedule != null
-        ? followingSubscriptionToWorkoutPlan(followingRowForSchedule)
+      selectedFollowingRow != null
+        ? followingSubscriptionToWorkoutPlan(selectedFollowingRow)
         : selectedPlanId
           ? plans.find((p) => p.id === selectedPlanId) ?? null
           : null
@@ -8951,6 +9317,7 @@ function PlansSection({
         excludePlanId: secondaryPlan?.id ?? null,
         byDayMap: byDay,
         headerPlan: primaryPlan,
+        subscriptionScheduleRow: selectedFollowingRow,
         columnWeekStart: weekStart,
         setColumnWeekStart: setWeekStart,
         columnWeekEnd: weekEnd,
@@ -8964,6 +9331,7 @@ function PlansSection({
         excludePlanId: primaryPlan?.id ?? null,
         byDayMap: secondaryPlan ? (scheduleSecondByDay ?? {}) : {},
         headerPlan: secondaryPlan,
+        subscriptionScheduleRow: null,
         columnWeekStart: weekStartSecondary,
         setColumnWeekStart: setWeekStartSecondary,
         columnWeekEnd: weekEndSecondary,
@@ -8995,6 +9363,7 @@ function PlansSection({
     setPlanViewModeSecondary,
     selectedFollowingSubscriptionId,
     followingPlans,
+    selectedFollowingRow,
   ])
 
   return (
@@ -9271,6 +9640,7 @@ function PlansSection({
                 {orderedFollowingPlans.map((row, index) => {
                   const fp = followingSubscriptionToWorkoutPlan(row)
                   const isSelected = selectedFollowingSubscriptionId === row.subscriptionDocumentId
+                  const isDead = row.remotePlanUnavailable === true
                   return (
                     <Fragment key={row.subscriptionDocumentId}>
                       {subscriptionDropBeforeIndex === index && (
@@ -9295,16 +9665,9 @@ function PlansSection({
                         </li>
                       )}
                       <li
-                        className={`pl-3 pr-4 py-3 flex items-center gap-3 cursor-pointer bg-white ${
-                          index > 0 ? 'border-t border-gray-200' : ''
-                        } ${isSelected ? '' : 'hover:bg-gray-100'} ${
-                          subscriptionDragIndex === index ? 'opacity-50' : ''
-                        }`}
-                        onClick={() =>
-                          setSelectedFollowingSubscriptionId(
-                            isSelected ? null : row.subscriptionDocumentId
-                          )
-                        }
+                        className={`bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${
+                          isDead ? 'bg-gray-50/90' : ''
+                        } ${subscriptionDragIndex === index ? 'opacity-50' : ''}`}
                         onDragOver={(e) => {
                           e.preventDefault()
                           e.dataTransfer.dropEffect = 'move'
@@ -9332,50 +9695,94 @@ function PlansSection({
                           )
                         }}
                       >
-                        <span
-                          className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem]"
-                          style={{ backgroundColor: planListStripeColor(isSelected) }}
-                          aria-hidden
-                        />
-                        <span
-                          draggable={Boolean(onReorderSubscriptions)}
-                          onDragStart={(e) => {
-                            if (!onReorderSubscriptions) return
-                            e.dataTransfer.effectAllowed = 'move'
-                            e.dataTransfer.setData('text/plain', row.subscriptionDocumentId)
-                            setSubscriptionDragIndex(index)
-                            setSubscriptionDropBeforeIndex(null)
-                          }}
-                          onDragEnd={() => {
-                            setSubscriptionDragIndex(null)
-                            setSubscriptionDropBeforeIndex(null)
-                          }}
-                          className={`w-6 shrink-0 flex items-center justify-center touch-none ${
-                            onReorderSubscriptions
-                              ? 'text-gray-400 cursor-grab active:cursor-grabbing'
-                              : 'text-gray-200 cursor-default'
-                          }`}
-                          aria-hidden
-                          title={onReorderSubscriptions ? 'Drag to reorder' : undefined}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <DragReorderGrip />
-                        </span>
-                        {isSelected && (
-                          <span className="shrink-0 text-teal-700" aria-label="Active plan">
-                            ✓
-                          </span>
-                        )}
-                        <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                          <PlanKindIcon kind={planVisualKindFromPlan(fp)} selected={isSelected} />
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium text-gray-900 truncate">
-                              {fp.workoutPlanName}
-                            </p>
-                            <p className="text-xs text-gray-500 truncate">
-                              {planDisplayDescription(fp)}
-                            </p>
-                          </div>
+                        <div className="flex min-w-0 items-stretch">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSelectedFollowingSubscriptionId(
+                                isSelected ? null : row.subscriptionDocumentId
+                              )
+                            }
+                            className={`flex min-w-0 flex-1 cursor-pointer items-center gap-3 py-3 pl-3 pr-2 text-left ${
+                              isSelected && isDead ? 'bg-amber-50/40' : !isSelected ? 'hover:bg-gray-100' : ''
+                            }`}
+                          >
+                            <span
+                              className="w-1 shrink-0 self-stretch min-h-[3rem] rounded-full"
+                              style={{
+                                backgroundColor: isDead ? '#9ca3af' : planListStripeColor(isSelected),
+                              }}
+                              aria-hidden
+                            />
+                            <span
+                              draggable={Boolean(onReorderSubscriptions) && !isDead}
+                              onDragStart={(e) => {
+                                if (!onReorderSubscriptions || isDead) return
+                                e.dataTransfer.effectAllowed = 'move'
+                                e.dataTransfer.setData('text/plain', row.subscriptionDocumentId)
+                                setSubscriptionDragIndex(index)
+                                setSubscriptionDropBeforeIndex(null)
+                              }}
+                              onDragEnd={() => {
+                                setSubscriptionDragIndex(null)
+                                setSubscriptionDropBeforeIndex(null)
+                              }}
+                              className={`flex w-6 shrink-0 touch-none items-center justify-center ${
+                                onReorderSubscriptions && !isDead
+                                  ? 'cursor-grab text-gray-400 active:cursor-grabbing'
+                                  : 'cursor-default text-gray-200'
+                              }`}
+                              aria-hidden
+                              title={onReorderSubscriptions && !isDead ? 'Drag to reorder' : undefined}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <DragReorderGrip />
+                            </span>
+                            {isSelected && (
+                              <span className="shrink-0 text-teal-700" aria-label="Active plan">
+                                ✓
+                              </span>
+                            )}
+                            <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                              <PlanKindIcon kind={planVisualKindFromPlan(fp)} selected={isSelected} />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <p
+                                    className={`truncate text-sm font-medium ${
+                                      isDead
+                                        ? 'text-gray-500 line-through decoration-gray-400'
+                                        : 'text-gray-900'
+                                    }`}
+                                  >
+                                    {fp.workoutPlanName}
+                                  </p>
+                                  {isDead ? (
+                                    <span className="shrink-0 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-900">
+                                      Unavailable
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <p className={`truncate text-xs ${isDead ? 'text-gray-400' : 'text-gray-500'}`}>
+                                  {planDisplayDescription(fp)}
+                                </p>
+                              </div>
+                            </div>
+                          </button>
+                          {isDead ? (
+                            <button
+                              type="button"
+                              aria-label="Remove follow"
+                              disabled={followingRemoveBusyId === row.subscriptionDocumentId}
+                              onClick={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                void removeFollowingSubscriptionWithConfirm(row.subscriptionDocumentId)
+                              }}
+                              className="flex shrink-0 items-center justify-center border-l border-gray-200 px-3 text-gray-400 transition-colors hover:bg-red-50 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <Trash2 className="h-4 w-4" aria-hidden />
+                            </button>
+                          ) : null}
                         </div>
                       </li>
                     </Fragment>
@@ -9429,6 +9836,26 @@ function PlansSection({
               ) : null}
               {plansError ? (
                 <div className="shrink-0 bg-red-50 px-4 py-2 text-xs text-red-700">{plansError}</div>
+              ) : null}
+              {selectedFollowingRow?.remotePlanUnavailable ? (
+                <div className="shrink-0 border-b border-amber-100 bg-amber-50/90 px-4 py-2 text-xs text-amber-950">
+                  <p className="font-semibold">Followed plan unavailable</p>
+                  <p className="mt-1 text-amber-900/90">
+                    This plan was removed or is no longer on the coach&apos;s account. The schedule may be empty.
+                  </p>
+                  <button
+                    type="button"
+                    className="mt-2 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={followingRemoveBusyId === selectedFollowingRow.subscriptionDocumentId}
+                    onClick={() =>
+                      void removeFollowingSubscriptionWithConfirm(
+                        selectedFollowingRow.subscriptionDocumentId,
+                      )
+                    }
+                  >
+                    Remove from Following…
+                  </button>
+                </div>
               ) : null}
               <div className="flex shrink-0 items-center justify-end border-b border-gymnext-muted/30 bg-gymnext-background px-3 py-2">
                 <div
@@ -9534,12 +9961,13 @@ function PlansSection({
                             orderedFollowingPlans.map((row) => {
                               const fp = followingSubscriptionToWorkoutPlan(row)
                               const label = (fp.workoutPlanName || row.remotePlanName || 'Subscribed plan').trim()
+                              const labelFinal = row.remotePlanUnavailable ? `${label} (unavailable)` : label
                               return (
                                 <option
                                   key={`following-${row.subscriptionDocumentId}`}
                                   value={`following:${row.subscriptionDocumentId}`}
                                 >
-                                  {label} (View-Only)
+                                  {labelFinal}
                                 </option>
                               )
                             })}
@@ -9633,6 +10061,20 @@ function PlansSection({
               {Array.from({ length: col.columnPlanDayCount }, (_, i) => {
                 const dateKey = addDays(col.columnWeekStart, i)
                 const items = col.byDayMap[dateKey] ?? []
+                const hideFutureBlocked =
+                  col.subscriptionScheduleRow?.shareHideFutureWorkouts === true && dateKey > todayYmd
+                const hideFutureUntilLabel = hideFutureBlocked
+                  ? (() => {
+                      const [y, mo, d] = dateKey.split('-').map((n) => parseInt(n, 10))
+                      if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return dateKey
+                      return new Date(y, mo - 1, d).toLocaleDateString(undefined, {
+                        weekday: 'long',
+                        month: 'long',
+                        day: 'numeric',
+                        year: 'numeric',
+                      })
+                    })()
+                  : ''
                 const dayDate = new Date(dateKey + 'T12:00:00')
                 const dayName = dayDate.toLocaleDateString(undefined, {
                   weekday: 'short',
@@ -9660,7 +10102,7 @@ function PlansSection({
                         </div>
                       </div>
                       <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
-                        {items.length > 0 && (
+                        {!hideFutureBlocked && items.length > 0 && (
                           <div className="relative shrink-0" onClick={(e) => e.stopPropagation()}>
                             <button
                               type="button"
@@ -9800,6 +10242,17 @@ function PlansSection({
                       </div>
                     </div>
                     <div className="flex flex-1 flex-col p-2">
+                      {hideFutureBlocked ? (
+                        <div className="mx-0.5 my-1 flex min-h-[5.5rem] flex-col items-center justify-center rounded-lg border border-dashed border-gray-200 bg-gray-50/90 px-4 py-5 text-center">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                            Not available until
+                          </p>
+                          <p className="mt-2 text-[11px] leading-snug text-gray-600 font-medium">
+                            {hideFutureUntilLabel}
+                          </p>
+                        </div>
+                      ) : (
+                      <>
                       {items.length === 0 && dateKey < todayYmd && planScheduleReadOnly && (
                         <div className="mx-0.5 my-1 flex min-h-[5.5rem] flex-col items-center justify-center rounded-lg border border-dashed border-gray-200 bg-gray-50/90 px-4 py-5 text-center">
                           <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
@@ -9819,6 +10272,14 @@ function PlansSection({
                               setCreateDate(dateKey)
                               setAddWorkoutSource('choice')
                               setExpandedCollectionId(null)
+                              setSelectedWorkoutForPlan(null)
+                              setBookmarksPlanList(null)
+                              setBookmarksPlanListError(null)
+                              setExpandedBookmarkCollectionRow(null)
+                              setBookmarkCollectionWorkouts([])
+                              setBookmarkCollectionWorkoutsTruncated(false)
+                              setBookmarkCollectionDetailError(null)
+                              setSelectedBookmarkWorkoutRow(null)
                               setCreateError(null)
                               setCreateOpen(true)
                             }}
@@ -9838,7 +10299,7 @@ function PlansSection({
                           </p>
                         </div>
                       )}
-                      {items.length > 0 && (
+                      {items.length > 0 && !hideFutureBlocked && (
                         <ul
                           className=""
                           onDragOver={(e) => {
@@ -10293,6 +10754,14 @@ function PlansSection({
                               setCreateDate(dateKey)
                               setAddWorkoutSource('choice')
                               setExpandedCollectionId(null)
+                              setSelectedWorkoutForPlan(null)
+                              setBookmarksPlanList(null)
+                              setBookmarksPlanListError(null)
+                              setExpandedBookmarkCollectionRow(null)
+                              setBookmarkCollectionWorkouts([])
+                              setBookmarkCollectionWorkoutsTruncated(false)
+                              setBookmarkCollectionDetailError(null)
+                              setSelectedBookmarkWorkoutRow(null)
                               setCreateError(null)
                               setCreateOpen(true)
                             }}
@@ -10302,6 +10771,8 @@ function PlansSection({
                             Add workout
                           </button>
                         </div>
+                      )}
+                      </>
                       )}
                     </div>
                   </div>
@@ -10326,7 +10797,7 @@ function PlansSection({
                   <p className="text-sm font-medium text-gray-900">{selectedPlanName}</p>
                   <p className="text-xs text-gray-600 mt-1">{selectedPlanDescription}</p>
                 </div>
-                {selectedPlan && (!planScheduleReadOnly || selectedFollowingRow) ? (
+                {selectedPlan && (selectedFollowingRow || !planScheduleReadOnly) ? (
                   <div className="shrink-0">
                     <button
                       type="button"
@@ -10345,7 +10816,7 @@ function PlansSection({
                           onClick={() => setPlanAdminMoreOpen(false)}
                         />
                         <div className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
-                          {planScheduleReadOnly && selectedFollowingRow ? (
+                          {selectedFollowingRow ? (
                             <button
                               type="button"
                               className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50"
@@ -10354,7 +10825,7 @@ function PlansSection({
                                 setStopFollowingConfirmOpen(true)
                               }}
                             >
-                              Unsubscribe
+                              Unfollow
                             </button>
                           ) : (
                             <>
@@ -10403,7 +10874,7 @@ function PlansSection({
                   </div>
                 ) : null}
               </div>
-              {!planScheduleReadOnly && selectedPlan ? (
+              {!selectedFollowingSubscriptionId && selectedPlan ? (
                 <div className="shrink-0 border-b border-gray-100 px-4 py-3">
                   <div className="flex items-center justify-between gap-4 rounded-lg border border-gray-100 bg-gray-50/80 px-3 py-3">
                     <div className="min-w-0">
@@ -10448,9 +10919,32 @@ function PlansSection({
               ) : null}
               {planSharesBelowHeader}
               <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 space-y-5">
-                {planScheduleReadOnly ? (
+                {selectedFollowingSubscriptionId ? (
                   selectedFollowingRow ? (
                     <div className="space-y-3">
+                      {selectedFollowingRow.remotePlanUnavailable ? (
+                        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+                          <p className="font-semibold">Plan unavailable</p>
+                          <p className="mt-1 text-amber-900/90">
+                            This plan was removed or is no longer on the coach&apos;s account. Remove the follow to
+                            clear it from your list, or keep it if the plan might return.
+                          </p>
+                          <button
+                            type="button"
+                            className="mt-2 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={
+                              followingRemoveBusyId === selectedFollowingRow.subscriptionDocumentId
+                            }
+                            onClick={() =>
+                              void removeFollowingSubscriptionWithConfirm(
+                                selectedFollowingRow.subscriptionDocumentId,
+                              )
+                            }
+                          >
+                            Remove from Following…
+                          </button>
+                        </div>
+                      ) : null}
                       <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                         Plan owner
                       </h4>
@@ -10568,9 +11062,9 @@ function PlansSection({
                         {followedPlanIsGroupTraining(selectedFollowingRow) ? (
                           <p className="text-sm text-gray-800">
                             <span className="font-semibold text-gray-900">Visibility.</span>{' '}
-                            {selectedFollowingRow.shareHideFutureWorkouts
-                              ? 'You cannot view future scheduled workouts.'
-                              : 'You can view future scheduled workouts.'}
+                            {!selectedFollowingRow.shareHideFutureWorkouts
+                              ? 'You can view future scheduled workouts.'
+                              : 'Future scheduled workouts are hidden (your calendar stops at today).'}
                           </p>
                         ) : (
                           <p className="text-sm text-gray-800">
@@ -10614,7 +11108,14 @@ function PlansSection({
               setScheduleAddTargetPlanId(null),
               setAddWorkoutSource('choice'),
               setExpandedCollectionId(null),
-              setSelectedWorkoutForPlan(null))
+              setSelectedWorkoutForPlan(null),
+              setBookmarksPlanList(null),
+              setBookmarksPlanListError(null),
+              setExpandedBookmarkCollectionRow(null),
+              setBookmarkCollectionWorkouts([]),
+              setBookmarkCollectionWorkoutsTruncated(false),
+              setBookmarkCollectionDetailError(null),
+              setSelectedBookmarkWorkoutRow(null))
             }
           />
           <div className="relative w-full max-w-lg rounded-lg border border-gymnext-muted/30 bg-white shadow-lg max-h-[85vh] flex flex-col">
@@ -10623,9 +11124,12 @@ function PlansSection({
                 Add planned workout
               </h3>
               <p className="text-xs text-gray-500 mt-0.5">
-                {addWorkoutSource === 'choice' && 'Add from Favorites, a collection, or create new.'}
+                {addWorkoutSource === 'choice' &&
+                  'Add from Favorites, a collection, bookmarks, or create new.'}
                 {addWorkoutSource === 'favorites' && 'Pick a workout from Favorites.'}
                 {addWorkoutSource === 'collection' && 'Pick a collection, then a workout.'}
+                {addWorkoutSource === 'bookmarks' &&
+                  'Pick a bookmarked workout, or open a collection bookmark and choose a workout.'}
                 {addWorkoutSource === 'createNew' && (createNewStep === 0
                   ? 'Choose the workout type.'
                   : createNewNameStep
@@ -10636,7 +11140,12 @@ function PlansSection({
               </p>
             </div>
             <div className="p-4 space-y-4 overflow-y-auto min-h-0">
-              {(addWorkoutSource === 'favorites' || addWorkoutSource === 'collection' || addWorkoutSource === 'createNew') && (createError || plannedDateRestrictionMessage) && (
+              {(addWorkoutSource === 'choice' ||
+                addWorkoutSource === 'favorites' ||
+                addWorkoutSource === 'collection' ||
+                addWorkoutSource === 'bookmarks' ||
+                addWorkoutSource === 'createNew') &&
+                (createError || plannedDateRestrictionMessage) && (
                 <div className="text-xs text-red-600 rounded border border-red-200 bg-red-50 px-3 py-2">
                   {createError ?? plannedDateRestrictionMessage}
                 </div>
@@ -10644,6 +11153,34 @@ function PlansSection({
               {addWorkoutSource === 'choice' && (
                 <>
                   <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void addPlannedQuickWarmupCooldown(10)}
+                        disabled={createBusy || !canAddPlannedForSelectedDate}
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded border-2 bg-white px-2 py-2 text-xs font-medium hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        style={{
+                          borderColor: getTimerModeColor(10),
+                          color: getTimerModeColor(10),
+                        }}
+                      >
+                        <Flame className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden />
+                        Warmup
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void addPlannedQuickWarmupCooldown(11)}
+                        disabled={createBusy || !canAddPlannedForSelectedDate}
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded border-2 bg-white px-2 py-2 text-xs font-medium hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        style={{
+                          borderColor: getTimerModeColor(11),
+                          color: getTimerModeColor(11),
+                        }}
+                      >
+                        <Droplet className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden />
+                        Cooldown
+                      </button>
+                    </div>
                     <button
                       type="button"
                       onClick={() => setAddWorkoutSource('favorites')}
@@ -10653,9 +11190,12 @@ function PlansSection({
                         className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem] bg-yellow-400"
                         aria-hidden
                       />
-                      <svg className="h-5 w-5 shrink-0 text-yellow-500" fill="currentColor" viewBox="0 0 20 20" aria-hidden>
-                        <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-                      </svg>
+                      <Star
+                        className="h-5 w-5 shrink-0 text-yellow-500"
+                        strokeWidth={2}
+                        fill="none"
+                        aria-hidden
+                      />
                       Add from Favorites
                     </button>
                     <button
@@ -10671,6 +11211,20 @@ function PlansSection({
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                       </svg>
                       Add from Collection
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAddWorkoutSource('bookmarks')}
+                      className="w-full rounded border border-gymnext-muted/40 bg-white px-4 py-3 flex items-center gap-3 text-left text-sm font-medium text-gray-900 hover:bg-gymnext-background"
+                    >
+                      <span className="flex shrink-0 items-center gap-3 text-green-600">
+                        <span
+                          className="w-1 shrink-0 self-stretch rounded-full min-h-[3rem] bg-current"
+                          aria-hidden
+                        />
+                        <Bookmark className="h-5 w-5 shrink-0" strokeWidth={2} aria-hidden />
+                      </span>
+                      Add from Bookmarks
                     </button>
                     <button
                       type="button"
@@ -10725,7 +11279,14 @@ function PlansSection({
                 <>
                   <button
                     type="button"
-                    onClick={() => { setAddWorkoutSource('choice'); setSelectedWorkoutForPlan(null) }}
+                    onClick={() => {
+                      setAddWorkoutSource('choice')
+                      setSelectedWorkoutForPlan(null)
+                      setExpandedBookmarkCollectionRow(null)
+                      setBookmarkCollectionWorkouts([])
+                      setBookmarkCollectionDetailError(null)
+                      setSelectedBookmarkWorkoutRow(null)
+                    }}
                     className="text-xs text-gymnext-dark hover:text-gymnext hover:underline"
                   >
                     ← Back
@@ -10741,7 +11302,12 @@ function PlansSection({
                           <li key={w.id}>
                             <button
                               type="button"
-                              onClick={() => setSelectedWorkoutForPlan(isSelected ? null : w)}
+                              onClick={() => {
+                                setSelectedBookmarkWorkoutRow(null)
+                                setExpandedBookmarkCollectionRow(null)
+                                setBookmarkCollectionWorkouts([])
+                                setSelectedWorkoutForPlan(isSelected ? null : w)
+                              }}
                               disabled={createBusy}
                               className={`w-full rounded border px-3 py-2 text-left text-sm disabled:opacity-50 flex items-center gap-3 ${
                                 isSelected
@@ -10797,7 +11363,15 @@ function PlansSection({
                 <>
                   <button
                     type="button"
-                    onClick={() => { setAddWorkoutSource('choice'); setExpandedCollectionId(null); setSelectedWorkoutForPlan(null) }}
+                    onClick={() => {
+                      setAddWorkoutSource('choice')
+                      setExpandedCollectionId(null)
+                      setSelectedWorkoutForPlan(null)
+                      setExpandedBookmarkCollectionRow(null)
+                      setBookmarkCollectionWorkouts([])
+                      setBookmarkCollectionDetailError(null)
+                      setSelectedBookmarkWorkoutRow(null)
+                    }}
                     className="text-xs text-gymnext-dark hover:text-gymnext hover:underline"
                   >
                     ← Back
@@ -10839,7 +11413,12 @@ function PlansSection({
                                       <li key={w.id}>
                                         <button
                                           type="button"
-                                          onClick={() => setSelectedWorkoutForPlan(isSelected ? null : w)}
+                                          onClick={() => {
+                                            setSelectedBookmarkWorkoutRow(null)
+                                            setExpandedBookmarkCollectionRow(null)
+                                            setBookmarkCollectionWorkouts([])
+                                            setSelectedWorkoutForPlan(isSelected ? null : w)
+                                          }}
                                           disabled={createBusy}
                                           className={`w-full rounded border px-3 py-2 text-left text-sm disabled:opacity-50 flex items-center gap-3 ${
                                             isSelected
@@ -10894,6 +11473,289 @@ function PlansSection({
                         </button>
                       </div>
                     </div>
+                  )}
+                </>
+              )}
+              {addWorkoutSource === 'bookmarks' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAddWorkoutSource('choice')
+                      setExpandedBookmarkCollectionRow(null)
+                      setBookmarkCollectionWorkouts([])
+                      setBookmarkCollectionDetailError(null)
+                      setSelectedWorkoutForPlan(null)
+                      setSelectedBookmarkWorkoutRow(null)
+                    }}
+                    className="text-xs text-gymnext-dark hover:text-gymnext hover:underline"
+                  >
+                    ← Back
+                  </button>
+                  {bookmarksPlanListLoading && (
+                    <p className="text-xs text-gray-500 py-2">Loading bookmarks…</p>
+                  )}
+                  {bookmarksPlanListError && !bookmarksPlanListLoading && (
+                    <div className="text-xs text-red-600 rounded border border-red-200 bg-red-50 px-3 py-2">
+                      {bookmarksPlanListError}
+                    </div>
+                  )}
+                  {!bookmarksPlanListLoading && !bookmarksPlanListError && bookmarksPlanList && (
+                    <>
+                      <ul className="space-y-1 max-h-[45vh] overflow-y-auto">
+                        {bookmarksPlanList.collections.length === 0 &&
+                        bookmarksPlanList.workouts.length === 0 ? (
+                          <li className="text-xs text-gray-500 py-2">No bookmarks yet.</li>
+                        ) : (
+                          <>
+                            {bookmarksPlanList.collections.map((row) => {
+                              const isExpanded =
+                                expandedBookmarkCollectionRow?.subscriptionDocumentId ===
+                                row.subscriptionDocumentId
+                              const title =
+                                row.collectionNameSnapshot?.trim() ||
+                                row.collectionDescriptionSnapshot?.trim() ||
+                                'Collection'
+                              const subtitle =
+                                typeof row.collectionWorkoutCountSnapshot === 'number' &&
+                                row.collectionWorkoutCountSnapshot >= 0
+                                  ? row.collectionWorkoutCountSnapshot === 1
+                                    ? 'Collection of 1 workout'
+                                    : `Collection of ${row.collectionWorkoutCountSnapshot} workouts`
+                                  : 'Collection'
+                              return (
+                                <li
+                                  key={row.subscriptionDocumentId}
+                                  className="border border-gray-200 rounded overflow-hidden"
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (row.isUnavailable) return
+                                      if (isExpanded) {
+                                        setExpandedBookmarkCollectionRow(null)
+                                        setSelectedWorkoutForPlan(null)
+                                      } else {
+                                        setExpandedBookmarkCollectionRow(row)
+                                        setSelectedBookmarkWorkoutRow(null)
+                                        setSelectedWorkoutForPlan(null)
+                                      }
+                                    }}
+                                    disabled={row.isUnavailable || createBusy}
+                                    className={`w-full pl-3 pr-3 py-2 flex items-center gap-3 justify-between text-left text-sm font-medium hover:bg-gray-50 ${
+                                      row.isUnavailable ? 'opacity-50 cursor-not-allowed' : 'text-gray-900'
+                                    }`}
+                                  >
+                                    <span
+                                      className="w-1 shrink-0 rounded-full self-stretch min-h-[2.5rem]"
+                                      style={{ backgroundColor: '#795548' }}
+                                      aria-hidden
+                                    />
+                                    <svg
+                                      xmlns="http://www.w3.org/2000/svg"
+                                      viewBox="0 0 24 24"
+                                      fill="currentColor"
+                                      className="h-5 w-5 shrink-0 text-amber-700/80"
+                                      aria-hidden
+                                    >
+                                      <path d="M19.5 21a3 3 0 003-3v-4.875a3 3 0 00-.684-1.9l-1.425-1.9a3 3 0 00-2.4-1.2H15.75l-.787-1.05A3 3 0 0012.422 6H4.5a3 3 0 00-3 3v9a3 3 0 003 3h15z" />
+                                    </svg>
+                                    <span className="min-w-0 flex-1">
+                                      <span className="block truncate">{title}</span>
+                                      <span className="block text-xs font-normal text-gray-500 truncate">
+                                        {subtitle}
+                                      </span>
+                                    </span>
+                                    <span className="text-gray-400 shrink-0">{isExpanded ? '▼' : '▶'}</span>
+                                  </button>
+                                  {isExpanded && (
+                                    <div className="border-t border-gray-100 bg-gray-50/50 p-2 space-y-1">
+                                      {bookmarkCollectionDetailLoading && (
+                                        <p className="text-xs text-gray-500 py-1">Loading workouts…</p>
+                                      )}
+                                      {bookmarkCollectionDetailError && !bookmarkCollectionDetailLoading && (
+                                        <p className="text-xs text-red-600 py-1">{bookmarkCollectionDetailError}</p>
+                                      )}
+                                      {!bookmarkCollectionDetailLoading && !bookmarkCollectionDetailError && (
+                                        <ul className="space-y-1">
+                                          {bookmarkCollectionWorkouts.length === 0 ? (
+                                            <li className="text-xs text-gray-500 py-1">
+                                              No workouts in this collection.
+                                            </li>
+                                          ) : (
+                                            bookmarkCollectionWorkouts.map((w) => {
+                                              const wkey = w.workoutId?.trim() || w.id
+                                              const isSelected = selectedWorkoutForPlan?.id === w.id
+                                              const barColor = getWorkoutBarColor(w)
+                                              return (
+                                                <li key={wkey}>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      setSelectedBookmarkWorkoutRow(null)
+                                                      setSelectedWorkoutForPlan(isSelected ? null : w)
+                                                    }}
+                                                    disabled={createBusy}
+                                                    className={`w-full rounded border px-3 py-2 text-left text-sm disabled:opacity-50 flex items-center gap-3 ${
+                                                      isSelected
+                                                        ? 'border-gymnext bg-purple-50 border-2'
+                                                        : 'border-gray-200 bg-white hover:bg-gray-50'
+                                                    }`}
+                                                    style={
+                                                      isSelected
+                                                        ? {
+                                                            borderTopColor: '#6B21A8',
+                                                            borderRightColor: '#6B21A8',
+                                                            borderBottomColor: '#6B21A8',
+                                                            borderLeftColor: '#6B21A8',
+                                                          }
+                                                        : undefined
+                                                    }
+                                                  >
+                                                    <span
+                                                      className="w-1 shrink-0 rounded-full self-stretch min-h-[2.5rem]"
+                                                      style={{ backgroundColor: barColor }}
+                                                      aria-hidden
+                                                    />
+                                                    <span className="min-w-0 flex-1">
+                                                      <span className="font-medium text-gray-900">
+                                                        {getWorkoutDisplayName(w) || 'Workout'}
+                                                      </span>
+                                                      {(getWorkoutDetailDescription(w) || '').trim() && (
+                                                        <span className="block text-xs text-gray-500 truncate">
+                                                          {getWorkoutDetailDescription(w)}
+                                                        </span>
+                                                      )}
+                                                    </span>
+                                                  </button>
+                                                </li>
+                                              )
+                                            })
+                                          )}
+                                        </ul>
+                                      )}
+                                      {bookmarkCollectionWorkoutsTruncated && (
+                                        <p className="mt-1 rounded border border-amber-100 bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+                                          This collection lists more workouts than we can show here; only the
+                                          first portion is included.
+                                        </p>
+                                      )}
+                                    </div>
+                                  )}
+                                </li>
+                              )
+                            })}
+                            {bookmarksPlanList.workouts.map((row) => {
+                              const title =
+                                row.workoutNameSnapshot?.trim() ||
+                                row.workoutDescriptionSnapshot?.trim() ||
+                                'Workout'
+                              const desc = (row.workoutDescriptionSnapshot || '').trim()
+                              const nameSnap = row.workoutNameSnapshot?.trim() ?? ''
+                              const showDesc = Boolean(desc && desc !== nameSnap)
+                              const isSelected =
+                                selectedBookmarkWorkoutRow?.subscriptionDocumentId ===
+                                row.subscriptionDocumentId
+                              return (
+                                <li key={row.subscriptionDocumentId}>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (row.isUnavailable) return
+                                      setExpandedBookmarkCollectionRow(null)
+                                      setBookmarkCollectionWorkouts([])
+                                      setSelectedWorkoutForPlan(null)
+                                      setSelectedBookmarkWorkoutRow(isSelected ? null : row)
+                                    }}
+                                    disabled={row.isUnavailable || createBusy}
+                                    className={`w-full rounded border px-3 py-2 text-left text-sm disabled:opacity-50 flex items-center gap-3 ${
+                                      row.isUnavailable ? 'opacity-50 cursor-not-allowed border-gray-200' : ''
+                                    } ${
+                                      isSelected
+                                        ? 'border-gymnext bg-purple-50 border-2'
+                                        : 'border-gray-200 hover:bg-gray-50'
+                                    }`}
+                                    style={
+                                      isSelected
+                                        ? {
+                                            borderTopColor: '#6B21A8',
+                                            borderRightColor: '#6B21A8',
+                                            borderBottomColor: '#6B21A8',
+                                            borderLeftColor: '#6B21A8',
+                                          }
+                                        : undefined
+                                    }
+                                  >
+                                    <span
+                                      className="w-1 shrink-0 rounded-full self-stretch min-h-[2.5rem] bg-green-600"
+                                      aria-hidden
+                                    />
+                                    <span className="min-w-0 flex-1">
+                                      <span className="font-medium text-gray-900">{title}</span>
+                                      {showDesc && (
+                                        <span className="block text-xs text-gray-500 truncate">{desc}</span>
+                                      )}
+                                    </span>
+                                  </button>
+                                </li>
+                              )
+                            })}
+                          </>
+                        )}
+                      </ul>
+                      {(selectedWorkoutForPlan || selectedBookmarkWorkoutRow) && (
+                        <div className="pt-2 border-t border-gray-200 mt-2 space-y-2">
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void (async () => {
+                                  if (planScheduleReadOnly || createBusy) return
+                                  if (selectedWorkoutForPlan) {
+                                    await addPlannedFromBookmarkWorkout(selectedWorkoutForPlan)
+                                    return
+                                  }
+                                  if (!selectedBookmarkWorkoutRow) return
+                                  setCreateBusy(true)
+                                  setCreateError(null)
+                                  try {
+                                    const br = selectedBookmarkWorkoutRow
+                                    const qs = new URLSearchParams()
+                                    if (br.mirrorGroupId?.trim()) qs.set('groupId', br.mirrorGroupId.trim())
+                                    const q = qs.toString()
+                                    const res = await authedFetch(
+                                      `/api/app/shared-content/${encodeURIComponent(br.ownerUserId)}/workout/${encodeURIComponent(br.remoteWorkoutId)}${q ? `?${q}` : ''}`,
+                                    )
+                                    const json = (await res.json().catch(() => ({}))) as {
+                                      error?: string
+                                      kind?: string
+                                      data?: Workout
+                                    }
+                                    if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
+                                    if (json.kind !== 'workout' || !json.data) {
+                                      throw new Error('Workout unavailable')
+                                    }
+                                    await addPlannedFromBookmarkWorkout(json.data)
+                                  } catch (e) {
+                                    setCreateError(
+                                      e instanceof Error
+                                        ? e.message
+                                        : 'Failed to add bookmarked workout',
+                                    )
+                                    setCreateBusy(false)
+                                  }
+                                })()
+                              }}
+                              disabled={createBusy}
+                              className="rounded px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                              style={{ backgroundColor: '#6B21A8' }}
+                            >
+                              {createBusy ? 'Adding…' : 'Confirm'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
               )}
@@ -11348,8 +12210,8 @@ function PlansSection({
           />
           <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg p-4">
             <p className="text-sm text-gray-800">
-              Unsubscribe from <span className="font-medium text-gray-900">{selectedPlanName}</span>? You can subscribe
-              to this plan again later if the coach shares it with you.
+              Unfollow <span className="font-medium text-gray-900">{selectedPlanName}</span>? You can follow this plan
+              again later if the coach shares it with you.
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <button
@@ -11366,7 +12228,7 @@ function PlansSection({
                 disabled={stopFollowingBusy}
                 className="rounded bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
               >
-                {stopFollowingBusy ? 'Unsubscribing…' : 'Unsubscribe'}
+                {stopFollowingBusy ? 'Unfollowing…' : 'Unfollow'}
               </button>
             </div>
           </div>

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireAdminAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
 import { getPlannedWorkout, deletePlannedWorkout, updatePlannedWorkoutDayAndOrdinal } from '@/lib/firestore'
+import { isValidIanaTimeZone } from '@/lib/planned-workout-day-timestamp'
 
 /**
  * GET /api/admin/users/[userId]/plans/[planId]/planned-workouts/[plannedWorkoutId]
@@ -89,6 +90,12 @@ export async function PATCH(
     const body = await request.json().catch(() => ({}))
     const day = typeof body.day === 'string' ? body.day.slice(0, 10) : undefined
     const ordinal = typeof body.ordinal === 'number' ? body.ordinal : undefined
+    const planDayTzBody =
+      typeof (body as { planDayTimeZone?: string }).planDayTimeZone === 'string' &&
+      String((body as { planDayTimeZone?: string }).planDayTimeZone).trim() &&
+      isValidIanaTimeZone(String((body as { planDayTimeZone?: string }).planDayTimeZone).trim())
+        ? String((body as { planDayTimeZone?: string }).planDayTimeZone).trim()
+        : null
     if (day === undefined && ordinal === undefined) {
       return NextResponse.json({ error: 'Provide day and/or ordinal' }, { status: 400 })
     }
@@ -96,7 +103,11 @@ export async function PATCH(
       return NextResponse.json({ error: 'day must be YYYY-MM-DD' }, { status: 400 })
     }
 
-    await updatePlannedWorkoutDayAndOrdinal(userId, plannedWorkoutId, { day, ordinal })
+    await updatePlannedWorkoutDayAndOrdinal(userId, plannedWorkoutId, {
+      day,
+      ordinal,
+      planDayTimeZoneId: planDayTzBody,
+    })
     const updated = await getPlannedWorkout(userId, plannedWorkoutId)
     return NextResponse.json(updated ?? plannedWorkout)
   } catch (err) {

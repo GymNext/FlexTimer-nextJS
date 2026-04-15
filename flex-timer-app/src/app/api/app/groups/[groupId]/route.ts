@@ -5,6 +5,7 @@ import { adminAuth, adminDb } from '@/lib/firebase-admin'
 import { permanentlyDeleteOwnedGroup, softDeleteOwnedGroup } from '@/lib/delete-owned-group'
 import { recoverSoftDeletedOwnedGroup } from '@/lib/recover-soft-deleted-owned-group'
 import { updateOwnedGroup } from '@/lib/update-owned-group'
+import { membersMayShareContentFromGroupDocs } from '@/lib/group-memberships'
 import { stripAtPrefix } from '@/lib/group-handle'
 import { isAppGroupType, parseFirestoreJoinPolicy } from '@/types/group'
 import { isValidGroupLookupId, type GroupLookupKind } from '@/lib/group-lookups'
@@ -27,6 +28,7 @@ type PatchBody = {
   circleTypeId?: string | null
   startDate?: string | null
   endDate?: string | null
+  membersMayShareContent?: boolean
 }
 
 function bad(msg: string, status = 400) {
@@ -79,9 +81,12 @@ export async function GET(
   const gid = typeof groupId === 'string' ? groupId.trim() : ''
   if (!gid) return bad('Invalid hub id')
 
-  const snap = await adminDb.collection('groups').doc(gid).get()
+  const gRef = adminDb.collection('groups').doc(gid)
+  const pRef = adminDb.collection('publicGroupProfiles').doc(gid)
+  const [snap, pSnap] = await adminDb.getAll(gRef, pRef)
   if (!snap.exists) return NextResponse.json({ error: 'Hub not found' }, { status: 404 })
   const d = snap.data() as Record<string, unknown>
+  const pd = pSnap.exists ? (pSnap.data() as Record<string, unknown>) : {}
   if (d.deletedAt != null) return NextResponse.json({ error: 'Hub not found' }, { status: 404 })
   if (d.ownerUserId !== uid) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
@@ -113,6 +118,7 @@ export async function GET(
     endDate: tsToYmd(d.endDate),
     parentGroupId:
       typeof d.parentGroupId === 'string' && d.parentGroupId.trim() ? d.parentGroupId.trim() : null,
+    membersMayShareContent: membersMayShareContentFromGroupDocs(d, pd),
   })
 }
 
@@ -266,6 +272,17 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ g
     }
   }
 
+  const membersMayShareContent =
+    typeof body.membersMayShareContent === 'boolean' ? body.membersMayShareContent : undefined
+
+  if (
+    joinPolicyParsed === 'public' &&
+    typeof body.membersMayShareContent === 'boolean' &&
+    body.membersMayShareContent === true
+  ) {
+    return bad('Member content sharing is not allowed for public hubs')
+  }
+
   try {
     await updateOwnedGroup({
       ownerUserId: uid,
@@ -287,6 +304,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ g
       circleTypeId,
       startDate,
       endDate,
+      ...(membersMayShareContent !== undefined ? { membersMayShareContent } : {}),
     })
     return NextResponse.json({ ok: true, groupId: gid })
   } catch (err) {

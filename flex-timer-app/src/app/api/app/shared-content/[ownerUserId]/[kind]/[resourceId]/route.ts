@@ -1,8 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUserAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
-import { getCollectionById, getPlanById, getWorkoutById } from '@/lib/firestore'
+import {
+  getCollectionById,
+  getPlanById,
+  getWorkoutById,
+  mapCollectionFromFirestore,
+  mapPlanFromFirestore,
+  mapWorkoutFromFirestore,
+} from '@/lib/firestore'
+import { getSharedMirrorPayloadForViewer } from '@/lib/shared-content-mirror'
 import { viewerCanAccessSharedLibraryItem } from '@/lib/shared-resource-access'
+import { bareWorkoutIdForGroupSharedMirror } from '@/lib/user-connection-mirrors'
 import type { Workout } from '@/types/user'
 
 type Kind = 'workout' | 'plan' | 'collection'
@@ -18,7 +27,9 @@ function parseKind(raw: string): Kind | null {
 
 /**
  * GET /api/app/shared-content/[ownerUserId]/[kind]/[resourceId]?groupId=
- * Read-only fetch of another user's library item when the viewer has a share mirror or shares a hub feed with the item.
+ * Read-only fetch via share mirrors only: `users/{viewer}/shared*` (connection shares) or
+ * `groups/{groupId}/shared*` (hub shares). Does not read another user's library documents directly.
+ * When viewer is the owner, reads from their own library as usual.
  */
 export async function GET(
   request: NextRequest,
@@ -49,32 +60,117 @@ export async function GET(
   }
 
   try {
+    if (uid === owner) {
+      if (kind === 'workout') {
+        const w = await getWorkoutById(owner, rid)
+        if (!w || w.deletedAt) {
+          return NextResponse.json({ error: 'Not found' }, { status: 404 })
+        }
+        return NextResponse.json({ kind: 'workout' as const, data: w })
+      }
+      if (kind === 'plan') {
+        const p = await getPlanById(owner, rid)
+        if (!p || p.deletedAt) {
+          return NextResponse.json({ error: 'Not found' }, { status: 404 })
+        }
+        return NextResponse.json({ kind: 'plan' as const, data: p })
+      }
+      const c = await getCollectionById(owner, rid)
+      if (!c || c.deletedAt) {
+        return NextResponse.json({ error: 'Not found' }, { status: 404 })
+      }
+      const rawIds = Array.isArray(c.workoutIds) ? c.workoutIds : []
+      const ids = rawIds
+        .filter((id): id is string => typeof id === 'string' && id.trim() !== '')
+        .slice(0, MAX_COLLECTION_WORKOUTS_PREVIEW)
+      const previews = await Promise.all(ids.map((wid) => getWorkoutById(owner, wid)))
+      const workouts: Workout[] = []
+      for (let i = 0; i < ids.length; i++) {
+        const w = previews[i]
+        if (w && !w.deletedAt) workouts.push(w)
+      }
+      return NextResponse.json({
+        kind: 'collection' as const,
+        data: c,
+        workouts,
+        workoutsTruncated: rawIds.filter((id) => typeof id === 'string' && id.trim() !== '').length >
+          MAX_COLLECTION_WORKOUTS_PREVIEW,
+      })
+    }
+
     if (kind === 'workout') {
-      const w = await getWorkoutById(owner, rid)
+      const payload = await getSharedMirrorPayloadForViewer({
+        viewerUid: uid,
+        ownerUid: owner,
+        kind: 'workout',
+        resourceId: rid,
+        groupId,
+      })
+      if (!payload) {
+        return NextResponse.json({ error: 'Not found' }, { status: 404 })
+      }
+      const docKey =
+        typeof payload.workoutId === 'string' && payload.workoutId.trim() !== ''
+          ? payload.workoutId.trim()
+          : rid
+      const w = mapWorkoutFromFirestore(docKey, payload)
       if (!w || w.deletedAt) {
         return NextResponse.json({ error: 'Not found' }, { status: 404 })
       }
       return NextResponse.json({ kind: 'workout' as const, data: w })
     }
+
     if (kind === 'plan') {
-      const p = await getPlanById(owner, rid)
-      if (!p || p.deletedAt) {
+      const payload = await getSharedMirrorPayloadForViewer({
+        viewerUid: uid,
+        ownerUid: owner,
+        kind: 'plan',
+        resourceId: rid,
+        groupId,
+      })
+      if (!payload) {
+        return NextResponse.json({ error: 'Not found' }, { status: 404 })
+      }
+      const p = mapPlanFromFirestore(rid, payload)
+      if (p.deletedAt) {
         return NextResponse.json({ error: 'Not found' }, { status: 404 })
       }
       return NextResponse.json({ kind: 'plan' as const, data: p })
     }
-    const c = await getCollectionById(owner, rid)
-    if (!c || c.deletedAt) {
+
+    const colPayload = await getSharedMirrorPayloadForViewer({
+      viewerUid: uid,
+      ownerUid: owner,
+      kind: 'collection',
+      resourceId: rid,
+      groupId,
+    })
+    if (!colPayload) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 })
+    }
+    const c = mapCollectionFromFirestore(rid, colPayload)
+    if (c.deletedAt) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 })
     }
     const rawIds = Array.isArray(c.workoutIds) ? c.workoutIds : []
     const ids = rawIds
       .filter((id): id is string => typeof id === 'string' && id.trim() !== '')
       .slice(0, MAX_COLLECTION_WORKOUTS_PREVIEW)
-    const previews = await Promise.all(ids.map((wid) => getWorkoutById(owner, wid)))
     const workouts: Workout[] = []
-    for (let i = 0; i < ids.length; i++) {
-      const w = previews[i]
+    for (const entry of ids) {
+      const wp = await getSharedMirrorPayloadForViewer({
+        viewerUid: uid,
+        ownerUid: owner,
+        kind: 'workout',
+        resourceId: entry,
+        groupId,
+      })
+      if (!wp) continue
+      const wid =
+        typeof wp.workoutId === 'string' && wp.workoutId.trim() !== ''
+          ? wp.workoutId.trim()
+          : bareWorkoutIdForGroupSharedMirror(owner, entry)
+      const w = mapWorkoutFromFirestore(wid, wp)
       if (w && !w.deletedAt) workouts.push(w)
     }
     return NextResponse.json({

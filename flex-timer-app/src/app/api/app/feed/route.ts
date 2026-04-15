@@ -10,6 +10,7 @@ const PAGE_SIZE = 50
  * GET /api/app/feed?cursor=<optional base64url cursor>
  * Paginated combined feed: hub activity (`groups/{groupId}/feed`) plus personal activity
  * (`users/{uid}/feed`: direct shares, connection events), merged newest-first (see `loadAppFeedPage`).
+ * Only documents from the last 30 days are queried and returned.
  */
 export async function GET(request: NextRequest) {
   const authResult = await requireUserAuth(request.headers.get('authorization'))

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { User } from 'firebase/auth'
 import type { HubTreeNode } from '@/types/hub-tree'
+import { mergeOwnedAndMemberShareHubTrees, type MembershipRowForSharePicker } from '@/lib/share-with-hub-picker'
 
 /** Must match `MAX_PLAN_SHARE_DESTINATIONS` in `@/lib/plan-share` (client-safe literal). */
 const PLAN_SHARE_DESTINATION_CAP = 10
@@ -113,7 +114,8 @@ export function PlanShareDialogs({
   const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null)
   const [comment, setComment] = useState('')
   const [allowEditing, setAllowEditing] = useState(false)
-  const [hideFutureWorkouts, setHideFutureWorkouts] = useState(true)
+  /** UI: show future dates on shared calendar; API stores inverse as `hideFutureWorkouts`. */
+  const [showFutureWorkouts, setShowFutureWorkouts] = useState(false)
   const [shareBusy, setShareBusy] = useState(false)
   const [shareError, setShareError] = useState<string | null>(null)
 
@@ -136,9 +138,10 @@ export function PlanShareDialogs({
     setLoading(true)
     setError(null)
     try {
-      const [shRes, hubRes, connRes] = await Promise.all([
+      const [shRes, hubRes, memRes, connRes] = await Promise.all([
         authedFetch(`/api/app/plans/${encodeURIComponent(planId)}/shares`),
         authedFetch('/api/app/owned-groups'),
+        authedFetch('/api/app/memberships'),
         authedFetch('/api/app/connections'),
       ])
       if (!shRes.ok) {
@@ -154,12 +157,17 @@ export function PlanShareDialogs({
         maxDestinations: typeof sh.maxDestinations === 'number' ? sh.maxDestinations : PLAN_SHARE_DESTINATION_CAP,
       })
 
-      if (hubRes.ok) {
-        const hj = (await hubRes.json()) as { hubs?: HubTreeNode[] }
-        setHubs(Array.isArray(hj.hubs) ? hj.hubs : [])
-      } else {
-        setHubs([])
+      const owned = hubRes.ok
+        ? (((await hubRes.json()) as { hubs?: HubTreeNode[] }).hubs ?? [])
+        : []
+      const ownedArr = Array.isArray(owned) ? owned : []
+      let merged = ownedArr
+      if (memRes.ok) {
+        const mj = (await memRes.json()) as { memberships?: MembershipRowForSharePicker[] }
+        const rows = Array.isArray(mj.memberships) ? mj.memberships : []
+        merged = mergeOwnedAndMemberShareHubTrees(ownedArr, rows)
       }
+      setHubs(merged)
 
       if (connRes.ok) {
         const cj = (await connRes.json()) as { connections?: ConnectionRow[] }
@@ -187,7 +195,7 @@ export function PlanShareDialogs({
       setSelectedPeerId(null)
       setComment('')
       setAllowEditing(false)
-      setHideFutureWorkouts(isGroupTrainingPlan)
+      setShowFutureWorkouts(!isGroupTrainingPlan)
       setShareError(null)
       setShareTarget('user')
       return
@@ -197,7 +205,7 @@ export function PlanShareDialogs({
     setSelectedPeerId(null)
     setComment('')
     setAllowEditing(false)
-    setHideFutureWorkouts(isGroupTrainingPlan)
+    setShowFutureWorkouts(!isGroupTrainingPlan)
     setShareError(null)
     setShareTarget('user')
   }, [open, isGroupTrainingPlan])
@@ -252,7 +260,7 @@ export function PlanShareDialogs({
             target: 'group',
             groupId: selectedGroupId,
             comment: comment.trim() || undefined,
-            hideFutureWorkouts,
+            hideFutureWorkouts: !showFutureWorkouts,
           }),
         })
         if (!res.ok) {
@@ -279,7 +287,7 @@ export function PlanShareDialogs({
                   target: 'user',
                   peerUserId: selectedPeerId,
                   comment: comment.trim() || undefined,
-                  hideFutureWorkouts,
+                  hideFutureWorkouts: !showFutureWorkouts,
                 }
               : {
                   target: 'user',
@@ -354,7 +362,7 @@ export function PlanShareDialogs({
                       setSelectedGroupId(null)
                       setSelectedPeerId(null)
                       setAllowEditing(false)
-                      setHideFutureWorkouts(isGroupTrainingPlan)
+                      setShowFutureWorkouts(!isGroupTrainingPlan)
                     }}
                   />
                   Connection
@@ -371,7 +379,7 @@ export function PlanShareDialogs({
                         setSelectedGroupId(null)
                         setSelectedPeerId(null)
                         setAllowEditing(false)
-                        setHideFutureWorkouts(true)
+                        setShowFutureWorkouts(false)
                       }}
                     />
                     Hub
@@ -525,11 +533,11 @@ export function PlanShareDialogs({
                 {(shareTarget === 'group' ||
                   (shareTarget === 'user' && isGroupTrainingPlan)) && (
                   <PlanShareSwitchRow
-                    id="plan-share-hide-future"
-                    label="Hide future workouts"
-                    description="Recipients only see scheduled workouts up to today unless you turn this off."
-                    checked={hideFutureWorkouts}
-                    onCheckedChange={setHideFutureWorkouts}
+                    id="plan-share-show-future"
+                    label="Show future workouts"
+                    description="When on, recipients can see scheduled workouts on future dates. When off, their calendar stops at today."
+                    checked={showFutureWorkouts}
+                    onCheckedChange={setShowFutureWorkouts}
                   />
                 )}
               </div>

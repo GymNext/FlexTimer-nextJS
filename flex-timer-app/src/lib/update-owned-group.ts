@@ -1,5 +1,6 @@
 import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase-admin'
+import { refreshGroupMembershipIndexShareSettings } from '@/lib/group-invite'
 import { isAppGroupType, type AppGroupJoinPolicy, type AppGroupType } from '@/types/group'
 import {
   groupHandleDisplayForStore,
@@ -29,6 +30,13 @@ function trimOrNull(s: string | null | undefined): string | null {
   if (s == null) return null
   const t = s.trim()
   return t || null
+}
+
+function boolish(d: Record<string, unknown>, key: string): boolean {
+  const v = d[key]
+  if (typeof v === 'boolean') return v
+  if (typeof v === 'number') return v !== 0
+  return false
 }
 
 function keysUsedByGroupType(gt: AppGroupType): Set<string> {
@@ -119,15 +127,19 @@ export type UpdateOwnedGroupParams = {
   circleTypeId?: string | null
   startDate?: Date | null
   endDate?: Date | null
+  /** When set, updates `membersMayShareContent` on `groups` + `publicGroupProfiles` (forced false when join policy is public). */
+  membersMayShareContent?: boolean
 }
 
 export async function updateOwnedGroup(params: UpdateOwnedGroupParams): Promise<void> {
   if (!adminDb) throw new Error('Database not configured')
 
   const gRef = adminDb.collection(GROUPS_COLLECTION).doc(params.groupId)
-  const snap = await gRef.get()
+  const pRef = adminDb.collection(PUBLIC_GROUP_PROFILES).doc(params.groupId)
+  const [snap, pSnap] = await adminDb.getAll(gRef, pRef)
   if (!snap.exists) throw new Error('Hub not found')
   const d = snap.data() as Record<string, unknown>
+  const pd = pSnap.exists ? (pSnap.data() as Record<string, unknown>) : {}
   if (d.deletedAt != null) throw new Error('Hub is not available')
   if (d.ownerUserId !== params.ownerUserId) throw new Error('You do not own this hub')
 
@@ -225,9 +237,25 @@ export async function updateOwnedGroup(params: UpdateOwnedGroupParams): Promise<
   }
   applyTypeSpecific(groupType, params, profileData)
 
+  if (params.joinPolicy === 'public') {
+    groupData.membersMayShareContent = false
+    profileData.membersMayShareContent = false
+  } else if (params.membersMayShareContent !== undefined) {
+    groupData.membersMayShareContent = Boolean(params.membersMayShareContent)
+    profileData.membersMayShareContent = Boolean(params.membersMayShareContent)
+  }
+
+  const rawForIndex =
+    params.joinPolicy === 'public'
+      ? false
+      : params.membersMayShareContent !== undefined
+        ? Boolean(params.membersMayShareContent)
+        : boolish(d, 'membersMayShareContent') || boolish(pd, 'membersMayShareContent')
+  const effectiveIndex = params.joinPolicy === 'public' ? false : rawForIndex
+
   const batch = adminDb.batch()
   batch.set(gRef, groupData, { merge: true })
-  batch.set(adminDb.collection(PUBLIC_GROUP_PROFILES).doc(params.groupId), profileData, { merge: true })
+  batch.set(pRef, profileData, { merge: true })
 
   if (
     newHandleKey !== undefined &&
@@ -246,6 +274,13 @@ export async function updateOwnedGroup(params: UpdateOwnedGroupParams): Promise<
   }
 
   await batch.commit()
+
+  await refreshGroupMembershipIndexShareSettings({
+    groupId: params.groupId,
+    ownerUserId: params.ownerUserId,
+    joinPolicy: params.joinPolicy,
+    effectiveMembersMayShareContent: effectiveIndex,
+  })
 }
 
 export async function changeOwnedGroupHandle(params: {

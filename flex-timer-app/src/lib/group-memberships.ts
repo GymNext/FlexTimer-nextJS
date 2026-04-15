@@ -66,11 +66,12 @@ export type MembershipGroupListItem = {
   groupType: AppGroupType | null
   /** Public handle for top-level hubs only (`null` for sub-hubs under a parent). */
   handle: string | null
+  joinPolicy: AppGroupJoinPolicy
+  /** Whether non-owner members may share library items to the hub (`groups` + `publicGroupProfiles`). */
+  membersMayShareContent: boolean
 }
 
 export type MembershipGroupDetail = MembershipGroupListItem & {
-  handle: string | null
-  joinPolicy: AppGroupJoinPolicy
   bio: string | null
   country: string | null
   region: string | null
@@ -83,6 +84,26 @@ export type MembershipGroupDetail = MembershipGroupListItem & {
 
 function joinPolicyFromData(d: Record<string, unknown>): AppGroupJoinPolicy {
   return parseFirestoreJoinPolicy(d.joinPolicy) ?? 'private'
+}
+
+/** Same semantics as membership index (`group-invite`): public hubs never get member share. */
+function boolishField(d: Record<string, unknown>, key: string): boolean {
+  const v = d[key]
+  if (typeof v === 'boolean') return v
+  if (typeof v === 'number') return v !== 0
+  return false
+}
+
+/** Effective member-share flag (public hubs always false). Used by GET hub and membership detail. */
+export function membersMayShareContentFromGroupDocs(
+  groupDoc: Record<string, unknown>,
+  publicProfileDoc: Record<string, unknown>,
+): boolean {
+  if (joinPolicyFromData(groupDoc) === 'public') return false
+  return (
+    boolishField(publicProfileDoc, 'membersMayShareContent') ||
+    boolishField(groupDoc, 'membersMayShareContent')
+  )
 }
 
 function groupTypeFromData(d: Record<string, unknown>): AppGroupType | null {
@@ -109,20 +130,26 @@ export async function loadMembershipListItems(
   const out: MembershipGroupListItem[] = []
   for (let i = 0; i < groupIds.length; i += 10) {
     const slice = groupIds.slice(i, i + 10)
-    const refs = slice.map((id) => db.collection(GROUPS).doc(id))
-    const snaps = await db.getAll(...refs)
-    for (const snap of snaps) {
+    const gRefs = slice.map((id) => db.collection(GROUPS).doc(id))
+    const pRefs = slice.map((id) => db.collection(PUBLIC_GROUP_PROFILES).doc(id))
+    const [gSnaps, pSnaps] = await Promise.all([db.getAll(...gRefs), db.getAll(...pRefs)])
+    for (let j = 0; j < gSnaps.length; j += 1) {
+      const snap = gSnaps[j]
       if (!snap.exists) continue
       const d = snap.data() as Record<string, unknown>
       if (deleted(d)) continue
       if (excludeOwner && str(d, 'ownerUserId').trim() === excludeOwner) continue
       const name = str(d, 'name').trim()
       if (!name) continue
+      const pSnap = pSnaps[j]
+      const pd = pSnap?.exists ? (pSnap.data() as Record<string, unknown>) : {}
       out.push({
         groupId: snap.id,
         name,
         groupType: groupTypeFromData(d),
         handle: handleForDisplay(d),
+        joinPolicy: joinPolicyFromData(d),
+        membersMayShareContent: membersMayShareContentFromGroupDocs(d, pd),
       })
     }
   }
@@ -160,5 +187,6 @@ export async function loadMembershipGroupDetail(
     photoUrl: pickGroupPhotoUrl(gd, pd as Record<string, unknown>),
     memberRole,
     ownerUserId: ownerUserIdRaw || null,
+    membersMayShareContent: membersMayShareContentFromGroupDocs(gd, pd as Record<string, unknown>),
   }
 }

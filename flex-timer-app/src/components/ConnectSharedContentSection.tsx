@@ -16,9 +16,15 @@ import {
 } from '@/components/DuplicateSharedWorkoutDialog'
 import {
   SharedResourcePreviewDialog,
+  type LibraryBookmarkLookup,
   type SharedResourcePreviewTarget,
 } from '@/components/SharedResourcePreviewDialog'
+import type { SharedCollectionBookmarkRow, SharedWorkoutBookmarkRow } from '@/lib/bookmarks'
 import type { Workout } from '@/types/user'
+
+function libraryBookmarkKey(ownerUserId: string, resourceId: string): string {
+  return `${ownerUserId.trim()}\u001e${resourceId.trim()}`
+}
 
 type SharedItem = {
   kind: 'workout' | 'collection' | 'plan'
@@ -50,7 +56,7 @@ type HubSharedRow = {
   plans: SharedItem[]
 }
 
-/** Subset of GET /api/app/following-plans rows needed for subscribe / unsubscribe UI. */
+/** Subset of GET /api/app/following-plans rows needed for subscribe / unfollow UI. */
 export type FollowedPlanForSharedContent = {
   subscriptionDocumentId: string
   ownerUserId: string
@@ -77,6 +83,9 @@ function SharedWorkoutRow({
   onOpen,
   onStartDuplicateSharedWorkout,
   onStartAddSharedWorkoutToPlan,
+  bookmarkSharedWorkout,
+  removeSharedWorkoutBookmark,
+  isBookmarked,
 }: {
   item: SharedItem
   groupId: string
@@ -84,13 +93,18 @@ function SharedWorkoutRow({
   onOpen: (t: SharedResourcePreviewTarget) => void
   onStartDuplicateSharedWorkout: (ctx: DuplicateSharedWorkoutContext) => void
   onStartAddSharedWorkoutToPlan: (ownerUserId: string, resourceId: string, groupId: string) => void
+  bookmarkSharedWorkout?: (ownerUserId: string, resourceId: string, groupId: string) => Promise<void>
+  removeSharedWorkoutBookmark?: (ownerUserId: string, resourceId: string) => Promise<void>
+  isBookmarked?: boolean
 }) {
   const bar = item.workoutBarColor ?? DEFAULT_WORKOUT_BAR
   const sub = item.subtitle?.trim() || '—'
   const isOwnWorkout = item.ownerUserId === viewerUid
+  const bookmarked = Boolean(isBookmarked)
 
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuAnchorRect, setMenuAnchorRect] = useState<DOMRect | null>(null)
+  const [bookmarkBusy, setBookmarkBusy] = useState(false)
   const menuWrapRef = useRef<HTMLDivElement>(null)
   const menuPanelRef = useRef<HTMLDivElement>(null)
 
@@ -118,9 +132,27 @@ function SharedWorkoutRow({
 
   return (
     <li className="flex items-stretch bg-white">
+      {!isOwnWorkout && bookmarked && (
+        <div
+          className="flex shrink-0 items-center border-r border-gray-100 pl-3 pr-2"
+          aria-label="You have bookmarked this workout"
+        >
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+            <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+              <path
+                fillRule="evenodd"
+                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </span>
+        </div>
+      )}
       <button
         type="button"
-        className="flex min-w-0 flex-1 items-center gap-3 py-3 pl-3 pr-2 text-left hover:bg-gray-100"
+        className={`flex min-w-0 flex-1 items-center gap-3 py-3 pr-2 text-left hover:bg-gray-100 ${
+          !isOwnWorkout && bookmarked ? 'pl-2' : 'pl-3'
+        }`}
         onClick={openPreview}
       >
         <span className="w-1 shrink-0 self-stretch min-h-[3rem] rounded-full" style={{ backgroundColor: bar }} aria-hidden />
@@ -174,6 +206,54 @@ function SharedWorkoutRow({
                     right: typeof window !== 'undefined' ? window.innerWidth - menuAnchorRect.right : 0,
                   }}
                 >
+                  {bookmarked && removeSharedWorkoutBookmark && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={bookmarkBusy}
+                      className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => {
+                        void (async () => {
+                          setBookmarkBusy(true)
+                          try {
+                            await removeSharedWorkoutBookmark(item.ownerUserId, item.resourceId)
+                            setMenuOpen(false)
+                            setMenuAnchorRect(null)
+                          } catch (e) {
+                            toast.error(e instanceof Error ? e.message : 'Could not remove bookmark')
+                          } finally {
+                            setBookmarkBusy(false)
+                          }
+                        })()
+                      }}
+                    >
+                      Remove bookmark
+                    </button>
+                  )}
+                  {!bookmarked && bookmarkSharedWorkout && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={bookmarkBusy}
+                      className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => {
+                        void (async () => {
+                          setBookmarkBusy(true)
+                          try {
+                            await bookmarkSharedWorkout(item.ownerUserId, item.resourceId, groupId)
+                            setMenuOpen(false)
+                            setMenuAnchorRect(null)
+                          } catch (e) {
+                            toast.error(e instanceof Error ? e.message : 'Could not bookmark workout')
+                          } finally {
+                            setBookmarkBusy(false)
+                          }
+                        })()
+                      }}
+                    >
+                      Bookmark workout
+                    </button>
+                  )}
                   <button
                     type="button"
                     role="menuitem"
@@ -218,20 +298,28 @@ function SharedCollectionRow({
   viewerUid,
   onOpen,
   onStartDuplicateSharedCollection,
+  bookmarkSharedCollection,
+  removeSharedCollectionBookmark,
+  isBookmarked,
 }: {
   item: SharedItem
   groupId: string
   viewerUid: string
   onOpen: (t: SharedResourcePreviewTarget) => void
   onStartDuplicateSharedCollection: (ctx: DuplicateSharedCollectionContext) => void
+  bookmarkSharedCollection?: (ownerUserId: string, resourceId: string, groupId: string) => Promise<void>
+  removeSharedCollectionBookmark?: (ownerUserId: string, resourceId: string) => Promise<void>
+  isBookmarked?: boolean
 }) {
   const n = item.collectionWorkoutCount ?? 0
   const trimmedSubtitle = item.subtitle?.trim()
   const sub = trimmedSubtitle || (n === 1 ? '1 workout' : `${n} workouts`)
   const isOwnCollection = item.ownerUserId === viewerUid
+  const bookmarked = Boolean(isBookmarked)
 
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuAnchorRect, setMenuAnchorRect] = useState<DOMRect | null>(null)
+  const [bookmarkBusy, setBookmarkBusy] = useState(false)
   const menuWrapRef = useRef<HTMLDivElement>(null)
   const menuPanelRef = useRef<HTMLDivElement>(null)
 
@@ -259,9 +347,27 @@ function SharedCollectionRow({
 
   return (
     <li className="flex items-stretch bg-white">
+      {!isOwnCollection && bookmarked && (
+        <div
+          className="flex shrink-0 items-center border-r border-gray-100 pl-3 pr-2"
+          aria-label="You have bookmarked this collection"
+        >
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+            <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+              <path
+                fillRule="evenodd"
+                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </span>
+        </div>
+      )}
       <button
         type="button"
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 py-3 pl-3 pr-2 text-left hover:bg-gray-100"
+        className={`flex min-w-0 flex-1 cursor-pointer items-center gap-3 py-3 pr-2 text-left hover:bg-gray-100 ${
+          !isOwnCollection && bookmarked ? 'pl-2' : 'pl-3'
+        }`}
         onClick={openPreview}
       >
         <span
@@ -320,6 +426,54 @@ function SharedCollectionRow({
                     right: typeof window !== 'undefined' ? window.innerWidth - menuAnchorRect.right : 0,
                   }}
                 >
+                  {bookmarked && removeSharedCollectionBookmark && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={bookmarkBusy}
+                      className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => {
+                        void (async () => {
+                          setBookmarkBusy(true)
+                          try {
+                            await removeSharedCollectionBookmark(item.ownerUserId, item.resourceId)
+                            setMenuOpen(false)
+                            setMenuAnchorRect(null)
+                          } catch (e) {
+                            toast.error(e instanceof Error ? e.message : 'Could not remove bookmark')
+                          } finally {
+                            setBookmarkBusy(false)
+                          }
+                        })()
+                      }}
+                    >
+                      Remove bookmark
+                    </button>
+                  )}
+                  {!bookmarked && bookmarkSharedCollection && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={bookmarkBusy}
+                      className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => {
+                        void (async () => {
+                          setBookmarkBusy(true)
+                          try {
+                            await bookmarkSharedCollection(item.ownerUserId, item.resourceId, groupId)
+                            setMenuOpen(false)
+                            setMenuAnchorRect(null)
+                          } catch (e) {
+                            toast.error(e instanceof Error ? e.message : 'Could not bookmark collection')
+                          } finally {
+                            setBookmarkBusy(false)
+                          }
+                        })()
+                      }}
+                    >
+                      Bookmark collection
+                    </button>
+                  )}
                   <button
                     type="button"
                     role="menuitem"
@@ -445,7 +599,7 @@ function SharedPlanRow({
       setMenuOpen(false)
       setMenuAnchorRect(null)
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Could not unsubscribe from this plan')
+      toast.error(e instanceof Error ? e.message : 'Could not unfollow this plan')
     } finally {
       setActionBusy(false)
     }
@@ -702,6 +856,58 @@ export function ConnectSharedContentSection({
   const [duplicateWorkoutCtx, setDuplicateWorkoutCtx] = useState<DuplicateSharedWorkoutContext | null>(null)
   const [addPlanOpen, setAddPlanOpen] = useState(false)
   const [addPlanWorkout, setAddPlanWorkout] = useState<Workout | null>(null)
+  const [workoutBookmarkRows, setWorkoutBookmarkRows] = useState<SharedWorkoutBookmarkRow[]>([])
+  const [collectionBookmarkRows, setCollectionBookmarkRows] = useState<SharedCollectionBookmarkRow[]>([])
+
+  const loadLibraryBookmarks = useCallback(async () => {
+    try {
+      const token = await user.getIdToken()
+      const res = await fetch('/api/app/bookmarks', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${token}` },
+      })
+      const json = (await res.json().catch(() => ({}))) as {
+        error?: string
+        workouts?: SharedWorkoutBookmarkRow[]
+        collections?: SharedCollectionBookmarkRow[]
+      }
+      if (!res.ok) {
+        setWorkoutBookmarkRows([])
+        setCollectionBookmarkRows([])
+        return
+      }
+      setWorkoutBookmarkRows(Array.isArray(json.workouts) ? json.workouts : [])
+      setCollectionBookmarkRows(Array.isArray(json.collections) ? json.collections : [])
+    } catch {
+      setWorkoutBookmarkRows([])
+      setCollectionBookmarkRows([])
+    }
+  }, [user])
+
+  const bookmarkedWorkoutKeys = useMemo(() => {
+    const s = new Set<string>()
+    for (const w of workoutBookmarkRows) {
+      s.add(libraryBookmarkKey(w.ownerUserId, w.remoteWorkoutId))
+    }
+    return s
+  }, [workoutBookmarkRows])
+
+  const bookmarkedCollectionKeys = useMemo(() => {
+    const s = new Set<string>()
+    for (const c of collectionBookmarkRows) {
+      s.add(libraryBookmarkKey(c.ownerUserId, c.remoteCollectionId))
+    }
+    return s
+  }, [collectionBookmarkRows])
+
+  const isLibraryBookmarkActive = useCallback<LibraryBookmarkLookup>(
+    ({ kind, ownerUserId, resourceId }) => {
+      const k = libraryBookmarkKey(ownerUserId, resourceId)
+      if (kind === 'workout') return bookmarkedWorkoutKeys.has(k)
+      return bookmarkedCollectionKeys.has(k)
+    },
+    [bookmarkedWorkoutKeys, bookmarkedCollectionKeys],
+  )
 
   const onStartDuplicateSharedCollection = useCallback((ctx: DuplicateSharedCollectionContext) => {
     setDuplicateCollectionCtx(ctx)
@@ -760,6 +966,107 @@ export function ConnectSharedContentSection({
     setAddPlanWorkout(w)
     setAddPlanOpen(true)
   }, [])
+
+  const onPreviewCollectionDuplicate = useCallback((t: SharedResourcePreviewTarget) => {
+    setPreview(null)
+    setDuplicateCollectionCtx({
+      ownerUserId: t.ownerUserId,
+      sourceCollectionId: t.resourceId,
+      groupId: t.groupId,
+    })
+  }, [])
+
+  const bookmarkSharedWorkout = useCallback(
+    async (ownerUserId: string, resourceId: string, groupId: string) => {
+      const token = await user.getIdToken()
+      const body: { ownerUserId: string; remoteWorkoutId: string; groupId?: string } = {
+        ownerUserId,
+        remoteWorkoutId: resourceId,
+      }
+      if (groupId.trim()) body.groupId = groupId.trim()
+      const res = await fetch('/api/app/bookmarks/workouts', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data.error || 'Could not bookmark workout')
+      toast.success('Saved to bookmarks')
+      await loadLibraryBookmarks()
+    },
+    [user, loadLibraryBookmarks],
+  )
+
+  const bookmarkSharedCollection = useCallback(
+    async (ownerUserId: string, resourceId: string, groupId: string) => {
+      const token = await user.getIdToken()
+      const body: { ownerUserId: string; remoteCollectionId: string; groupId?: string } = {
+        ownerUserId,
+        remoteCollectionId: resourceId,
+      }
+      if (groupId.trim()) body.groupId = groupId.trim()
+      const res = await fetch('/api/app/bookmarks/collections', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data.error || 'Could not bookmark collection')
+      toast.success('Saved to bookmarks')
+      await loadLibraryBookmarks()
+    },
+    [user, loadLibraryBookmarks],
+  )
+
+  const removeSharedWorkoutBookmark = useCallback(
+    async (ownerUserId: string, resourceId: string) => {
+      const token = await user.getIdToken()
+      const res = await fetch('/api/app/bookmarks/workouts', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId,
+          remoteWorkoutId: resourceId,
+        }),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data.error || 'Could not remove bookmark')
+      toast.success('Bookmark removed')
+      await loadLibraryBookmarks()
+    },
+    [user, loadLibraryBookmarks],
+  )
+
+  const removeSharedCollectionBookmark = useCallback(
+    async (ownerUserId: string, resourceId: string) => {
+      const token = await user.getIdToken()
+      const res = await fetch('/api/app/bookmarks/collections', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId,
+          remoteCollectionId: resourceId,
+        }),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data.error || 'Could not remove bookmark')
+      toast.success('Bookmark removed')
+      await loadLibraryBookmarks()
+    },
+    [user, loadLibraryBookmarks],
+  )
 
   const isAlreadyFollowingPlan = useCallback(
     (ownerUserId: string, planId: string) =>
@@ -852,6 +1159,7 @@ export function ConnectSharedContentSection({
       setTotalMemberships(
         typeof data.totalMemberships === 'number' ? data.totalMemberships : 0
       )
+      void loadLibraryBookmarks()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load shared content')
       setPeers([])
@@ -861,7 +1169,7 @@ export function ConnectSharedContentSection({
     } finally {
       setLoading(false)
     }
-  }, [user])
+  }, [user, loadLibraryBookmarks])
 
   useEffect(() => {
     void load()
@@ -967,6 +1275,7 @@ export function ConnectSharedContentSection({
         viewer={user}
         onWorkoutMenuDuplicate={onPreviewWorkoutDuplicate}
         onWorkoutMenuAddToPlan={onPreviewWorkoutAddToPlan}
+        onCollectionMenuDuplicate={onPreviewCollectionDuplicate}
         followPlanFromFeed={followPlanFromShared}
         isAlreadyFollowingPlan={isAlreadyFollowingPlan}
         onFollowPlanSuccess={() => void onFollowedPlansChange?.()}
@@ -974,6 +1283,8 @@ export function ConnectSharedContentSection({
         subscriptionDocumentIdForPlan={subscriptionDocumentIdForPlan}
         onGoToOwnedPlan={onGoToOwnedPlan}
         onGoToSubscribedPlanAhead={onGoToSubscribedPlanAhead}
+        isLibraryBookmarkActive={isLibraryBookmarkActive}
+        onLibraryBookmarksSaved={loadLibraryBookmarks}
       />
       <div className="min-h-0 flex-1 overflow-hidden">
         {loading && (
@@ -1100,6 +1411,11 @@ export function ConnectSharedContentSection({
                             viewerUid={viewerUid}
                             onOpen={setPreview}
                             onStartDuplicateSharedCollection={onStartDuplicateSharedCollection}
+                            bookmarkSharedCollection={bookmarkSharedCollection}
+                            removeSharedCollectionBookmark={removeSharedCollectionBookmark}
+                            isBookmarked={bookmarkedCollectionKeys.has(
+                              libraryBookmarkKey(c.ownerUserId, c.resourceId),
+                            )}
                           />
                         ))}
                       </ul>
@@ -1123,6 +1439,11 @@ export function ConnectSharedContentSection({
                             onOpen={setPreview}
                             onStartDuplicateSharedWorkout={onStartDuplicateSharedWorkout}
                             onStartAddSharedWorkoutToPlan={onStartAddSharedWorkoutToPlan}
+                            bookmarkSharedWorkout={bookmarkSharedWorkout}
+                            removeSharedWorkoutBookmark={removeSharedWorkoutBookmark}
+                            isBookmarked={bookmarkedWorkoutKeys.has(
+                              libraryBookmarkKey(w.ownerUserId, w.resourceId),
+                            )}
                           />
                         ))}
                       </ul>

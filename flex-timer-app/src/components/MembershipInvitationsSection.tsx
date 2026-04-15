@@ -5,6 +5,7 @@ import type { User } from 'firebase/auth'
 import toast from 'react-hot-toast'
 import { GroupPublicProfileDialog } from '@/components/GroupPublicProfileDialog'
 import { notifyPendingInvitesNavChanged } from '@/hooks/usePendingInvitationsNavBadges'
+import { notifyHubJoinRequestsNavChanged } from '@/hooks/useHubJoinRequestNavBadges'
 import { PublicUserProfileDialog } from '@/components/PublicUserProfileDialog'
 import type { AppGroupJoinPolicy, AppGroupType } from '@/types/group'
 import { hubTypeCard } from '@/lib/hub-type-cards'
@@ -101,6 +102,7 @@ export function MembershipInvitationsSection({
         toast.success(`You joined ${groupName}.`)
         await load()
         notifyPendingInvitesNavChanged()
+        notifyHubJoinRequestsNavChanged()
         await onInvitesChanged?.()
       } catch (e) {
         toast.error(e instanceof Error ? e.message : 'Could not accept')

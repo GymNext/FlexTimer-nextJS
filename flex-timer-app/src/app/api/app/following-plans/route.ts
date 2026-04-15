@@ -196,6 +196,7 @@ export async function PATCH(request: NextRequest) {
     const followingPlans = await Promise.all(
       subs.map(async (sub) => {
         const plan = await getPlanById(sub.ownerUserId, sub.remotePlanId)
+        const remotePlanUnavailable = !plan || Boolean(plan.deletedAt)
         const live =
           plan && !plan.deletedAt ? (plan.workoutPlanDescription ?? '').trim() || null : null
         const remotePlanDescription = live ?? sub.remotePlanDescription ?? null
@@ -203,7 +204,13 @@ export async function PATCH(request: NextRequest) {
           followSource: sub.followSource ?? null,
           followContextGroupId: sub.followContextGroupId ?? null,
         })
-        return { ...sub, remotePlanDescription, ...remotePlanKindFromLivePlan(plan), ...access }
+        return {
+          ...sub,
+          remotePlanDescription,
+          remotePlanUnavailable,
+          ...remotePlanKindFromLivePlan(plan),
+          ...access,
+        }
       })
     )
     return NextResponse.json({ followingPlans })
@@ -230,6 +237,7 @@ export async function GET(request: NextRequest) {
     const followingPlans = await Promise.all(
       subs.map(async (sub) => {
         const plan = await getPlanById(sub.ownerUserId, sub.remotePlanId)
+        const remotePlanUnavailable = !plan || Boolean(plan.deletedAt)
         const live =
           plan && !plan.deletedAt ? (plan.workoutPlanDescription ?? '').trim() || null : null
         const remotePlanDescription = live ?? sub.remotePlanDescription ?? null
@@ -237,7 +245,13 @@ export async function GET(request: NextRequest) {
           followSource: sub.followSource ?? null,
           followContextGroupId: sub.followContextGroupId ?? null,
         })
-        return { ...sub, remotePlanDescription, ...remotePlanKindFromLivePlan(plan), ...access }
+        return {
+          ...sub,
+          remotePlanDescription,
+          remotePlanUnavailable,
+          ...remotePlanKindFromLivePlan(plan),
+          ...access,
+        }
       })
     )
     return NextResponse.json({ followingPlans })

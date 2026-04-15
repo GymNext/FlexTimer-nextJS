@@ -23,17 +23,32 @@ export type SharedResourcePreviewTarget = {
   titleFallback: string
 }
 
+/** Library bookmark (workout / collection subscription) lookup for Shared Content style UI. */
+export type LibraryBookmarkLookup = (params: {
+  kind: 'workout' | 'collection'
+  ownerUserId: string
+  resourceId: string
+}) => boolean
+
 /** Per-workout … menu inside collection preview (portal so dialog overflow-hidden does not clip). */
 function CollectionWorkoutRowWithMenu({
   workout,
   collectionTarget,
   onWorkoutMenuDuplicate,
   onWorkoutMenuAddToPlan,
+  onBookmarkWorkout,
+  onRemoveBookmarkWorkout,
+  isWorkoutBookmarked,
+  bookmarkBusy,
 }: {
   workout: Workout
   collectionTarget: SharedResourcePreviewTarget
   onWorkoutMenuDuplicate?: (t: SharedResourcePreviewTarget) => void
   onWorkoutMenuAddToPlan?: (w: Workout) => void
+  onBookmarkWorkout?: (t: SharedResourcePreviewTarget) => void
+  onRemoveBookmarkWorkout?: (t: SharedResourcePreviewTarget) => void
+  isWorkoutBookmarked?: boolean
+  bookmarkBusy?: boolean
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuAnchorRect, setMenuAnchorRect] = useState<DOMRect | null>(null)
@@ -62,7 +77,12 @@ function CollectionWorkoutRowWithMenu({
     titleFallback: getWorkoutDisplayName(workout).trim() || 'Workout',
   }
 
-  const showMenu = Boolean(onWorkoutMenuDuplicate || onWorkoutMenuAddToPlan)
+  const showMenu = Boolean(
+    onWorkoutMenuDuplicate ||
+      onWorkoutMenuAddToPlan ||
+      onBookmarkWorkout ||
+      (isWorkoutBookmarked && onRemoveBookmarkWorkout),
+  )
 
   return (
     <li className="flex items-start gap-2 rounded-md border border-gymnext-muted/30 bg-gymnext-background/40 px-2.5 py-2">
@@ -114,6 +134,36 @@ function CollectionWorkoutRowWithMenu({
                     right: typeof window !== 'undefined' ? window.innerWidth - menuAnchorRect.right : 0,
                   }}
                 >
+                  {isWorkoutBookmarked && onRemoveBookmarkWorkout && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={bookmarkBusy}
+                      className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => {
+                        setMenuOpen(false)
+                        setMenuAnchorRect(null)
+                        onRemoveBookmarkWorkout(workoutTarget)
+                      }}
+                    >
+                      Remove bookmark
+                    </button>
+                  )}
+                  {!isWorkoutBookmarked && onBookmarkWorkout && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={bookmarkBusy}
+                      className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => {
+                        setMenuOpen(false)
+                        setMenuAnchorRect(null)
+                        onBookmarkWorkout(workoutTarget)
+                      }}
+                    >
+                      Bookmark workout
+                    </button>
+                  )}
                   {onWorkoutMenuDuplicate && (
                     <button
                       type="button"
@@ -167,6 +217,8 @@ export function SharedResourcePreviewDialog({
   subscriptionDocumentIdForPlan,
   onGoToOwnedPlan,
   onGoToSubscribedPlanAhead,
+  isLibraryBookmarkActive,
+  onLibraryBookmarksSaved,
 }: {
   open: boolean
   target: SharedResourcePreviewTarget | null
@@ -188,13 +240,17 @@ export function SharedResourcePreviewDialog({
   }) => Promise<{ status: string }>
   isAlreadyFollowingPlan?: (ownerUserId: string, planId: string) => boolean
   onFollowPlanSuccess?: () => void
-  /** With `subscriptionDocumentIdForPlan`, plan … menu can offer Unsubscribe. */
+  /** With `subscriptionDocumentIdForPlan`, plan … menu can offer Unfollow. */
   unfollowPlanFromFeed?: (subscriptionDocumentId: string) => Promise<void>
   subscriptionDocumentIdForPlan?: (ownerUserId: string, planId: string) => string | null
   /** When the preview is the viewer’s own plan (e.g. activity feed “You shared a plan”), jump to Planning → Plans with this plan selected. */
   onGoToOwnedPlan?: (planId: string) => void
   /** When already following someone else’s plan, … menu can open Plan Ahead with this subscription active. */
   onGoToSubscribedPlanAhead?: (ownerUserId: string, remotePlanId: string) => void
+  /** When set (e.g. Connect → Shared Content), show header check for bookmarked workouts / collections. */
+  isLibraryBookmarkActive?: LibraryBookmarkLookup
+  /** After a workout or collection bookmark is saved from this dialog; parent can refetch subscription lists. */
+  onLibraryBookmarksSaved?: () => void | Promise<void>
 }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -208,8 +264,10 @@ export function SharedResourcePreviewDialog({
   const [collectionMenuOpen, setCollectionMenuOpen] = useState(false)
   const [planMenuOpen, setPlanMenuOpen] = useState(false)
   const [followBusy, setFollowBusy] = useState(false)
+  const [bookmarkBusy, setBookmarkBusy] = useState(false)
   const collectionMenuRef = useRef<HTMLDivElement>(null)
   const planMenuRef = useRef<HTMLDivElement>(null)
+  const workoutMenuRef = useRef<HTMLDivElement>(null)
 
   const load = useCallback(async () => {
     if (!target) return
@@ -266,6 +324,7 @@ export function SharedResourcePreviewDialog({
       setWorkoutMenuOpen(false)
       setCollectionMenuOpen(false)
       setPlanMenuOpen(false)
+      setBookmarkBusy(false)
       return
     }
     void load()
@@ -293,7 +352,200 @@ export function SharedResourcePreviewDialog({
     return () => document.removeEventListener('mousedown', onDocMouseDown)
   }, [planMenuOpen])
 
+  useEffect(() => {
+    if (!workoutMenuOpen) return
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (workoutMenuRef.current && !workoutMenuRef.current.contains(e.target as Node)) {
+        setWorkoutMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocMouseDown)
+    return () => document.removeEventListener('mousedown', onDocMouseDown)
+  }, [workoutMenuOpen])
+
+  const postBookmarkWorkout = useCallback(
+    async (t: SharedResourcePreviewTarget) => {
+      const ownerFromPayload =
+        payload?.kind === 'workout' && typeof payload.data.userId === 'string'
+          ? payload.data.userId.trim()
+          : ''
+      const ownerFromCollectionPayload =
+        payload?.kind === 'collection' && typeof payload.data.userId === 'string'
+          ? payload.data.userId.trim()
+          : ''
+      const ownerUserId = (ownerFromPayload || ownerFromCollectionPayload || t.ownerUserId).trim()
+      const viewerUid = (viewer.uid ?? '').trim()
+      if (!ownerUserId || ownerUserId === viewerUid) return
+      setBookmarkBusy(true)
+      try {
+        const token = await viewer.getIdToken()
+        const gid = t.groupId.trim()
+        const res = await fetch('/api/app/bookmarks/workouts', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ownerUserId,
+            remoteWorkoutId: t.resourceId,
+            ...(gid ? { groupId: gid } : {}),
+          }),
+        })
+        const data = (await res.json().catch(() => ({}))) as { error?: string }
+        if (!res.ok) throw new Error(data.error || 'Could not bookmark workout')
+        toast.success('Saved to bookmarks')
+        setWorkoutMenuOpen(false)
+        await Promise.resolve(onLibraryBookmarksSaved?.())
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : 'Could not bookmark workout')
+      } finally {
+        setBookmarkBusy(false)
+      }
+    },
+    [viewer, payload, onLibraryBookmarksSaved],
+  )
+
+  const postBookmarkCollection = useCallback(async () => {
+    if (!target || target.kind !== 'collection') return
+    const ownerFromPayload =
+      payload?.kind === 'collection' && typeof payload.data.userId === 'string'
+        ? payload.data.userId.trim()
+        : ''
+    const ownerUserId = (ownerFromPayload || target.ownerUserId).trim()
+    const viewerUid = (viewer.uid ?? '').trim()
+    if (!ownerUserId || ownerUserId === viewerUid) return
+    setBookmarkBusy(true)
+    try {
+      const token = await viewer.getIdToken()
+      const gid = target.groupId.trim()
+      const res = await fetch('/api/app/bookmarks/collections', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ownerUserId,
+          remoteCollectionId: target.resourceId,
+          ...(gid ? { groupId: gid } : {}),
+        }),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data.error || 'Could not bookmark collection')
+      toast.success('Saved to bookmarks')
+      setCollectionMenuOpen(false)
+      await Promise.resolve(onLibraryBookmarksSaved?.())
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not bookmark collection')
+    } finally {
+      setBookmarkBusy(false)
+    }
+  }, [target, viewer, payload, onLibraryBookmarksSaved])
+
+  const postRemoveBookmarkWorkout = useCallback(
+    async (t: SharedResourcePreviewTarget) => {
+      const ownerFromPayload =
+        payload?.kind === 'workout' && typeof payload.data.userId === 'string'
+          ? payload.data.userId.trim()
+          : ''
+      const ownerFromCollectionPayload =
+        payload?.kind === 'collection' && typeof payload.data.userId === 'string'
+          ? payload.data.userId.trim()
+          : ''
+      const ownerUserId = (ownerFromPayload || ownerFromCollectionPayload || t.ownerUserId).trim()
+      const viewerUid = (viewer.uid ?? '').trim()
+      if (!ownerUserId || ownerUserId === viewerUid) return
+      setBookmarkBusy(true)
+      try {
+        const token = await viewer.getIdToken()
+        const res = await fetch('/api/app/bookmarks/workouts', {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ownerUserId,
+            remoteWorkoutId: t.resourceId,
+          }),
+        })
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string }
+          throw new Error(data.error || 'Could not remove bookmark')
+        }
+        toast.success('Bookmark removed')
+        setWorkoutMenuOpen(false)
+        await Promise.resolve(onLibraryBookmarksSaved?.())
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : 'Could not remove bookmark')
+      } finally {
+        setBookmarkBusy(false)
+      }
+    },
+    [viewer, payload, onLibraryBookmarksSaved],
+  )
+
+  const postRemoveBookmarkCollection = useCallback(async () => {
+    if (!target || target.kind !== 'collection') return
+    const ownerFromPayload =
+      payload?.kind === 'collection' && typeof payload.data.userId === 'string'
+        ? payload.data.userId.trim()
+        : ''
+    const ownerUserId = (ownerFromPayload || target.ownerUserId).trim()
+    const viewerUid = (viewer.uid ?? '').trim()
+    if (!ownerUserId || ownerUserId === viewerUid) return
+    setBookmarkBusy(true)
+    try {
+      const token = await viewer.getIdToken()
+      const res = await fetch('/api/app/bookmarks/collections', {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ownerUserId,
+          remoteCollectionId: target.resourceId,
+        }),
+      })
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(data.error || 'Could not remove bookmark')
+      }
+      toast.success('Bookmark removed')
+      setCollectionMenuOpen(false)
+      await Promise.resolve(onLibraryBookmarksSaved?.())
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not remove bookmark')
+    } finally {
+      setBookmarkBusy(false)
+    }
+  }, [target, viewer, payload, onLibraryBookmarksSaved])
+
   if (!open || !target) return null
+
+  const viewerUid = (viewer.uid ?? '').trim()
+  const payloadMatchesTarget =
+    (target.kind === 'workout' && payload?.kind === 'workout') ||
+    (target.kind === 'collection' && payload?.kind === 'collection') ||
+    (target.kind === 'plan' && payload?.kind === 'plan')
+
+  const bookmarkContentOwner = (() => {
+    const fallback = (target.ownerUserId ?? '').trim()
+    if (!payloadMatchesTarget) return fallback
+    if (target.kind === 'workout' && payload?.kind === 'workout') {
+      const u = typeof payload.data.userId === 'string' ? payload.data.userId.trim() : ''
+      return u || fallback
+    }
+    if (target.kind === 'collection' && payload?.kind === 'collection') {
+      const u = typeof payload.data.userId === 'string' ? payload.data.userId.trim() : ''
+      return u || fallback
+    }
+    return fallback
+  })()
+
+  const canBookmarkSharedContent =
+    bookmarkContentOwner !== '' && bookmarkContentOwner !== viewerUid
+
+  const showLibraryItemBookmarked =
+    (target.kind === 'workout' || target.kind === 'collection') &&
+    typeof isLibraryBookmarkActive === 'function' &&
+    bookmarkContentOwner !== '' &&
+    bookmarkContentOwner !== viewerUid &&
+    isLibraryBookmarkActive({
+      kind: target.kind,
+      ownerUserId: bookmarkContentOwner,
+      resourceId: target.resourceId,
+    })
 
   const showGoToOwnedPlanButton =
     typeof onGoToOwnedPlan === 'function' &&
@@ -360,7 +612,7 @@ export function SharedResourcePreviewDialog({
       onFollowPlanSuccess?.()
       setPlanMenuOpen(false)
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Could not unsubscribe from this plan')
+      toast.error(e instanceof Error ? e.message : 'Could not unfollow this plan')
     } finally {
       setFollowBusy(false)
     }
@@ -399,14 +651,32 @@ export function SharedResourcePreviewDialog({
                 </svg>
               </span>
             )}
+            {showLibraryItemBookmarked && (
+              <span
+                className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700"
+                aria-label={
+                  target.kind === 'workout'
+                    ? 'You have bookmarked this workout'
+                    : 'You have bookmarked this collection'
+                }
+              >
+                <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                  <path
+                    fillRule="evenodd"
+                    d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-1 shrink-0">
             {!loading &&
               !error &&
               payload?.kind === 'workout' &&
               target &&
-              (onWorkoutMenuDuplicate || onWorkoutMenuAddToPlan) && (
-              <div className="relative shrink-0">
+              (onWorkoutMenuDuplicate || onWorkoutMenuAddToPlan || canBookmarkSharedContent) && (
+              <div className="relative shrink-0" ref={workoutMenuRef}>
                 <button
                   type="button"
                   onClick={() => setWorkoutMenuOpen((o) => !o)}
@@ -422,6 +692,28 @@ export function SharedResourcePreviewDialog({
                     className="absolute right-0 top-full z-10 mt-1 min-w-[14rem] rounded-md border border-gymnext-muted/40 bg-white py-1 shadow-lg"
                     role="menu"
                   >
+                    {canBookmarkSharedContent && showLibraryItemBookmarked && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={bookmarkBusy}
+                        className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => void postRemoveBookmarkWorkout(target)}
+                      >
+                        Remove bookmark
+                      </button>
+                    )}
+                    {canBookmarkSharedContent && !showLibraryItemBookmarked && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={bookmarkBusy}
+                        className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => void postBookmarkWorkout(target)}
+                      >
+                        Bookmark workout
+                      </button>
+                    )}
                     {onWorkoutMenuAddToPlan && (
                       <button
                         type="button"
@@ -493,7 +785,7 @@ export function SharedResourcePreviewDialog({
                         onClick={() => void onUnfollowPlanClick()}
                         className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:opacity-50"
                       >
-                        Unsubscribe
+                        Unfollow
                       </button>
                     )}
                   {typeof onGoToSubscribedPlanAhead !== 'function' &&
@@ -518,7 +810,7 @@ export function SharedResourcePreviewDialog({
             {!loading &&
               !error &&
               payload?.kind === 'collection' &&
-              onCollectionMenuDuplicate && (
+              (onCollectionMenuDuplicate || canBookmarkSharedContent) && (
               <div className="relative shrink-0" ref={collectionMenuRef}>
                 <button
                   type="button"
@@ -535,17 +827,41 @@ export function SharedResourcePreviewDialog({
                     className="absolute right-0 top-full z-10 mt-1 min-w-[14rem] rounded-md border border-gymnext-muted/40 bg-white py-1 shadow-lg"
                     role="menu"
                   >
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background"
-                      onClick={() => {
-                        setCollectionMenuOpen(false)
-                        onCollectionMenuDuplicate(target)
-                      }}
-                    >
-                      Duplicate collection to library
-                    </button>
+                    {canBookmarkSharedContent && showLibraryItemBookmarked && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={bookmarkBusy}
+                        className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => void postRemoveBookmarkCollection()}
+                      >
+                        Remove bookmark
+                      </button>
+                    )}
+                    {canBookmarkSharedContent && !showLibraryItemBookmarked && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={bookmarkBusy}
+                        className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => void postBookmarkCollection()}
+                      >
+                        Bookmark collection
+                      </button>
+                    )}
+                    {onCollectionMenuDuplicate && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background"
+                        onClick={() => {
+                          setCollectionMenuOpen(false)
+                          onCollectionMenuDuplicate(target)
+                        }}
+                      >
+                        Duplicate collection to library
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -615,15 +931,33 @@ export function SharedResourcePreviewDialog({
                     Workouts in this collection
                   </p>
                   <ul className="space-y-2">
-                    {payload.workouts.map((w) => (
-                      <CollectionWorkoutRowWithMenu
-                        key={w.workoutId || w.id}
-                        workout={w}
-                        collectionTarget={target}
-                        onWorkoutMenuDuplicate={onWorkoutMenuDuplicate}
-                        onWorkoutMenuAddToPlan={onWorkoutMenuAddToPlan}
-                      />
-                    ))}
+                    {payload.workouts.map((w) => {
+                      const rowRid = w.workoutId?.trim() || w.id
+                      const rowBookmarked =
+                        typeof isLibraryBookmarkActive === 'function' &&
+                        isLibraryBookmarkActive({
+                          kind: 'workout',
+                          ownerUserId: bookmarkContentOwner,
+                          resourceId: rowRid,
+                        })
+                      return (
+                        <CollectionWorkoutRowWithMenu
+                          key={w.workoutId || w.id}
+                          workout={w}
+                          collectionTarget={target}
+                          onWorkoutMenuDuplicate={onWorkoutMenuDuplicate}
+                          onWorkoutMenuAddToPlan={onWorkoutMenuAddToPlan}
+                          isWorkoutBookmarked={rowBookmarked}
+                          onBookmarkWorkout={
+                            canBookmarkSharedContent && !rowBookmarked ? postBookmarkWorkout : undefined
+                          }
+                          onRemoveBookmarkWorkout={
+                            canBookmarkSharedContent && rowBookmarked ? postRemoveBookmarkWorkout : undefined
+                          }
+                          bookmarkBusy={bookmarkBusy}
+                        />
+                      )
+                    })}
                   </ul>
                   {payload.workoutsTruncated && (
                     <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1.5 mt-2">

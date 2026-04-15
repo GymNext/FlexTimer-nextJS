@@ -13,6 +13,7 @@ import {
   useSensors,
 } from '@dnd-kit/core'
 import { auth } from '@/lib/firebase'
+import { planDayTimeZoneBody, planDayTimeZoneQuerySuffix } from '@/lib/client-plan-day-timezone'
 import type { PlannedWorkout, WorkoutPlan } from '@/types/user'
 import {
   getTimerModeColor,
@@ -211,7 +212,7 @@ export default function AdminPlanDetailPage() {
           {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ day: targetDay, ordinal: newOrdinal }),
+            body: JSON.stringify({ day: targetDay, ordinal: newOrdinal, ...planDayTimeZoneBody() }),
           }
         )
         if (!res.ok) {
@@ -329,7 +330,7 @@ export default function AdminPlanDetailPage() {
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ day: createDate, ordinal: 0, workout }),
+          body: JSON.stringify({ day: createDate, ordinal: 0, workout, ...planDayTimeZoneBody() }),
         }
       )
       if (!res.ok) {

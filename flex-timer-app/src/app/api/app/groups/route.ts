@@ -26,6 +26,7 @@ type Body = {
   startDate?: string | null
   endDate?: string | null
   parentGroupId?: string | null
+  membersMayShareContent?: boolean
 }
 
 function bad(msg: string, status = 400) {
@@ -167,6 +168,13 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  const membersMayShareContent =
+    typeof body.membersMayShareContent === 'boolean' ? body.membersMayShareContent : false
+
+  if (joinPolicyParsed === 'public' && membersMayShareContent) {
+    return bad('Member content sharing is not allowed for public hubs')
+  }
+
   try {
     const { groupId } = await createOwnedGroup({
       ownerUserId: uid,
@@ -179,6 +187,7 @@ export async function POST(request: NextRequest) {
       region,
       city,
       parentGroupId,
+      membersMayShareContent,
       organizationTypeId,
       gymTypeId,
       trainingModeId,

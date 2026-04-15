@@ -60,6 +60,11 @@ export interface WorkoutPlan {
    * When false, Today omits it. Synced with mobile as `showInSchedule`.
    */
   showInSchedule?: boolean | null
+  /**
+   * IANA timezone for planned-workout `day` timestamps (local calendar midnight = `day` field).
+   * Optional; web can also send `planDayTimeZone` on create. Common Firestore keys are read in `getPlanById`.
+   */
+  dayTimeZoneId?: string | null
 }
 
 /** One entry in PlanDay.entries[] (stored as map in Firestore). Can be single-segment (flat) or MultiSegmentWorkout (has segments array). */

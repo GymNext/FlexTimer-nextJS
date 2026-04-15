@@ -12,7 +12,7 @@ import {
   deleteWorkoutHubMirrors,
   deleteWorkoutUserConnectionMirrors,
   syncCollectionUserConnectionMirrors,
-  syncPlanUserConnectionMirrors,
+  syncPlanShareMirrorsForOwner,
   syncWorkoutHubMirrors,
   syncWorkoutUserConnectionMirrors,
 } from '@/lib/user-connection-mirrors'
@@ -22,6 +22,12 @@ import {
   syncCollectionUserWorkoutMirrors,
 } from '@/lib/workout-collection-share'
 import { normalizePlanTrainingIntentFromFirestore } from '@/lib/plan-training-intent'
+import {
+  addCalendarDays,
+  isValidIanaTimeZone,
+  pickTimeZoneIdFromRecord,
+  utcMillisAtStartOfCalendarDayInTimeZone,
+} from '@/lib/planned-workout-day-timestamp'
 import { USER_COLLECTIONS, type UserDataCounts, type PlanDay, type PlanDayEntry, type PlannedWorkout, type Workout, type WorkoutCollection, type WorkoutPlan, type WorkoutSegment, type WorkoutType } from '@/types/user'
 
 /** Matches iOS `StorageManager.USER_HANDLE_INDEX_COLLECTION`. */
@@ -801,6 +807,29 @@ async function pushCollectionShareMirrors(userId: string, collectionId: string):
   await syncCollectionUserWorkoutMirrors(userId, collectionId)
 }
 
+/** Map collection fields (owner doc or share mirror `payload`) to `WorkoutCollection`. */
+export function mapCollectionFromFirestore(docId: string, d: Record<string, unknown>): WorkoutCollection {
+  const workoutIdsRaw = d.workoutIds
+  const workoutIds = Array.isArray(workoutIdsRaw)
+    ? workoutIdsRaw.filter((x): x is string => typeof x === 'string')
+    : []
+  return {
+    id: docId,
+    ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
+    userId: typeof d.userId === 'string' ? d.userId : '',
+    workoutCollectionDescription:
+      typeof d.workoutCollectionDescription === 'string' ? d.workoutCollectionDescription : null,
+    workoutCollectionId:
+      typeof d.workoutCollectionId === 'string' && d.workoutCollectionId.trim() !== ''
+        ? d.workoutCollectionId
+        : docId,
+    workoutCollectionName: typeof d.workoutCollectionName === 'string' ? d.workoutCollectionName : '',
+    workoutCollectionShareId: typeof d.workoutCollectionShareId === 'string' ? d.workoutCollectionShareId : '',
+    workoutIds,
+    deletedAt: parseDeletedAt(d),
+  }
+}
+
 /** Fetch a single workout collection by doc id from users/<userId>/workoutCollections. */
 export async function getCollectionById(userId: string, collectionId: string): Promise<WorkoutCollection | null> {
   if (!adminDb) return null
@@ -811,22 +840,7 @@ export async function getCollectionById(userId: string, collectionId: string): P
     .doc(collectionId)
     .get()
   if (!doc.exists) return null
-  const d = doc.data()!
-  const workoutIdsRaw = d.workoutIds
-  const workoutIds = Array.isArray(workoutIdsRaw)
-    ? workoutIdsRaw.filter((x): x is string => typeof x === 'string')
-    : []
-  return {
-    id: doc.id,
-    ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
-    userId: typeof d.userId === 'string' ? d.userId : '',
-    workoutCollectionDescription: d.workoutCollectionDescription ?? null,
-    workoutCollectionId: typeof d.workoutCollectionId === 'string' ? d.workoutCollectionId : '',
-    workoutCollectionName: typeof d.workoutCollectionName === 'string' ? d.workoutCollectionName : '',
-    workoutCollectionShareId: typeof d.workoutCollectionShareId === 'string' ? d.workoutCollectionShareId : '',
-    workoutIds,
-    deletedAt: parseDeletedAt(d),
-  }
+  return mapCollectionFromFirestore(doc.id, doc.data() as Record<string, unknown>)
 }
 
 /** Every workout id listed on a non-deleted collection (including `favorite`). */
@@ -858,10 +872,8 @@ export async function getUserWorkouts(userId: string): Promise<Workout[]> {
   return workouts
 }
 
-/** Map a workout document snapshot to Workout (includes workoutSchedule, direction, segments for UIHelper-style display). */
-function mapWorkoutDoc(doc: DocumentSnapshot): Workout | null {
-  if (!doc.exists) return null
-  const d = doc.data()!
+/** Map workout fields (owner doc or share mirror `payload`) to `Workout`. `docId` is the Firestore document id under `users/.../workouts`. */
+export function mapWorkoutFromFirestore(docId: string, d: Record<string, unknown>): Workout | null {
   const type = d.type === 'MultiSegmentWorkout' ? 'MultiSegmentWorkout' : 'SingleSegmentWorkout'
   const raw = d as Record<string, unknown>
   const decodeInt = (key: string, def: number) => {
@@ -882,15 +894,15 @@ function mapWorkoutDoc(doc: DocumentSnapshot): Workout | null {
     return []
   }
   const base: Workout = {
-    id: doc.id,
+    id: docId,
     type,
     userId: typeof d.userId === 'string' ? d.userId : '',
-    workoutId: typeof d.workoutId === 'string' ? d.workoutId : doc.id,
+    workoutId: typeof d.workoutId === 'string' ? d.workoutId : docId,
     workoutShareId: typeof d.workoutShareId === 'string' ? d.workoutShareId : '',
-    workoutName: d.workoutName ?? null,
-    workoutDescription: d.workoutDescription ?? null,
+    workoutName: typeof d.workoutName === 'string' ? d.workoutName : null,
+    workoutDescription: typeof d.workoutDescription === 'string' ? d.workoutDescription : null,
     workoutDetails: (type === 'SingleSegmentWorkout' ? (raw.workoutDetails as string) : undefined) ?? null,
-    workoutImage: d.workoutImage ?? null,
+    workoutImage: typeof d.workoutImage === 'string' ? d.workoutImage : null,
     timerMode: raw.timerMode,
     timerModes: raw.timerModes,
     deletedAt: parseDeletedAt(raw),
@@ -917,6 +929,11 @@ function mapWorkoutDoc(doc: DocumentSnapshot): Workout | null {
     autoProgress: raw.autoProgress === true,
     segments,
   }
+}
+
+function mapWorkoutDoc(doc: DocumentSnapshot): Workout | null {
+  if (!doc.exists) return null
+  return mapWorkoutFromFirestore(doc.id, doc.data() as Record<string, unknown>)
 }
 
 /** Fetch workout documents by id from users/<userId>/workouts (doc id = workoutId). Includes workoutSchedule, direction, segments for display names. */
@@ -1331,7 +1348,7 @@ export async function setPlanDeletedAt(userId: string, planId: string, deletedAt
     .collection(USER_COLLECTIONS.workoutPlans)
     .doc(planId)
   await ref.update({ deletedAt: Timestamp.fromDate(deletedAt) })
-  await syncPlanUserConnectionMirrors(userId, planId)
+  await syncPlanShareMirrorsForOwner(userId, planId)
 }
 
 /** Clear deletedAt on a plan (recover). */
@@ -1343,7 +1360,7 @@ export async function clearPlanDeletedAt(userId: string, planId: string): Promis
     .collection(USER_COLLECTIONS.workoutPlans)
     .doc(planId)
   await ref.update({ deletedAt: FieldValue.delete() })
-  await syncPlanUserConnectionMirrors(userId, planId)
+  await syncPlanShareMirrorsForOwner(userId, planId)
 }
 
 /** Update a plan's name and/or description. */
@@ -1429,7 +1446,7 @@ export async function updatePlanMetadata(
     nextPrivacy,
     planDeleted
   )
-  await syncPlanUserConnectionMirrors(userId, planId)
+  await syncPlanShareMirrorsForOwner(userId, planId)
 }
 
 /** Permanently delete a workout plan: deletes all planDays subcollection docs, then the plan document. */
@@ -1512,7 +1529,7 @@ export async function createWorkoutPlan(
   await newRef.set(doc)
   const created = await getPlanById(userId, id)
   if (!created) throw new Error('Failed to read created plan')
-  await syncPlanUserConnectionMirrors(userId, id)
+  await syncPlanShareMirrorsForOwner(userId, id)
   return created
 }
 
@@ -1613,6 +1630,27 @@ export async function updateWorkoutPlanSubscriptionOrdinals(
   await batch.commit()
 }
 
+/** Map plan fields (owner doc or share mirror `payload`) to `WorkoutPlan`. */
+export function mapPlanFromFirestore(docId: string, d: Record<string, unknown>): WorkoutPlan {
+  const dayTz = pickTimeZoneIdFromRecord(d)
+  return {
+    id: docId,
+    isPersonal: d.isPersonal === true,
+    ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
+    userId: typeof d.userId === 'string' ? d.userId : '',
+    workoutPlanDescription: typeof d.workoutPlanDescription === 'string' ? d.workoutPlanDescription : null,
+    workoutPlanId:
+      typeof d.workoutPlanId === 'string' && d.workoutPlanId.trim() !== '' ? d.workoutPlanId : docId,
+    workoutPlanName: typeof d.workoutPlanName === 'string' ? d.workoutPlanName : '',
+    trainingIntent: normalizePlanTrainingIntentFromFirestore(d.trainingIntent),
+    privacy: typeof d.privacy === 'number' ? d.privacy : null,
+    handle: typeof d.handle === 'string' ? d.handle : null,
+    deletedAt: parseDeletedAt(d),
+    showInSchedule: normalizePlanShowInScheduleFromFirestore(d.showInSchedule),
+    dayTimeZoneId: dayTz,
+  }
+}
+
 /** Fetch a single workout plan by doc id from users/<userId>/workoutPlans. */
 export async function getPlanById(userId: string, planId: string): Promise<WorkoutPlan | null> {
   if (!adminDb) return null
@@ -1623,21 +1661,26 @@ export async function getPlanById(userId: string, planId: string): Promise<Worko
     .doc(planId)
     .get()
   if (!doc.exists) return null
-  const d = doc.data()!
-  return {
-    id: doc.id,
-    isPersonal: d.isPersonal === true,
-    ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
-    userId: typeof d.userId === 'string' ? d.userId : '',
-    workoutPlanDescription: d.workoutPlanDescription ?? null,
-    workoutPlanId: typeof d.workoutPlanId === 'string' ? d.workoutPlanId : '',
-    workoutPlanName: typeof d.workoutPlanName === 'string' ? d.workoutPlanName : '',
-    trainingIntent: normalizePlanTrainingIntentFromFirestore(d.trainingIntent),
-    privacy: typeof d.privacy === 'number' ? d.privacy : null,
-    handle: typeof d.handle === 'string' ? d.handle : null,
-    deletedAt: parseDeletedAt(d),
-    showInSchedule: normalizePlanShowInScheduleFromFirestore(d.showInSchedule),
+  return mapPlanFromFirestore(doc.id, doc.data() as Record<string, unknown>)
+}
+
+/** IANA id for interpreting planned-workout calendar days (plan doc, then user doc, then preferred hint). */
+export async function resolvePlanDayTimeZoneId(
+  userId: string,
+  planId: string,
+  preferred?: string | null,
+): Promise<string> {
+  const hint = typeof preferred === 'string' ? preferred.trim() : ''
+  if (hint && isValidIanaTimeZone(hint)) return hint
+  const plan = await getPlanById(userId, planId)
+  if (plan?.dayTimeZoneId && isValidIanaTimeZone(plan.dayTimeZoneId)) return plan.dayTimeZoneId
+  if (!adminDb) return 'UTC'
+  const userSnap = await adminDb.collection('users').doc(userId).get()
+  if (userSnap.exists) {
+    const fromUser = pickTimeZoneIdFromRecord(userSnap.data() as Record<string, unknown>)
+    if (fromUser) return fromUser
   }
+  return 'UTC'
 }
 
 /** True when `planId` is a non-deleted document under users/<userId>/workoutPlans (not a followed coach plan id alone). */
@@ -1688,18 +1731,22 @@ export async function getPlannedWorkouts(
   userId: string,
   planId: string,
   fromDate: string,
-  toDate: string
+  toDate: string,
+  options?: { planDayTimeZoneId?: string | null },
 ): Promise<PlannedWorkout[]> {
   if (!adminDb) return []
-  const startTs = Timestamp.fromDate(new Date(fromDate + 'T00:00:00.000Z'))
-  const endTs = Timestamp.fromDate(new Date(toDate + 'T23:59:59.999Z'))
+  const tz = await resolvePlanDayTimeZoneId(userId, planId, options?.planDayTimeZoneId ?? null)
+  const startMs = utcMillisAtStartOfCalendarDayInTimeZone(fromDate, tz)
+  const endExclusiveMs = utcMillisAtStartOfCalendarDayInTimeZone(addCalendarDays(toDate, 1), tz)
+  const startTs = Timestamp.fromMillis(startMs)
+  const endExclusiveTs = Timestamp.fromMillis(endExclusiveMs)
   const snapshot = await adminDb
     .collection('users')
     .doc(userId)
     .collection(PLANNED_WORKOUTS_COLLECTION)
     .where('planId', '==', planId)
     .where('day', '>=', startTs)
-    .where('day', '<=', endTs)
+    .where('day', '<', endExclusiveTs)
     .orderBy('day')
     .get()
   const results: PlannedWorkout[] = []
@@ -1771,7 +1818,9 @@ export async function createPlannedWorkout(
     ordinal?: number
     workout: Record<string, unknown>
     sourceWorkoutId?: string | null
-  }
+    /** IANA zone for `day` (local midnight); when omitted, resolved from plan + user docs. */
+    planDayTimeZoneId?: string | null
+  },
 ): Promise<PlannedWorkout> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const id = randomUUID()
@@ -1780,7 +1829,9 @@ export async function createPlannedWorkout(
     .doc(userId)
     .collection(PLANNED_WORKOUTS_COLLECTION)
     .doc(id)
-  const dayTs = Timestamp.fromDate(new Date(params.day + 'T12:00:00.000Z'))
+  const dayYmd = params.day.slice(0, 10)
+  const tz = await resolvePlanDayTimeZoneId(userId, planId, params.planDayTimeZoneId ?? null)
+  const dayTs = Timestamp.fromMillis(utcMillisAtStartOfCalendarDayInTimeZone(dayYmd, tz))
   await ref.set({
     day: dayTs,
     ordinal: typeof params.ordinal === 'number' ? params.ordinal : 0,
@@ -1802,7 +1853,7 @@ export async function createPlannedWorkout(
 export async function updatePlannedWorkoutDayAndOrdinal(
   userId: string,
   plannedWorkoutId: string,
-  updates: { day?: string; ordinal?: number; planId?: string }
+  updates: { day?: string; ordinal?: number; planId?: string; planDayTimeZoneId?: string | null },
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const ref = adminDb
@@ -1812,7 +1863,17 @@ export async function updatePlannedWorkoutDayAndOrdinal(
     .doc(plannedWorkoutId)
   const data: Record<string, unknown> = {}
   if (updates.day !== undefined) {
-    data.day = Timestamp.fromDate(new Date(updates.day + 'T12:00:00.000Z'))
+    const snap = await ref.get()
+    if (!snap.exists) throw new Error('Planned workout not found')
+    const cur = snap.data() as Record<string, unknown>
+    const curPlanId = typeof cur.planId === 'string' ? cur.planId : ''
+    const targetPlanId =
+      updates.planId !== undefined && String(updates.planId).trim() !== ''
+        ? String(updates.planId).trim()
+        : curPlanId
+    const dayYmd = updates.day.slice(0, 10)
+    const tz = await resolvePlanDayTimeZoneId(userId, targetPlanId, updates.planDayTimeZoneId ?? null)
+    data.day = Timestamp.fromMillis(utcMillisAtStartOfCalendarDayInTimeZone(dayYmd, tz))
   }
   if (updates.ordinal !== undefined) {
     data.ordinal = updates.ordinal

@@ -1,4 +1,5 @@
 import type { DocumentSnapshot, QueryDocumentSnapshot, QuerySnapshot } from 'firebase-admin/firestore'
+import { Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase-admin'
 import { canonicalSharedItemLive } from '@/lib/canonical-shared-item-live'
 import {
@@ -29,6 +30,8 @@ const GROUPS = 'groups'
 /** Firestore `in` queries allow at most 30 values. */
 const MAX_GROUP_IDS_PER_QUERY = 30
 const FEED_SUBCOLLECTION = 'feed'
+/** Combined app feed only loads rows newer than this (recent activity window). */
+const FEED_ACTIVITY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 /** Personal feed rows under `users/{uid}/feed/*` (matches iOS `USER_FEED_OWNER_FIELD`). */
 const USER_FEED_OWNER_FIELD = 'userFeedOwnerId'
 /** Matches iOS `USER_FEED_SHARE_RECIPIENT_USER_ID_FIELD` on connection share feed rows. */
@@ -51,6 +54,13 @@ function parseCreatedAt(d: Record<string, unknown>): Date | null {
     return Number.isNaN(t) ? null : new Date(t)
   }
   return null
+}
+
+function snapshotCreatedAtMs(snap: DocumentSnapshot): number | null {
+  if (!snap.exists) return null
+  const d = snap.data() as Record<string, unknown> | undefined
+  if (!d) return null
+  return parseCreatedAt(d)?.getTime() ?? null
 }
 
 /** Map Firestore / iOS values to a canonical feed type (strings, ints, common enum names). */
@@ -1207,7 +1217,7 @@ function mapMergedFeedDoc(
 /**
  * Hub activity from `groups/{id}/feed` (membership scope) merged with personal `users/{uid}/feed`
  * (direct shares, connection events), newest first — aligned with iOS `fetchCommunityGroupFeedBatch` +
- * `fetchCommunityUserFeedBatch`.
+ * `fetchCommunityUserFeedBatch`. Only reads `createdAt` within the last 30 days.
  */
 export async function loadAppFeedPage(options: {
   userId: string
@@ -1249,19 +1259,29 @@ export async function loadAppFeedPage(options: {
   const cursorGroupPath = decoded?.groupPath ?? null
   const cursorPersonalPath = decoded?.personalPath ?? null
 
+  const notBefore = new Date(Date.now() - FEED_ACTIVITY_MAX_AGE_MS)
+  const notBeforeMs = notBefore.getTime()
+  const notBeforeTs = Timestamp.fromDate(notBefore)
+
   const { queriedIds, eligibleGroupCount, truncatedGroups } = await getFeedQueryGroupIds(uid)
   const allowed = new Set(queriedIds)
 
   let groupStartSnap: DocumentSnapshot | null = null
   if (cursorGroupPath && queriedIds.length > 0 && isFeedDocPath(cursorGroupPath, allowed)) {
     const cur = await db.doc(cursorGroupPath).get()
-    if (cur.exists) groupStartSnap = cur
+    if (cur.exists) {
+      const t = snapshotCreatedAtMs(cur)
+      if (t != null && t >= notBeforeMs) groupStartSnap = cur
+    }
   }
 
   let personalStartSnap: DocumentSnapshot | null = null
   if (cursorPersonalPath && isPersonalFeedDocPath(cursorPersonalPath, uid)) {
     const cur = await db.doc(cursorPersonalPath).get()
-    if (cur.exists) personalStartSnap = cur
+    if (cur.exists) {
+      const t = snapshotCreatedAtMs(cur)
+      if (t != null && t >= notBeforeMs) personalStartSnap = cur
+    }
   }
 
   const fetchLimit = pageSize + 1
@@ -1272,6 +1292,7 @@ export async function loadAppFeedPage(options: {
           let q = db
             .collectionGroup(FEED_SUBCOLLECTION)
             .where('groupId', 'in', queriedIds)
+            .where('createdAt', '>=', notBeforeTs)
             .orderBy('createdAt', 'desc')
             .limit(fetchLimit)
           if (groupStartSnap) q = q.startAfter(groupStartSnap)
@@ -1280,7 +1301,13 @@ export async function loadAppFeedPage(options: {
         })()
       : Promise.resolve([] as QueryDocumentSnapshot[]),
     (async () => {
-      let q = db.collection('users').doc(uid).collection(FEED_SUBCOLLECTION).orderBy('createdAt', 'desc').limit(fetchLimit)
+      let q = db
+        .collection('users')
+        .doc(uid)
+        .collection(FEED_SUBCOLLECTION)
+        .where('createdAt', '>=', notBeforeTs)
+        .orderBy('createdAt', 'desc')
+        .limit(fetchLimit)
       if (personalStartSnap) q = q.startAfter(personalStartSnap)
       const s = await q.get()
       return s.docs
@@ -1370,7 +1397,12 @@ export async function loadAppFeedPage(options: {
     })
   )
 
-  const items = feedPairs.map((p) => p.row)
+  const items = feedPairs
+    .map((p) => p.row)
+    .filter((row) => {
+      const t = Date.parse(row.createdAt)
+      return !Number.isNaN(t) && t >= notBeforeMs
+    })
 
   const nextGroupPath = lastGroupEmitted?.ref.path ?? cursorGroupPath ?? null
   const nextPersonalPath = lastPersonalEmitted?.ref.path ?? cursorPersonalPath ?? null

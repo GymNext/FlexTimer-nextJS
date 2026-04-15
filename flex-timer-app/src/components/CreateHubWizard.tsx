@@ -48,6 +48,53 @@ function editTitle(t: AppGroupType): string {
   return card ? `Edit ${card.title}` : 'Edit Hub'
 }
 
+function MembersShareSwitchRow({
+  id,
+  checked,
+  disabled,
+  onCheckedChange,
+}: {
+  id: string
+  checked: boolean
+  disabled?: boolean
+  onCheckedChange: (next: boolean) => void
+}) {
+  const labelId = `${id}-label`
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-md border border-gray-100 bg-gray-50/80 px-3 py-2.5">
+      <div className="min-w-0 pr-2">
+        <p id={labelId} className="text-sm font-medium text-gray-900">
+          Members can share content
+        </p>
+        <p className="mt-1 text-xs text-gray-500">
+          When on, members may share workouts, collections, and plans to this hub. Not available for public
+          hubs.
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-labelledby={labelId}
+        disabled={disabled}
+        onClick={() => {
+          if (!disabled) onCheckedChange(!checked)
+        }}
+        className={`relative mt-0.5 h-7 w-12 shrink-0 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#6B21A8] disabled:opacity-50 ${
+          checked ? 'bg-[#6B21A8]' : 'bg-gray-300'
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform ${
+            checked ? 'translate-x-5' : 'translate-x-0'
+          }`}
+          aria-hidden
+        />
+      </button>
+    </div>
+  )
+}
+
 function LookupSelect({
   kind,
   label,
@@ -234,6 +281,7 @@ export function CreateHubWizard({
   const [handle, setHandle] = useState('')
   const [bio, setBio] = useState('')
   const [joinPolicy, setJoinPolicy] = useState<AppGroupJoinPolicy>('private')
+  const [membersMayShareContent, setMembersMayShareContent] = useState(false)
   const [countryCode, setCountryCode] = useState('')
   const [region, setRegion] = useState('')
   const [city, setCity] = useState('')
@@ -257,6 +305,7 @@ export function CreateHubWizard({
       setHandle('')
       setBio('')
       setJoinPolicy('private')
+      setMembersMayShareContent(false)
       setCountryCode('')
       setRegion('')
       setCity('')
@@ -276,6 +325,7 @@ export function CreateHubWizard({
       setHandle('')
       setBio('')
       setJoinPolicy('private')
+      setMembersMayShareContent(false)
       setCountryCode('')
       setRegion('')
       setCity('')
@@ -310,6 +360,9 @@ export function CreateHubWizard({
         setHandle(typeof data.handle === 'string' ? data.handle : '')
         setBio(typeof data.bio === 'string' ? data.bio : '')
         setJoinPolicy(parseFirestoreJoinPolicy(data.joinPolicy) ?? 'private')
+        setMembersMayShareContent(
+          typeof data.membersMayShareContent === 'boolean' ? data.membersMayShareContent : false,
+        )
         setCountryCode(countryCodeForDisplayName(typeof data.country === 'string' ? data.country : null))
         setRegion(typeof data.region === 'string' ? data.region : '')
         setCity(typeof data.city === 'string' ? data.city : '')
@@ -369,6 +422,10 @@ export function CreateHubWizard({
     }
   }, [open, editGroupId, parentHub?.id, user])
 
+  useEffect(() => {
+    if (joinPolicy === 'public') setMembersMayShareContent(false)
+  }, [joinPolicy])
+
   const handleKeyOk = normalizeGroupHandleKey(handle) !== null
   const needsHandleField = !editGroupId && !parentHub
   const isSubHubJoinHelp = Boolean(parentHub) || Boolean(editLoadedParentGroupId)
@@ -397,6 +454,7 @@ export function CreateHubWizard({
       country: countryCode ? countryDisplayName(countryCode)?.trim() || null : null,
       region: region.trim() || null,
       city: city.trim() || null,
+      membersMayShareContent: joinPolicy === 'public' ? false : membersMayShareContent,
     }
     if (needsHandleField) {
       body.handle = handle.trim()
@@ -607,7 +665,7 @@ export function CreateHubWizard({
                       className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
                     />
                   </div>
-                  <div>
+                  <div className="rounded-md border border-gray-100 bg-gray-50/80 px-3 py-2.5">
                     <p className="block text-xs font-medium text-gray-700 mb-2">Privacy</p>
                     <div className="inline-flex rounded border border-gymnext-muted/50 bg-white p-0.5">
                       {JOIN_SEGMENTS.map(({ id, label }) => (
@@ -628,6 +686,12 @@ export function CreateHubWizard({
                       {(isSubHubJoinHelp ? JOIN_HELP_SUBHUB : JOIN_HELP)[joinPolicy]}
                     </p>
                   </div>
+                  <MembersShareSwitchRow
+                    id="hub-members-share"
+                    checked={joinPolicy !== 'public' && membersMayShareContent}
+                    disabled={joinPolicy === 'public'}
+                    onCheckedChange={setMembersMayShareContent}
+                  />
                 </div>
               )}
 

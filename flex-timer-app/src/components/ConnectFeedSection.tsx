@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { User } from 'firebase/auth'
 import toast from 'react-hot-toast'
+import { ListFilter } from 'lucide-react'
 import { PublicUserProfileDialog } from '@/components/PublicUserProfileDialog'
 import { AddSharedWorkoutToPlanDialog } from '@/components/AddSharedWorkoutToPlanDialog'
 import {
@@ -15,13 +16,42 @@ import {
 } from '@/components/DuplicateSharedWorkoutDialog'
 import {
   SharedResourcePreviewDialog,
+  type LibraryBookmarkLookup,
   type SharedResourcePreviewTarget,
 } from '@/components/SharedResourcePreviewDialog'
+import type { SharedCollectionBookmarkRow, SharedWorkoutBookmarkRow } from '@/lib/bookmarks'
 import type { AppFeedItemResponse, AppFeedPageResponse, AppFeedSharedResource } from '@/types/feed'
 import type { HubTreeNode } from '@/types/hub-tree'
 import type { Workout } from '@/types/user'
 
 const MAX_TOTAL_ITEMS = 500
+
+/** Plan / collection / workout share rows (library shared content). */
+function feedItemIsSharedContent(item: AppFeedItemResponse): boolean {
+  return (
+    item.type === 'sharePlan' || item.type === 'shareCollection' || item.type === 'shareWorkout'
+  )
+}
+
+/** User connections, hub join/leave, and new hub creation — not library shares. */
+function feedItemIsConnectionActivity(item: AppFeedItemResponse): boolean {
+  return (
+    item.type === 'joinGroup' ||
+    item.type === 'leaveGroup' ||
+    item.type === 'userConnect' ||
+    item.type === 'createGroup'
+  )
+}
+
+/** Personal stream: `users/{uid}/feed` (no hub id on the row). */
+function feedItemFromPersonalUserFeed(item: AppFeedItemResponse): boolean {
+  return !item.groupId?.trim()
+}
+
+/** Hub stream: `groups/{groupId}/feed`. */
+function feedItemFromGroupFeed(item: AppFeedItemResponse): boolean {
+  return Boolean(item.groupId?.trim())
+}
 
 function collectOwnedHubIdsFromTree(nodes: HubTreeNode[]): Set<string> {
   const out = new Set<string>()
@@ -65,6 +95,10 @@ function feedShareResourceNoun(kind: 'plan' | 'collection' | 'workout'): string 
   if (kind === 'collection') return 'collection'
   if (kind === 'workout') return 'workout'
   return 'plan'
+}
+
+function libraryBookmarkKey(ownerUserId: string, resourceId: string): string {
+  return `${ownerUserId.trim()}\u001e${resourceId.trim()}`
 }
 
 type PlanShareMenuCase =
@@ -135,6 +169,11 @@ function FeedRow({
   ownedHubIds,
   onGoToOwnedWorkout,
   onGoToOwnedCollection,
+  isLibraryBookmarkActive,
+  bookmarkSharedWorkoutFromFeed,
+  removeSharedWorkoutBookmarkFromFeed,
+  bookmarkSharedCollectionFromFeed,
+  removeSharedCollectionBookmarkFromFeed,
 }: {
   item: AppFeedItemResponse
   viewerUid: string
@@ -162,6 +201,19 @@ function FeedRow({
   ownedHubIds: Set<string> | null
   onGoToOwnedWorkout?: (workoutId: string) => void
   onGoToOwnedCollection?: (collectionId: string) => void
+  isLibraryBookmarkActive?: LibraryBookmarkLookup
+  bookmarkSharedWorkoutFromFeed?: (
+    ownerUserId: string,
+    resourceId: string,
+    groupId: string,
+  ) => Promise<void>
+  removeSharedWorkoutBookmarkFromFeed?: (ownerUserId: string, resourceId: string) => Promise<void>
+  bookmarkSharedCollectionFromFeed?: (
+    ownerUserId: string,
+    resourceId: string,
+    groupId: string,
+  ) => Promise<void>
+  removeSharedCollectionBookmarkFromFeed?: (ownerUserId: string, resourceId: string) => Promise<void>
 }) {
   const when = formatRelativeTime(item.createdAt)
   const actorLabel = item.actorDisplayName?.trim() || 'Someone'
@@ -184,6 +236,22 @@ function FeedRow({
   const showUserConnectMenu = userConnectPersonal != null
   const alreadyFollowing =
     shared?.kind === 'plan' && isAlreadyFollowingPlan(shared.ownerUserId, shared.resourceId)
+  const sharedWorkoutBookmarked =
+    shared?.kind === 'workout' &&
+    typeof isLibraryBookmarkActive === 'function' &&
+    isLibraryBookmarkActive({
+      kind: 'workout',
+      ownerUserId: shared.ownerUserId,
+      resourceId: shared.resourceId,
+    })
+  const sharedCollectionBookmarked =
+    shared?.kind === 'collection' &&
+    typeof isLibraryBookmarkActive === 'function' &&
+    isLibraryBookmarkActive({
+      kind: 'collection',
+      ownerUserId: shared.ownerUserId,
+      resourceId: shared.resourceId,
+    })
   const showWorkoutShareMenu = shared?.kind === 'workout'
   const showCollectionShareMenu = shared?.kind === 'collection'
   const workoutShareMenuMode =
@@ -209,6 +277,7 @@ function FeedRow({
   const [collectionMenuOpen, setCollectionMenuOpen] = useState(false)
   const [followBusy, setFollowBusy] = useState(false)
   const [removeFeedBusy, setRemoveFeedBusy] = useState(false)
+  const [bookmarkBusy, setBookmarkBusy] = useState(false)
   const planMenuRef = useRef<HTMLDivElement>(null)
   const connectMenuRef = useRef<HTMLDivElement>(null)
   const createGroupMenuRef = useRef<HTMLDivElement>(null)
@@ -345,6 +414,31 @@ function FeedRow({
     planMenuCase === 'personal_inbound' || planMenuCase === 'personal_outbound_own'
   const showEditPlan = planMenuCase === 'personal_outbound_own' || planMenuCase === 'group_own_share'
   const showRemoveGroup = planMenuCase === 'group_own_share'
+
+  const workoutRecipientCanLibraryBookmark =
+    shared?.kind === 'workout' &&
+    workoutShareMenuMode === 'recipient' &&
+    shared.ownerUserId.trim() !== viewerUid.trim()
+  const workoutFeedBookmarked =
+    workoutRecipientCanLibraryBookmark &&
+    typeof isLibraryBookmarkActive === 'function' &&
+    isLibraryBookmarkActive({
+      kind: 'workout',
+      ownerUserId: shared.ownerUserId,
+      resourceId: shared.resourceId,
+    })
+  const collectionRecipientCanLibraryBookmark =
+    shared?.kind === 'collection' &&
+    collectionShareMenuMode === 'recipient' &&
+    shared.ownerUserId.trim() !== viewerUid.trim()
+  const collectionFeedBookmarked =
+    collectionRecipientCanLibraryBookmark &&
+    typeof isLibraryBookmarkActive === 'function' &&
+    isLibraryBookmarkActive({
+      kind: 'collection',
+      ownerUserId: shared.ownerUserId,
+      resourceId: shared.resourceId,
+    })
 
   return (
     <li className="px-4 py-3">
@@ -571,7 +665,7 @@ function FeedRow({
                           }}
                           className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background"
                         >
-                          Plan ahead
+                          Show Plan
                         </button>
                       ) : (
                         <div
@@ -680,6 +774,59 @@ function FeedRow({
                     </>
                   ) : (
                     <>
+                      {workoutFeedBookmarked && removeSharedWorkoutBookmarkFromFeed && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={bookmarkBusy}
+                          className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                          onClick={() => {
+                            void (async () => {
+                              setBookmarkBusy(true)
+                              try {
+                                await removeSharedWorkoutBookmarkFromFeed(
+                                  shared.ownerUserId,
+                                  shared.resourceId,
+                                )
+                                setWorkoutMenuOpen(false)
+                              } catch (e) {
+                                toast.error(e instanceof Error ? e.message : 'Could not remove bookmark')
+                              } finally {
+                                setBookmarkBusy(false)
+                              }
+                            })()
+                          }}
+                        >
+                          Remove bookmark
+                        </button>
+                      )}
+                      {!workoutFeedBookmarked && bookmarkSharedWorkoutFromFeed && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={bookmarkBusy}
+                          className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                          onClick={() => {
+                            void (async () => {
+                              setBookmarkBusy(true)
+                              try {
+                                await bookmarkSharedWorkoutFromFeed(
+                                  shared.ownerUserId,
+                                  shared.resourceId,
+                                  item.groupId,
+                                )
+                                setWorkoutMenuOpen(false)
+                              } catch (e) {
+                                toast.error(e instanceof Error ? e.message : 'Could not bookmark workout')
+                              } finally {
+                                setBookmarkBusy(false)
+                              }
+                            })()
+                          }}
+                        >
+                          Bookmark workout
+                        </button>
+                      )}
                       <button
                         type="button"
                         role="menuitem"
@@ -772,6 +919,61 @@ function FeedRow({
                     </>
                   ) : (
                     <>
+                      {collectionFeedBookmarked && removeSharedCollectionBookmarkFromFeed && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={bookmarkBusy}
+                          className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                          onClick={() => {
+                            void (async () => {
+                              setBookmarkBusy(true)
+                              try {
+                                await removeSharedCollectionBookmarkFromFeed(
+                                  shared.ownerUserId,
+                                  shared.resourceId,
+                                )
+                                setCollectionMenuOpen(false)
+                              } catch (e) {
+                                toast.error(e instanceof Error ? e.message : 'Could not remove bookmark')
+                              } finally {
+                                setBookmarkBusy(false)
+                              }
+                            })()
+                          }}
+                        >
+                          Remove bookmark
+                        </button>
+                      )}
+                      {!collectionFeedBookmarked && bookmarkSharedCollectionFromFeed && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={bookmarkBusy}
+                          className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gymnext-background disabled:cursor-not-allowed disabled:opacity-50"
+                          onClick={() => {
+                            void (async () => {
+                              setBookmarkBusy(true)
+                              try {
+                                await bookmarkSharedCollectionFromFeed(
+                                  shared.ownerUserId,
+                                  shared.resourceId,
+                                  item.groupId,
+                                )
+                                setCollectionMenuOpen(false)
+                              } catch (e) {
+                                toast.error(
+                                  e instanceof Error ? e.message : 'Could not bookmark collection',
+                                )
+                              } finally {
+                                setBookmarkBusy(false)
+                              }
+                            })()
+                          }}
+                        >
+                          Bookmark collection
+                        </button>
+                      )}
                       <button
                         type="button"
                         role="menuitem"
@@ -851,10 +1053,18 @@ function FeedRow({
                     <p className="text-sm font-medium text-gray-900 mt-0.5 line-clamp-3">{shared.label}</p>
                     <p className="text-xs font-medium text-[#6B21A8] mt-1.5">View details</p>
                   </div>
-                  {shared.kind === 'plan' && alreadyFollowing && (
+                  {((shared.kind === 'plan' && alreadyFollowing) ||
+                    (shared.kind === 'workout' && sharedWorkoutBookmarked) ||
+                    (shared.kind === 'collection' && sharedCollectionBookmarked)) && (
                     <span
                       className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700"
-                      aria-label="You have a subscription to this plan"
+                      aria-label={
+                        shared.kind === 'plan'
+                          ? 'You have a subscription to this plan'
+                          : shared.kind === 'workout'
+                            ? 'You have bookmarked this workout'
+                            : 'You have bookmarked this collection'
+                      }
                     >
                       <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
                         <path
@@ -920,11 +1130,166 @@ export function ConnectFeedSection({
   const [addPlanOpen, setAddPlanOpen] = useState(false)
   const [addPlanWorkout, setAddPlanWorkout] = useState<Workout | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [feedFilterDialogOpen, setFeedFilterDialogOpen] = useState(false)
+  /** Applied feed filters (both true = show all known row types). */
+  const [feedShowSharedContent, setFeedShowSharedContent] = useState(true)
+  const [feedShowConnectionActivity, setFeedShowConnectionActivity] = useState(true)
+  /** Draft values while the filter dialog is open; committed on Done. */
+  const [draftShowSharedContent, setDraftShowSharedContent] = useState(true)
+  const [draftShowConnectionActivity, setDraftShowConnectionActivity] = useState(true)
+  const [feedShowPersonalActivity, setFeedShowPersonalActivity] = useState(true)
+  const [feedShowGroupActivity, setFeedShowGroupActivity] = useState(true)
+  const [draftShowPersonalActivity, setDraftShowPersonalActivity] = useState(true)
+  const [draftShowGroupActivity, setDraftShowGroupActivity] = useState(true)
+  const [workoutBookmarkRows, setWorkoutBookmarkRows] = useState<SharedWorkoutBookmarkRow[]>([])
+  const [collectionBookmarkRows, setCollectionBookmarkRows] = useState<SharedCollectionBookmarkRow[]>([])
 
   const scrollRootRef = useRef<HTMLDivElement | null>(null)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const loadingRef = useRef(false)
   const refreshInFlightRef = useRef(false)
+
+  const loadLibraryBookmarks = useCallback(async () => {
+    try {
+      const token = await user.getIdToken()
+      const res = await fetch('/api/app/bookmarks', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${token}` },
+      })
+      const json = (await res.json().catch(() => ({}))) as {
+        error?: string
+        workouts?: SharedWorkoutBookmarkRow[]
+        collections?: SharedCollectionBookmarkRow[]
+      }
+      if (!res.ok) {
+        setWorkoutBookmarkRows([])
+        setCollectionBookmarkRows([])
+        return
+      }
+      setWorkoutBookmarkRows(Array.isArray(json.workouts) ? json.workouts : [])
+      setCollectionBookmarkRows(Array.isArray(json.collections) ? json.collections : [])
+    } catch {
+      setWorkoutBookmarkRows([])
+      setCollectionBookmarkRows([])
+    }
+  }, [user])
+
+  const bookmarkedWorkoutKeys = useMemo(() => {
+    const s = new Set<string>()
+    for (const w of workoutBookmarkRows) {
+      s.add(libraryBookmarkKey(w.ownerUserId, w.remoteWorkoutId))
+    }
+    return s
+  }, [workoutBookmarkRows])
+
+  const bookmarkedCollectionKeys = useMemo(() => {
+    const s = new Set<string>()
+    for (const c of collectionBookmarkRows) {
+      s.add(libraryBookmarkKey(c.ownerUserId, c.remoteCollectionId))
+    }
+    return s
+  }, [collectionBookmarkRows])
+
+  const isLibraryBookmarkActive = useCallback<LibraryBookmarkLookup>(
+    ({ kind, ownerUserId, resourceId }) => {
+      const k = libraryBookmarkKey(ownerUserId, resourceId)
+      if (kind === 'workout') return bookmarkedWorkoutKeys.has(k)
+      return bookmarkedCollectionKeys.has(k)
+    },
+    [bookmarkedWorkoutKeys, bookmarkedCollectionKeys],
+  )
+
+  const bookmarkSharedWorkoutFromFeed = useCallback(
+    async (ownerUserId: string, resourceId: string, groupId: string) => {
+      const token = await user.getIdToken()
+      const body: { ownerUserId: string; remoteWorkoutId: string; groupId?: string } = {
+        ownerUserId,
+        remoteWorkoutId: resourceId,
+      }
+      if (groupId.trim()) body.groupId = groupId.trim()
+      const res = await fetch('/api/app/bookmarks/workouts', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data.error || 'Could not bookmark workout')
+      toast.success('Saved to bookmarks')
+      await loadLibraryBookmarks()
+    },
+    [user, loadLibraryBookmarks],
+  )
+
+  const bookmarkSharedCollectionFromFeed = useCallback(
+    async (ownerUserId: string, resourceId: string, groupId: string) => {
+      const token = await user.getIdToken()
+      const body: { ownerUserId: string; remoteCollectionId: string; groupId?: string } = {
+        ownerUserId,
+        remoteCollectionId: resourceId,
+      }
+      if (groupId.trim()) body.groupId = groupId.trim()
+      const res = await fetch('/api/app/bookmarks/collections', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data.error || 'Could not bookmark collection')
+      toast.success('Saved to bookmarks')
+      await loadLibraryBookmarks()
+    },
+    [user, loadLibraryBookmarks],
+  )
+
+  const removeSharedWorkoutBookmarkFromFeed = useCallback(
+    async (ownerUserId: string, resourceId: string) => {
+      const token = await user.getIdToken()
+      const res = await fetch('/api/app/bookmarks/workouts', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId,
+          remoteWorkoutId: resourceId,
+        }),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data.error || 'Could not remove bookmark')
+      toast.success('Bookmark removed')
+      await loadLibraryBookmarks()
+    },
+    [user, loadLibraryBookmarks],
+  )
+
+  const removeSharedCollectionBookmarkFromFeed = useCallback(
+    async (ownerUserId: string, resourceId: string) => {
+      const token = await user.getIdToken()
+      const res = await fetch('/api/app/bookmarks/collections', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId,
+          remoteCollectionId: resourceId,
+        }),
+      })
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      if (!res.ok) throw new Error(data.error || 'Could not remove bookmark')
+      toast.success('Bookmark removed')
+      await loadLibraryBookmarks()
+    },
+    [user, loadLibraryBookmarks],
+  )
 
   const fetchPage = useCallback(
     async (cursor: string | null) => {
@@ -967,6 +1332,10 @@ export function ConnectFeedSection({
       cancelled = true
     }
   }, [user])
+
+  useEffect(() => {
+    void loadLibraryBookmarks()
+  }, [loadLibraryBookmarks])
 
   useEffect(() => {
     let cancelled = false
@@ -1203,6 +1572,64 @@ export function ConnectFeedSection({
     }
   }, [fetchPage, initialLoading])
 
+  const feedFilterIsActive =
+    !feedShowSharedContent ||
+    !feedShowConnectionActivity ||
+    !feedShowPersonalActivity ||
+    !feedShowGroupActivity
+
+  const openFeedFilterDialog = useCallback(() => {
+    setDraftShowSharedContent(feedShowSharedContent)
+    setDraftShowConnectionActivity(feedShowConnectionActivity)
+    setDraftShowPersonalActivity(feedShowPersonalActivity)
+    setDraftShowGroupActivity(feedShowGroupActivity)
+    setFeedFilterDialogOpen(true)
+  }, [
+    feedShowSharedContent,
+    feedShowConnectionActivity,
+    feedShowPersonalActivity,
+    feedShowGroupActivity,
+  ])
+
+  const applyFeedFilterDraft = useCallback(() => {
+    setFeedShowSharedContent(draftShowSharedContent)
+    setFeedShowConnectionActivity(draftShowConnectionActivity)
+    setFeedShowPersonalActivity(draftShowPersonalActivity)
+    setFeedShowGroupActivity(draftShowGroupActivity)
+    setFeedFilterDialogOpen(false)
+  }, [
+    draftShowSharedContent,
+    draftShowConnectionActivity,
+    draftShowPersonalActivity,
+    draftShowGroupActivity,
+  ])
+
+  const displayedFeedItems = useMemo(() => {
+    return items.filter((item) => {
+      let matchesKind: boolean
+      if (feedItemIsSharedContent(item)) {
+        matchesKind = feedShowSharedContent
+      } else if (feedItemIsConnectionActivity(item)) {
+        matchesKind = feedShowConnectionActivity
+      } else if (item.type === 'unknown') {
+        matchesKind = feedShowSharedContent && feedShowConnectionActivity
+      } else {
+        matchesKind = feedShowSharedContent && feedShowConnectionActivity
+      }
+      if (!matchesKind) return false
+
+      if (feedItemFromPersonalUserFeed(item) && !feedShowPersonalActivity) return false
+      if (feedItemFromGroupFeed(item) && !feedShowGroupActivity) return false
+      return true
+    })
+  }, [
+    items,
+    feedShowSharedContent,
+    feedShowConnectionActivity,
+    feedShowPersonalActivity,
+    feedShowGroupActivity,
+  ])
+
   const removePersonalFeedItemApi = useCallback(
     async (feedItemId: string) => {
       const token = await user.getIdToken()
@@ -1250,6 +1677,8 @@ export function ConnectFeedSection({
         onFollowPlanSuccess={() => void onFollowedPlanFromFeed?.()}
         onGoToOwnedPlan={onGoToOwnedPlan}
         onGoToSubscribedPlanAhead={onGoToSubscribedPlanAhead}
+        isLibraryBookmarkActive={isLibraryBookmarkActive}
+        onLibraryBookmarksSaved={loadLibraryBookmarks}
       />
       <DuplicateSharedCollectionDialog
         open={duplicateCollectionCtx != null}
@@ -1290,17 +1719,143 @@ export function ConnectFeedSection({
         onSuccess={() => toast.success('Added to plan')}
       />
 
-      <div className="shrink-0 flex items-center justify-end border-b border-gymnext-muted/30 bg-gymnext-background px-3 py-2">
-        <button
-          type="button"
-          onClick={() => void refreshFeed()}
-          disabled={initialLoading || refreshing}
-          className="rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          style={{ backgroundColor: '#6B21A8' }}
-        >
-          {refreshing ? 'Refreshing…' : 'Refresh'}
-        </button>
+      <div className="flex shrink-0 items-center justify-end border-b border-gymnext-muted/30 bg-gymnext-background px-3 py-2">
+        <div className="flex w-[18.5rem] shrink-0 gap-2">
+          <button
+            type="button"
+            onClick={openFeedFilterDialog}
+            disabled={initialLoading}
+            className={`inline-flex min-w-0 flex-1 basis-0 items-center justify-center gap-1.5 rounded border px-3 py-1.5 text-xs font-medium hover:bg-white/60 disabled:cursor-not-allowed disabled:opacity-50 ${
+              feedFilterIsActive
+                ? 'border-[#6B21A8] bg-purple-50/80 text-[#6B21A8]'
+                : 'border-gymnext-muted/50 bg-white text-gray-800'
+            }`}
+          >
+            <ListFilter className="h-3.5 w-3.5 shrink-0" strokeWidth={2} aria-hidden />
+            Filter
+          </button>
+          <button
+            type="button"
+            onClick={() => void refreshFeed()}
+            disabled={initialLoading || refreshing}
+            className="inline-flex min-w-0 flex-1 basis-0 items-center justify-center rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            style={{ backgroundColor: '#6B21A8' }}
+          >
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
       </div>
+
+      {feedFilterDialogOpen && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => setFeedFilterDialogOpen(false)}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="feed-filter-title"
+            className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-xl"
+          >
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h2 id="feed-filter-title" className="text-sm font-semibold text-gray-900">
+                Activity feed filter
+              </h2>
+              <p className="mt-1 text-xs text-gray-500">
+                Choose which kinds of activity to show, then tap Done to update the list.
+              </p>
+            </div>
+            <div className="space-y-4 px-4 py-4">
+              <div className="space-y-3">
+                <h3 className="text-xs font-semibold text-gray-900">Activity Type</h3>
+                <div className="space-y-3">
+                  <label className="flex cursor-pointer items-start gap-3 rounded-md border border-gray-200 bg-gray-50/80 px-3 py-3">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-[#6B21A8] focus:ring-[#6B21A8]"
+                      checked={draftShowSharedContent}
+                      onChange={(e) => setDraftShowSharedContent(e.target.checked)}
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-gray-900">Shared Content</span>
+                      <span className="mt-0.5 block text-xs text-gray-600">
+                        When on, the feed includes shares of workouts, collections, and training plans.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="flex cursor-pointer items-start gap-3 rounded-md border border-gray-200 bg-gray-50/80 px-3 py-3">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-[#6B21A8] focus:ring-[#6B21A8]"
+                      checked={draftShowConnectionActivity}
+                      onChange={(e) => setDraftShowConnectionActivity(e.target.checked)}
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-gray-900">Connection Activity</span>
+                      <span className="mt-0.5 block text-xs text-gray-600">
+                        When on, the feed includes new connections between users, joining or leaving hubs, and
+                        creating a new hub.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="space-y-3 border-t border-gymnext-muted/20 pt-3">
+                <h3 className="text-xs font-semibold text-gray-900">Activity Source</h3>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex min-w-0 cursor-pointer items-start gap-2 rounded-md border border-gray-200 bg-gray-50/80 px-2.5 py-2.5">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-[#6B21A8] focus:ring-[#6B21A8]"
+                      checked={draftShowPersonalActivity}
+                      onChange={(e) => setDraftShowPersonalActivity(e.target.checked)}
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-gray-900">Personal Activity</span>
+                      <span className="mt-0.5 block text-xs text-gray-600">
+                        Activity from your connections
+                      </span>
+                    </span>
+                  </label>
+                  <label className="flex min-w-0 cursor-pointer items-start gap-2 rounded-md border border-gray-200 bg-gray-50/80 px-2.5 py-2.5">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-[#6B21A8] focus:ring-[#6B21A8]"
+                      checked={draftShowGroupActivity}
+                      onChange={(e) => setDraftShowGroupActivity(e.target.checked)}
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-gray-900">Group Activity</span>
+                      <span className="mt-0.5 block text-xs text-gray-600">
+                        Activity from hubs
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-gymnext-muted/30 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setFeedFilterDialogOpen(false)}
+                className="rounded border border-gymnext-muted/40 bg-white px-4 py-2 text-sm font-medium text-gray-800 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={applyFeedFilterDraft}
+                className="rounded bg-[#6B21A8] px-4 py-2 text-sm font-medium text-white hover:opacity-90"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div
         ref={scrollRootRef}
@@ -1361,37 +1916,65 @@ export function ConnectFeedSection({
 
         {!initialLoading && items.length > 0 && (
           <>
-            <ul className="divide-y divide-gymnext-muted/20">
-              {items.map((item) => (
-                <FeedRow
-                  key={`${item.groupId || 'personal'}-${item.id}-${item.createdAt}`}
-                  item={item}
-                  viewerUid={user.uid}
-                  onOpenActorProfile={(id) => setFeedProfileUserId(id)}
-                  onOpenShared={(target) => setSharedPreview(target)}
-                  followPlanFromFeed={followPlanFromFeed}
-                  isAlreadyFollowingPlan={isAlreadyFollowingPlan}
-                  onFollowedPlanFromFeed={onFollowedPlanFromFeed}
-                  onStartDuplicateSharedWorkout={onStartDuplicateSharedWorkout}
-                  onStartAddSharedWorkoutToPlan={onStartAddSharedWorkoutToPlan}
-                  onStartDuplicateSharedCollection={onStartDuplicateSharedCollection}
-                  onGoToOwnedPlan={onGoToOwnedPlan}
-                  onGoToSubscribedPlanAhead={onGoToSubscribedPlanAhead}
-                  onGoToOwnedWorkout={onGoToOwnedWorkout}
-                  onGoToOwnedCollection={onGoToOwnedCollection}
-                  removePersonalFeedItem={removePersonalFeedItemApi}
-                  removeGroupFeedItem={removeGroupFeedItemApi}
-                  ownedHubIds={ownedHubIds}
-                  onRemoveFeedItemSuccess={() => {
-                    setItems((prev) =>
-                      prev.filter(
-                        (x) => !(x.id === item.id && (x.groupId || '') === (item.groupId || '')),
-                      ),
-                    )
+            {!error && items.length > 0 && displayedFeedItems.length === 0 && (
+              <div className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-center">
+                <p className="text-sm text-gray-600">
+                  Nothing in the activity loaded so far matches your filters. Open Filter to adjust
+                  categories, or tap Refresh / scroll to load more.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFeedShowSharedContent(true)
+                    setFeedShowConnectionActivity(true)
+                    setFeedShowPersonalActivity(true)
+                    setFeedShowGroupActivity(true)
+                    setFeedFilterDialogOpen(false)
                   }}
-                />
-              ))}
-            </ul>
+                  className="text-sm font-medium text-[#6B21A8] hover:underline"
+                >
+                  Show all activity
+                </button>
+              </div>
+            )}
+            {displayedFeedItems.length > 0 && (
+              <ul className="divide-y divide-gymnext-muted/20">
+                {displayedFeedItems.map((item) => (
+                  <FeedRow
+                    key={`${item.groupId || 'personal'}-${item.id}-${item.createdAt}`}
+                    item={item}
+                    viewerUid={user.uid}
+                    onOpenActorProfile={(id) => setFeedProfileUserId(id)}
+                    onOpenShared={(target) => setSharedPreview(target)}
+                    followPlanFromFeed={followPlanFromFeed}
+                    isAlreadyFollowingPlan={isAlreadyFollowingPlan}
+                    onFollowedPlanFromFeed={onFollowedPlanFromFeed}
+                    onStartDuplicateSharedWorkout={onStartDuplicateSharedWorkout}
+                    onStartAddSharedWorkoutToPlan={onStartAddSharedWorkoutToPlan}
+                    onStartDuplicateSharedCollection={onStartDuplicateSharedCollection}
+                    onGoToOwnedPlan={onGoToOwnedPlan}
+                    onGoToSubscribedPlanAhead={onGoToSubscribedPlanAhead}
+                    onGoToOwnedWorkout={onGoToOwnedWorkout}
+                    onGoToOwnedCollection={onGoToOwnedCollection}
+                    removePersonalFeedItem={removePersonalFeedItemApi}
+                    removeGroupFeedItem={removeGroupFeedItemApi}
+                    ownedHubIds={ownedHubIds}
+                    onRemoveFeedItemSuccess={() => {
+                      setItems((prev) =>
+                        prev.filter(
+                          (x) => !(x.id === item.id && (x.groupId || '') === (item.groupId || '')),
+                        ),
+                      )
+                    }}
+                    isLibraryBookmarkActive={isLibraryBookmarkActive}
+                    bookmarkSharedWorkoutFromFeed={bookmarkSharedWorkoutFromFeed}
+                    removeSharedWorkoutBookmarkFromFeed={removeSharedWorkoutBookmarkFromFeed}
+                    bookmarkSharedCollectionFromFeed={bookmarkSharedCollectionFromFeed}
+                    removeSharedCollectionBookmarkFromFeed={removeSharedCollectionBookmarkFromFeed}
+                  />
+                ))}
+              </ul>
+            )}
             {items.length >= MAX_TOTAL_ITEMS && (
               <p className="px-4 py-3 text-xs text-gray-500 text-center border-t border-gymnext-muted/20">
                 Showing the {MAX_TOTAL_ITEMS} most recent items.

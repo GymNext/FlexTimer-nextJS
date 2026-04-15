@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { User } from 'firebase/auth'
 import type { Workout, WorkoutPlan } from '@/types/user'
 import { workoutToPlanDayEntry } from '@/lib/workout-to-plan-day-entry'
+import { planDayTimeZoneBody, planDayTimeZoneQuerySuffix } from '@/lib/client-plan-day-timezone'
 import { SUBSCRIPTION_TIER, type SubscriptionTier } from '@/lib/subscription-limits-constants'
 
 export function AddSharedWorkoutToPlanDialog({
@@ -94,7 +95,7 @@ export function AddSharedWorkoutToPlanDialog({
     try {
       const token = await viewer.getIdToken()
       const rangeRes = await fetch(
-        `/api/app/plans/${encodeURIComponent(planId)}/planned-workouts?from=${encodeURIComponent(day)}&to=${encodeURIComponent(day)}`,
+        `/api/app/plans/${encodeURIComponent(planId)}/planned-workouts?from=${encodeURIComponent(day)}&to=${encodeURIComponent(day)}${planDayTimeZoneQuerySuffix()}`,
         { headers: { Authorization: `Bearer ${token}` } }
       )
       const rangeData = (await rangeRes.json().catch(() => ({}))) as {
@@ -116,6 +117,7 @@ export function AddSharedWorkoutToPlanDialog({
           workout: workoutToPlanDayEntry(workout),
           sourceWorkoutId: null,
           clientToday,
+          ...planDayTimeZoneBody(),
         }),
       })
       const data = (await res.json().catch(() => ({}))) as { error?: string }

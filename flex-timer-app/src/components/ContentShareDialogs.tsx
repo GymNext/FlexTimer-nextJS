@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { User } from 'firebase/auth'
 import type { HubTreeNode } from '@/types/hub-tree'
+import { mergeOwnedAndMemberShareHubTrees, type MembershipRowForSharePicker } from '@/lib/share-with-hub-picker'
 import { formatSharedOnLine } from '@/lib/format-shared-at'
 
 export type LibraryShareKind = 'workout' | 'collection'
@@ -112,9 +113,10 @@ export function ContentShareDialogs({
     setError(null)
     const base = sharesBasePath(kind, resourceId)
     try {
-      const [shRes, hubRes, connRes] = await Promise.all([
+      const [shRes, hubRes, memRes, connRes] = await Promise.all([
         authedFetch(base),
         authedFetch('/api/app/owned-groups'),
+        authedFetch('/api/app/memberships'),
         authedFetch('/api/app/connections'),
       ])
       if (!shRes.ok) {
@@ -129,12 +131,17 @@ export function ContentShareDialogs({
         maxDestinations: typeof sh.maxDestinations === 'number' ? sh.maxDestinations : 10,
       })
 
-      if (hubRes.ok) {
-        const hj = (await hubRes.json()) as { hubs?: HubTreeNode[] }
-        setHubs(Array.isArray(hj.hubs) ? hj.hubs : [])
-      } else {
-        setHubs([])
+      const owned = hubRes.ok
+        ? (((await hubRes.json()) as { hubs?: HubTreeNode[] }).hubs ?? [])
+        : []
+      const ownedArr = Array.isArray(owned) ? owned : []
+      let merged = ownedArr
+      if (memRes.ok) {
+        const mj = (await memRes.json()) as { memberships?: MembershipRowForSharePicker[] }
+        const rows = Array.isArray(mj.memberships) ? mj.memberships : []
+        merged = mergeOwnedAndMemberShareHubTrees(ownedArr, rows)
       }
+      setHubs(merged)
 
       if (connRes.ok) {
         const cj = (await connRes.json()) as { connections?: ConnectionRow[] }

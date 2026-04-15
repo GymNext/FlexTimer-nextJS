@@ -11,7 +11,10 @@ import { CreateHubWizard } from '@/components/CreateHubWizard'
 import { HubMembersInvitesPanel } from '@/components/HubMembersInvitesPanel'
 import { InviteUsersDialog } from '@/components/InviteUsersDialog'
 import { NavCountBadge } from '@/components/NavCountBadge'
-import { notifyHubJoinRequestsNavChanged } from '@/hooks/useHubJoinRequestNavBadges'
+import {
+  HUB_JOIN_REQUESTS_NAV_CHANGED_EVENT,
+  notifyHubJoinRequestsNavChanged,
+} from '@/hooks/useHubJoinRequestNavBadges'
 
 function HubTreeItem({
   node,
@@ -134,7 +137,7 @@ export function MyHubsSection({ user }: { user: User }) {
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false)
   const [hubPanelRefresh, setHubPanelRefresh] = useState(0)
 
-  const fetchOwnedHubTree = useCallback(async (): Promise<HubTreeNode[]> => {
+  const loadOwnedHubTreeFromApi = useCallback(async (): Promise<HubTreeNode[]> => {
     const token = await user.getIdToken()
     const res = await fetch('/api/app/owned-groups', {
       headers: { Authorization: `Bearer ${token}` },
@@ -145,16 +148,26 @@ export function MyHubsSection({ user }: { user: User }) {
       pendingJoinRequestTotal?: number
     }
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
-    const hubs = Array.isArray(data.hubs) ? data.hubs : []
-    notifyHubJoinRequestsNavChanged()
-    return hubs
+    return Array.isArray(data.hubs) ? data.hubs : []
   }, [user])
+
+  /** When `syncNavBadges` is true (default), notifies so the Connect → Hubs nav count refetches. */
+  const fetchOwnedHubTree = useCallback(
+    async (options?: { syncNavBadges?: boolean }): Promise<HubTreeNode[]> => {
+      const hubs = await loadOwnedHubTreeFromApi()
+      if (options?.syncNavBadges !== false) {
+        notifyHubJoinRequestsNavChanged()
+      }
+      return hubs
+    },
+    [loadOwnedHubTreeFromApi],
+  )
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetchOwnedHubTree()
+    fetchOwnedHubTree({ syncNavBadges: false })
       .then((hubs) => {
         if (!cancelled) {
           setTree(hubs)
@@ -171,6 +184,21 @@ export function MyHubsSection({ user }: { user: User }) {
       cancelled = true
     }
   }, [fetchOwnedHubTree])
+
+  useEffect(() => {
+    const onJoinRequestContextChanged = () => {
+      void loadOwnedHubTreeFromApi()
+        .then((hubs) => {
+          setTree(hubs)
+          setSelectedHubId((cur) => (cur && findHubInTree(hubs, cur) ? cur : null))
+        })
+        .catch(() => {
+          /* keep existing tree */
+        })
+    }
+    window.addEventListener(HUB_JOIN_REQUESTS_NAV_CHANGED_EVENT, onJoinRequestContextChanged)
+    return () => window.removeEventListener(HUB_JOIN_REQUESTS_NAV_CHANGED_EVENT, onJoinRequestContextChanged)
+  }, [loadOwnedHubTreeFromApi])
 
   useEffect(() => {
     if (!hubMenuOpen) return
@@ -264,7 +292,7 @@ export function MyHubsSection({ user }: { user: User }) {
     async (groupId: string) => {
       const parentToExpand = createParentContext?.id ?? null
       try {
-        const hubs = await fetchOwnedHubTree()
+        const hubs = await fetchOwnedHubTree({ syncNavBadges: false })
         setTree(hubs)
         setSelectedHubId(groupId)
         setExpandedIds((prev) => {
@@ -282,7 +310,7 @@ export function MyHubsSection({ user }: { user: User }) {
   const handleHubUpdated = useCallback(
     async (groupId: string) => {
       try {
-        const hubs = await fetchOwnedHubTree()
+        const hubs = await fetchOwnedHubTree({ syncNavBadges: false })
         setTree(hubs)
         setSelectedHubId((cur) => (cur && findHubInTree(hubs, cur) ? cur : groupId))
       } catch {
@@ -346,7 +374,7 @@ export function MyHubsSection({ user }: { user: User }) {
       )
       const data = (await res.json().catch(() => ({}))) as { error?: string }
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
-      const hubs = await fetchOwnedHubTree()
+      const hubs = await fetchOwnedHubTree({ syncNavBadges: false })
       setTree(hubs)
       setChangeHandleTarget(null)
     } catch (e) {

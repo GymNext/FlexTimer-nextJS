@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireAdminAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
 import { getPlannedWorkouts, createPlannedWorkout } from '@/lib/firestore'
+import { isValidIanaTimeZone } from '@/lib/planned-workout-day-timestamp'
 
 /**
  * GET /api/admin/users/[userId]/plans/[planId]/planned-workouts?from=YYYY-MM-DD&to=YYYY-MM-DD
@@ -39,7 +40,14 @@ export async function GET(
   }
 
   try {
-    const plannedWorkouts = await getPlannedWorkouts(userId, planId, fromDate, toDate)
+    const planDayTzRaw = searchParams.get('planDayTimeZone')
+    const planDayTimeZoneId =
+      typeof planDayTzRaw === 'string' && planDayTzRaw.trim() && isValidIanaTimeZone(planDayTzRaw.trim())
+        ? planDayTzRaw.trim()
+        : null
+    const plannedWorkouts = await getPlannedWorkouts(userId, planId, fromDate, toDate, {
+      planDayTimeZoneId,
+    })
     return NextResponse.json({ plannedWorkouts })
   } catch (err) {
     console.error('[admin planned-workouts]', err)
@@ -81,6 +89,12 @@ export async function POST(
     const day = typeof body.day === 'string' ? body.day.slice(0, 10) : undefined
     const ordinal = typeof body.ordinal === 'number' ? body.ordinal : undefined
     const workout = body.workout != null && typeof body.workout === 'object' ? (body.workout as Record<string, unknown>) : undefined
+    const planDayTzBody =
+      typeof body.planDayTimeZone === 'string' &&
+      body.planDayTimeZone.trim() &&
+      isValidIanaTimeZone(body.planDayTimeZone.trim())
+        ? body.planDayTimeZone.trim()
+        : null
 
     if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
       return NextResponse.json({ error: 'day required (YYYY-MM-DD)' }, { status: 400 })
@@ -93,6 +107,7 @@ export async function POST(
       day,
       ordinal: ordinal ?? 0,
       workout,
+      planDayTimeZoneId: planDayTzBody,
     })
     return NextResponse.json(plannedWorkout)
   } catch (err) {

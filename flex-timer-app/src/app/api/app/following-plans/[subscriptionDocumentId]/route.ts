@@ -38,7 +38,7 @@ export async function DELETE(
   } catch (err) {
     console.error('[app following-plans DELETE]', err)
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Failed to unsubscribe' },
+      { error: err instanceof Error ? err.message : 'Failed to unfollow' },
       { status: 500 }
     )
   }
