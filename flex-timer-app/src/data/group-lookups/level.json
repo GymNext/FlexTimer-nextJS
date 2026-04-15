@@ -1,0 +1,11 @@
+{
+  "items": [
+    { "id": "youth", "name": "Youth", "order": 0, "isActive": true },
+    { "id": "amateur", "name": "Amateur", "order": 1, "isActive": true },
+    { "id": "semi_pro", "name": "Semi-Pro", "order": 2, "isActive": true },
+    { "id": "pro", "name": "Pro", "order": 3, "isActive": true },
+    { "id": "recreational", "name": "Recreational", "order": 4, "isActive": true },
+    { "id": "college", "name": "College", "order": 5, "isActive": true },
+    { "id": "other", "name": "Other", "order": 6, "isActive": true }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "items": [
+    { "id": "chain_gym", "name": "Chain Gym", "order": 0, "isActive": true },
+    { "id": "independent_gym", "name": "Independent Gym", "order": 1, "isActive": true },
+    { "id": "studio", "name": "Fitness Studio", "order": 2, "isActive": true },
+    { "id": "private_training_facility", "name": "Private Training Facility", "order": 3, "isActive": true },
+    { "id": "sport_specialty", "name": "Sport Specialty", "order": 4, "isActive": true },
+    { "id": "climbing_gym", "name": "Climbing / Bouldering Gym", "order": 5, "isActive": true },
+    { "id": "aquatic_center", "name": "Aquatic / Pool Facility", "order": 6, "isActive": true },
+    { "id": "home_gym", "name": "Home Gym", "order": 7, "isActive": true },
+    { "id": "outdoor_training", "name": "Outdoor / Field Training", "order": 8, "isActive": true },
+    { "id": "school", "name": "School (K-12)", "order": 9, "isActive": true },
+    { "id": "university_rec", "name": "College / University Recreation", "order": 10, "isActive": true },
+    { "id": "community_rec", "name": "Community / Recreation Center", "order": 11, "isActive": true },
+    { "id": "corporate_wellness", "name": "Corporate / Workplace Gym", "order": 12, "isActive": true },
+    { "id": "hotel_resort", "name": "Hotel / Resort Fitness", "order": 13, "isActive": true },
+    { "id": "other", "name": "Other", "order": 14, "isActive": true }
+  ]
+}

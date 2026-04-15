@@ -1,0 +1,16 @@
+{
+  "items": [
+    { "id": "coaches", "name": "Coaches", "order": 0, "isActive": true },
+    { "id": "athletes", "name": "Athletes", "order": 1, "isActive": true },
+    { "id": "parents", "name": "Parents", "order": 2, "isActive": true },
+    { "id": "staff", "name": "Staff", "order": 3, "isActive": true },
+    { "id": "volunteers", "name": "Volunteers", "order": 4, "isActive": true },
+    { "id": "position", "name": "Position", "order": 5, "isActive": true },
+    { "id": "skill_level", "name": "Skill Level", "order": 6, "isActive": true },
+    { "id": "interest", "name": "Shared Interest", "order": 7, "isActive": true },
+    { "id": "location", "name": "Location", "order": 8, "isActive": true },
+    { "id": "supporters", "name": "Supporters / Fans", "order": 9, "isActive": true },
+    { "id": "alumni", "name": "Alumni", "order": 10, "isActive": true },
+    { "id": "other", "name": "Other", "order": 11, "isActive": true }
+  ]
+}

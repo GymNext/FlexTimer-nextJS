@@ -1,0 +1,24 @@
+{
+  "items": [
+    { "id": "hiit", "name": "High Intensity Interval Training", "order": 0, "isActive": true },
+    { "id": "strength_training", "name": "Strength Training", "order": 1, "isActive": true },
+    { "id": "functional_fitness", "name": "Functional Fitness", "order": 2, "isActive": true },
+    { "id": "yoga", "name": "Yoga", "order": 3, "isActive": true },
+    { "id": "pilates", "name": "Pilates", "order": 4, "isActive": true },
+    { "id": "barre", "name": "Barre", "order": 5, "isActive": true },
+    { "id": "cardio", "name": "Cardio", "order": 6, "isActive": true },
+    { "id": "endurance_training", "name": "Endurance Training", "order": 7, "isActive": true },
+    { "id": "indoor_cycling", "name": "Indoor Cycling / Spin", "order": 8, "isActive": true },
+    { "id": "calisthenics", "name": "Calisthenics", "order": 9, "isActive": true },
+    { "id": "olympic_weightlifting", "name": "Olympic Weightlifting", "order": 10, "isActive": true },
+    { "id": "bodybuilding", "name": "Bodybuilding", "order": 11, "isActive": true },
+    { "id": "mobility_recovery", "name": "Mobility & Recovery", "order": 12, "isActive": true },
+    { "id": "athletic_performance", "name": "Athletic Performance", "order": 13, "isActive": true },
+    { "id": "circuit_training", "name": "Circuit Training", "order": 14, "isActive": true },
+    { "id": "dance_fitness", "name": "Dance Fitness", "order": 15, "isActive": true },
+    { "id": "physical_therapy", "name": "Physical Therapy", "order": 16, "isActive": true },
+    { "id": "sport_specific", "name": "Sport-Specific Training", "order": 17, "isActive": true },
+    { "id": "multi_functional", "name": "Multi Functional", "order": 18, "isActive": true },
+    { "id": "other", "name": "Other", "order": 19, "isActive": true }
+  ]
+}
