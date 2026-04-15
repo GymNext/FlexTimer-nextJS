@@ -1,0 +1,1123 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* =========================
+       Helper Functions
+    ========================== */
+    function isAuthed() {
+      return request.auth != null;
+    }
+    function isAdmin() {
+      return isAuthed() && request.auth.token.admin == true;
+    }
+    function isOwner(userId) {
+      return isAuthed() && request.auth.uid == userId;
+    }
+    function subscriptionDocId(ownerUserId, planId) {
+      return ownerUserId + '_' + planId;
+    }
+
+    function subscriptionRefForReader(planOwnerId, planId) {
+      return /databases/$(database)/documents/users/$(request.auth.uid)/workoutPlanSubscriptions/$(subscriptionDocId(planOwnerId, planId));
+    }
+
+    function hasActiveSubscriptionToPlan(planOwnerId, planId) {
+      let ref = subscriptionRefForReader(planOwnerId, planId);
+      return exists(ref)
+        && get(ref).data.status == 'active'
+        && get(ref).data.ownerUserId == planOwnerId
+        && get(ref).data.remotePlanId == planId
+        && get(ref).data.subscriberUserId == request.auth.uid;
+    }
+
+    function workoutPlanDocPath(ownerUid, planId) {
+      return /databases/$(database)/documents/users/$(ownerUid)/workoutPlans/$(planId);
+    }
+
+    /**
+     * Private training plans (trainingIntent == 0 in app / Firestore) may receive owner-issued invites.
+     * Legacy docs without trainingIntent are not inviteable via rules.
+     */
+    function planIsPrivateTrainingForInvites(ownerUid, planId) {
+      let p = workoutPlanDocPath(ownerUid, planId);
+      return exists(p)
+        && !('deletedAt' in get(p).data)
+        && ('trainingIntent' in get(p).data && get(p).data.trainingIntent == 0)
+        && (!('isPersonal' in get(p).data) || get(p).data.isPersonal == false);
+    }
+
+    /* =========================
+       Global workout plan handle index
+    ========================== */
+    match /workoutPlanHandleIndex/{handleId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed()
+        && request.resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.handleKey == handleId;
+      allow update: if isAuthed()
+        && resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.ownerUserId == request.auth.uid;
+      allow delete: if isAuthed()
+        && resource.data.ownerUserId == request.auth.uid;
+    }
+
+    /* =========================
+       Global user handle index
+    ========================== */
+    match /userHandleIndex/{handleId} {
+      // Allow pre-auth availability checks during email sign-up.
+      // Writes remain owner-scoped so handles can only be claimed by authenticated owners.
+      allow read: if true;
+      allow create: if isAuthed()
+        && request.resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.handleKey == handleId;
+      allow update: if isAuthed()
+        && resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.handleKey == handleId;
+      allow delete: if isAuthed()
+        && resource.data.ownerUserId == request.auth.uid;
+    }
+
+    /* =========================
+       Public user profile data
+    ========================== */
+    match /publicUserProfiles/{userId} {
+      allow read: if isAuthed();
+      allow write: if isOwner(userId) || isAdmin();
+    }
+
+    function publicUserProfileDoc(uid) {
+      return /databases/$(database)/documents/publicUserProfiles/$(uid);
+    }
+
+    function publicUserProfileHasHandle(uid) {
+      return exists(publicUserProfileDoc(uid))
+        && 'handleKey' in get(publicUserProfileDoc(uid)).data
+        && get(publicUserProfileDoc(uid)).data.handleKey is string
+        && get(publicUserProfileDoc(uid)).data.handleKey.size() > 0;
+    }
+
+    function userConnectionDocPathForPair(uidA, uidB) {
+      return uidA < uidB
+        ? /databases/$(database)/documents/userConnections/$(uidA + '_' + uidB)
+        : /databases/$(database)/documents/userConnections/$(uidB + '_' + uidA);
+    }
+
+    function userConnectionInviteDocPath(inviteeUid, inviterUid) {
+      return /databases/$(database)/documents/users/$(inviteeUid)/userConnectionInvites/$(inviterUid);
+    }
+
+    function userConnectionDocIdForPair(a, b) {
+      return a < b ? a + '_' + b : b + '_' + a;
+    }
+
+    function userConnectionPairExists(actorUid, peerUid) {
+      let id = userConnectionDocIdForPair(actorUid, peerUid);
+      return exists(/databases/$(database)/documents/userConnections/$(id))
+        && get(/databases/$(database)/documents/userConnections/$(id)).data.participants.hasAny([actorUid])
+        && get(/databases/$(database)/documents/userConnections/$(id)).data.participants.hasAny([peerUid]);
+    }
+
+    /**
+     * `FieldValue.increment` / server transforms do not always populate `request.resource.data` the same way as plain
+     * field writes; reading `request.resource.data.participants` when absent errors and denies the whole batch.
+     * Use `.get(..., resource...)` and allow ±1 on `sharedContentItemCount` when other protected fields are untouched.
+     */
+    function userConnectionParticipantsUnchangedForUpdate() {
+      return 'participants' in resource.data
+        && request.resource.data.get('participants', resource.data.participants) == resource.data.participants;
+    }
+
+    function userConnectionSharedContentCountChangedByAtMostOne() {
+      let oldC = resource.data.get('sharedContentItemCount', 0);
+      let newC = request.resource.data.get('sharedContentItemCount', 0);
+      return (newC is int || newC is float)
+        && (oldC is int || oldC is float)
+        && (
+          newC == oldC + 1
+          || (oldC >= 1 && newC == oldC - 1)
+        );
+    }
+
+    function userConnectionSharedContentCountUpdateAllowed() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return changed.hasOnly(['sharedContentItemCount'])
+        || (
+          !changed.hasAny(['participants', 'connectedAt'])
+          && userConnectionSharedContentCountChangedByAtMostOne()
+        );
+    }
+
+    /**
+     * Mutual user-to-user connections (invite on invitee, then create here). Doc id: sorted `uid1_uid2`.
+     * Membership uses `hasAny` — no `resource.data.participants is list` (problematic for some stored docs).
+     * Creates still require size 2, strings, sorted pair, matching connId, and a pending invite.
+     */
+    match /userConnections/{connId} {
+
+      function userConnectionParticipantMatchesAuth(participants) {
+        return participants.size() == 2
+          && participants[0] is string
+          && participants[1] is string
+          && participants.hasAny([request.auth.uid]);
+      }
+
+      function userConnectionDocReadableByParticipant() {
+        return 'participants' in resource.data
+          && resource.data.participants.hasAny([request.auth.uid]);
+      }
+
+      allow get: if isAuthed()
+        && (
+          !exists(/databases/$(database)/documents/userConnections/$(connId))
+          || userConnectionDocReadableByParticipant()
+        );
+
+      allow list: if isAuthed() && userConnectionDocReadableByParticipant();
+
+      allow create: if isAuthed()
+        && 'participants' in request.resource.data
+        && request.resource.data.participants.size() == 2
+        && request.resource.data.participants[0] is string
+        && request.resource.data.participants[1] is string
+        && request.resource.data.participants[0] < request.resource.data.participants[1]
+        && connId == request.resource.data.participants[0] + '_' + request.resource.data.participants[1]
+        && userConnectionParticipantMatchesAuth(request.resource.data.participants)
+        && (
+          (
+            exists(userConnectionInviteDocPath(
+              request.resource.data.participants[1],
+              request.resource.data.participants[0]
+            ))
+            && request.auth.uid == request.resource.data.participants[1]
+          )
+          || (
+            exists(userConnectionInviteDocPath(
+              request.resource.data.participants[0],
+              request.resource.data.participants[1]
+            ))
+            && request.auth.uid == request.resource.data.participants[0]
+          )
+        )
+        && !exists(/databases/$(database)/documents/userConnections/$(connId));
+
+      /// Participants may adjust only `sharedContentItemCount` (denormalized count for Shared Content group list).
+      allow update: if isAuthed()
+        && resource != null
+        && 'participants' in resource.data
+        && resource.data.participants.hasAny([request.auth.uid])
+        && userConnectionParticipantsUnchangedForUpdate()
+        && userConnectionSharedContentCountUpdateAllowed();
+
+      allow delete: if isAuthed()
+        && 'participants' in resource.data
+        && resource.data.participants.hasAny([request.auth.uid]);
+    }
+
+    /* =========================
+       Group lookup tables (admin-managed)
+    ========================== */
+    match /groupLookups/{lookupId} {
+      allow read: if isAuthed();
+      allow write: if isAdmin();
+
+      match /items/{itemId} {
+        allow read: if isAuthed();
+        allow write: if isAdmin();
+      }
+    }
+
+    /* =========================
+       Groups (Gyms + Events)
+    ========================== */
+    function groupDocPath(groupId) {
+      return /databases/$(database)/documents/groups/$(groupId);
+    }
+
+    function groupMemberDocPath(groupId, userId) {
+      return /databases/$(database)/documents/groups/$(groupId)/members/$(userId);
+    }
+
+    function groupInviteDocPath(groupId, userId) {
+      return /databases/$(database)/documents/groups/$(groupId)/invites/$(userId);
+    }
+
+    function groupJoinRequestDocPath(groupId, requesterUserId) {
+      return /databases/$(database)/documents/groups/$(groupId)/joinRequests/$(requesterUserId);
+    }
+
+    function publicGroupProfilePath(groupId) {
+      return /databases/$(database)/documents/publicGroupProfiles/$(groupId);
+    }
+
+    /**
+     * Join-request writes must not use get(groups/{id}) for joinPolicy: that read is denied for
+     * non-members, so the rule always failed with permission denied. Use publicGroupProfiles instead
+     * (readable by any signed-in user).
+     */
+    function joinRequestCreateAllowed(groupId) {
+      let path = publicGroupProfilePath(groupId);
+      return exists(path)
+        && get(path).data.joinPolicy == 'restricted'
+        && subgroupJoinRequestAllowedForPublicProfile(get(path).data);
+    }
+
+    /** Subgroup: requester must be an active member of the parent group (aligned with subgroup invites). */
+    function subgroupJoinRequestAllowedForPublicProfile(p) {
+      return !('parentGroupId' in p)
+        || p.parentGroupId == null
+        || p.parentGroupId == ''
+        || (exists(groupMemberDocPath(p.parentGroupId, request.auth.uid))
+            && get(groupMemberDocPath(p.parentGroupId, request.auth.uid)).data.status == 'active');
+    }
+
+    /** Public self-join: joinPolicy from public profile (non-members cannot read groups/{id}). */
+    function publicGroupSelfJoinAllowed(groupId) {
+      let path = publicGroupProfilePath(groupId);
+      return exists(path)
+        && get(path).data.joinPolicy == 'public'
+        && subgroupJoinRequestAllowedForPublicProfile(get(path).data);
+    }
+
+    /**
+     * Subgroup invites: invitee must already be an active member of the parent group.
+     * Top-level groups (no non-empty parentGroupId) are unchanged.
+     */
+    function subgroupInviteAllowed(groupId, inviteeUserId) {
+      let g = get(groupDocPath(groupId)).data;
+      return !('parentGroupId' in g)
+        || g.parentGroupId == null
+        || g.parentGroupId == ''
+        || (exists(groupMemberDocPath(g.parentGroupId, inviteeUserId))
+            && get(groupMemberDocPath(g.parentGroupId, inviteeUserId)).data.status == 'active');
+    }
+
+    function isGroupOwner(groupId) {
+      return isAuthed()
+        && exists(groupDocPath(groupId))
+        && get(groupDocPath(groupId)).data.ownerUserId == request.auth.uid;
+    }
+
+    /**
+     * Member-initiated share rows (`sharePlan` / `shareCollection` / `shareWorkout`) and new mirror docs:
+     * only when join policy is not public and `membersMayShareContent` is true on the public profile.
+     */
+    function groupMemberMayInitiateShareContent(groupId) {
+      let path = publicGroupProfilePath(groupId);
+      return exists(path)
+        && get(path).data.get('joinPolicy', '') in ['private', 'restricted']
+        && get(path).data.get('membersMayShareContent', false) == true;
+    }
+
+    /**
+     * Group activity feed reads (including collectionGroup("feed")).
+     * Do NOT use isGroupOwner() / get(groups/{id}) here: plain active members cannot read the group root
+     * document (only admin/owner *roles* pass isGroupAdminOrOwner for that path), so get() fails and the
+     * entire rule rejects. Use their own members/{uid} row plus publicGroupProfiles for owner fallback.
+     */
+    function canReadGroupFeed(groupId) {
+      return isAuthed()
+        && groupId is string
+        && groupId.size() > 0
+        && (
+             (exists(groupMemberDocPath(groupId, request.auth.uid))
+               && get(groupMemberDocPath(groupId, request.auth.uid)).data.status == 'active')
+          || (
+               exists(publicGroupProfilePath(groupId))
+               && 'ownerUserId' in get(publicGroupProfilePath(groupId)).data
+               && get(publicGroupProfilePath(groupId)).data.ownerUserId == request.auth.uid
+             )
+           );
+    }
+
+    function isGroupAdminOrOwner(groupId) {
+      return isGroupOwner(groupId)
+        || (isAuthed()
+            && exists(groupMemberDocPath(groupId, request.auth.uid))
+            && get(groupMemberDocPath(groupId, request.auth.uid)).data.status == 'active'
+            && get(groupMemberDocPath(groupId, request.auth.uid)).data.role in ['admin', 'owner']);
+    }
+
+    /** Create group-scoped mirror docs: owner, or active member when member sharing is enabled for private/restricted hubs. */
+    function mayCreateGroupSharedMirror(groupId) {
+      return isAuthed()
+        && groupId is string
+        && groupId.size() > 0
+        && (
+             isGroupOwner(groupId)
+          || (
+               exists(groupMemberDocPath(groupId, request.auth.uid))
+               && get(groupMemberDocPath(groupId, request.auth.uid)).data.status == 'active'
+               && groupMemberMayInitiateShareContent(groupId)
+             )
+          || (
+               exists(publicGroupProfilePath(groupId))
+               && 'ownerUserId' in get(publicGroupProfilePath(groupId)).data
+               && get(publicGroupProfilePath(groupId)).data.ownerUserId == request.auth.uid
+             )
+           );
+    }
+
+    /** Update/delete own mirror rows: owner, any active member (so sharers can remove mirrors after the flag is turned off), or denormalized profile owner fallback. */
+    function mayMutateExistingGroupSharedMirror(groupId) {
+      return isAuthed()
+        && groupId is string
+        && groupId.size() > 0
+        && (
+             isGroupOwner(groupId)
+          || (
+               exists(groupMemberDocPath(groupId, request.auth.uid))
+               && get(groupMemberDocPath(groupId, request.auth.uid)).data.status == 'active'
+             )
+          || (
+               exists(publicGroupProfilePath(groupId))
+               && 'ownerUserId' in get(publicGroupProfilePath(groupId)).data
+               && get(publicGroupProfilePath(groupId)).data.ownerUserId == request.auth.uid
+             )
+           );
+    }
+
+    function groupMirrorPayloadIsMapForGroup(groupId) {
+      return request.resource.data.keys().hasAll(['mirrorOwnerUserId', 'groupId', 'payload'])
+        && request.resource.data.mirrorOwnerUserId == request.auth.uid
+        && request.resource.data.groupId == groupId
+        && request.resource.data.payload is map;
+    }
+
+    function groupMirrorDocUnchangedIdentity() {
+      return resource.data.mirrorOwnerUserId == request.resource.data.mirrorOwnerUserId
+        && resource.data.groupId == request.resource.data.groupId;
+    }
+
+    /** Mirrors on a **connection recipient’s** user doc (`users/{recipientUid}/shared*`). Same `payload` shape as group-feed mirrors; `recipientUserId` scopes rules. */
+    function userConnectionMirrorPayloadValid(recipientUserId) {
+      return request.resource.data.keys().hasAll(['mirrorOwnerUserId', 'recipientUserId', 'payload'])
+        && request.resource.data.mirrorOwnerUserId == request.auth.uid
+        && request.resource.data.recipientUserId == recipientUserId
+        && request.resource.data.payload is map;
+    }
+
+    function userConnectionMirrorDocIdentityUnchanged() {
+      return resource.data.mirrorOwnerUserId == request.resource.data.mirrorOwnerUserId
+        && resource.data.recipientUserId == request.resource.data.recipientUserId;
+    }
+
+    /** `get` / single-doc read on a path with no document: `resource` is null and owner/member checks cannot apply. */
+    function canReadNonexistentGroupDoc(groupId) {
+      return isAuthed() && !exists(groupDocPath(groupId));
+    }
+
+    /** Document (read/update/delete) is the canonical `groups/{id}` row and lists this user as owner. */
+    function isAuthUserGroupDocumentOwner() {
+      return isAuthed()
+        && resource != null
+        && ('ownerUserId' in resource.data)
+        && resource.data.ownerUserId == request.auth.uid;
+    }
+
+    /** Same for `publicGroupProfiles` / denormalized profile rows keyed by group id. */
+    function isAuthUserPublicGroupProfileOwner() {
+      return isAuthed()
+        && ('ownerUserId' in resource.data)
+        && resource.data.ownerUserId == request.auth.uid;
+    }
+
+    match /groupHandleIndex/{handleId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed()
+        && request.resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.handleKey == handleId;
+      allow update: if isAuthed()
+        && resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.handleKey == handleId;
+      allow delete: if isAuthed()
+        && resource.data.ownerUserId == request.auth.uid;
+    }
+
+    match /publicGroupProfiles/{groupId} {
+      allow read: if isAuthed();
+      // Initial profile: requires denormalized ownerUserId on the write (batch-safe with groups create).
+      allow create: if isAuthed()
+        && request.resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.groupId == groupId;
+      // Owner bypass: `get(groups/{id})` inside `isGroupAdminOrOwner` can deny during some batched writes;
+      // `resource.data.ownerUserId` is reliable for the denormalized profile doc.
+      allow update: if isAdmin()
+        || isAuthUserPublicGroupProfileOwner()
+        || isGroupAdminOrOwner(groupId)
+        || (
+          isAuthed()
+          && exists(groupMemberDocPath(groupId, request.auth.uid))
+          && get(groupMemberDocPath(groupId, request.auth.uid)).data.status == 'active'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sharedHubContentItemCount'])
+        );
+      allow delete: if isAdmin()
+        || isAuthUserPublicGroupProfileOwner()
+        || isGroupAdminOrOwner(groupId);
+    }
+
+    match /groups/{groupId} {
+      // Reads: owners (by denormalized field), members/admins, or elevated.
+      // Missings docs: allow so clients can probe before create (`upsertGroup` reads prior handleKey).
+      allow read: if isAdmin()
+        || isAuthUserGroupDocumentOwner()
+        || isGroupAdminOrOwner(groupId)
+        || canReadNonexistentGroupDoc(groupId);
+      // First-time create: claiming owner must match signed-in user (updates still require membership).
+      allow create: if isAuthed()
+        && request.resource.data.ownerUserId == request.auth.uid
+        && request.resource.data.groupId == groupId;
+      allow update, delete: if isAdmin()
+        || isAuthUserGroupDocumentOwner()
+        || isGroupAdminOrOwner(groupId);
+
+      match /members/{userId} {
+        // Only owner/admin can list members; members can read their own membership.
+        allow read: if isAdmin()
+          || isGroupAdminOrOwner(groupId)
+          || (isAuthed() && userId == request.auth.uid);
+
+        // Create membership:
+        // - User can join public groups themselves
+        // - User can accept an invite (invite doc exists)
+        // - Owner/admin can create membership for others (e.g. approving requests)
+        allow create: if isAdmin()
+          || isGroupAdminOrOwner(groupId)
+          // Owner bootstrap in the same batch as group create (rules see in-batch writes).
+          || (isAuthed()
+              && userId == request.auth.uid
+              && request.resource.data.role == 'owner'
+              && request.resource.data.status == 'active'
+              && get(groupDocPath(groupId)).data.ownerUserId == request.auth.uid)
+          || (isAuthed()
+              && userId == request.auth.uid
+              && request.resource.data.role == 'member'
+              && request.resource.data.status == 'active'
+              && (
+                publicGroupSelfJoinAllowed(groupId)
+                || exists(/databases/$(database)/documents/groups/$(groupId)/invites/$(request.auth.uid))
+              ));
+
+        // Updates:
+        // - Owner can promote members to admin
+        // - Owner/admin can block/unblock
+        allow update: if isAdmin()
+          || (isGroupOwner(groupId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'status', 'updatedAt'])
+              && request.resource.data.role in ['member', 'admin', 'owner']
+              && request.resource.data.status in ['active', 'blocked'])
+          || (isGroupAdminOrOwner(groupId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+              && request.resource.data.status in ['active', 'blocked']);
+
+        allow delete: if isAdmin()
+          || isGroupAdminOrOwner(groupId)
+          || (isAuthed() && userId == request.auth.uid);
+      }
+
+      match /joinRequests/{userId} {
+        allow read: if isAdmin() || isGroupAdminOrOwner(groupId) || (isAuthed() && userId == request.auth.uid);
+
+        // Restricted groups: authed user may create their own request doc (joinPolicy from publicGroupProfiles).
+        // Updates must be allowed too: client uses setData(merge: true), which is an update when the doc exists
+        // (e.g. user taps "Request to Join" again or retries after a partial write).
+        allow create: if isAuthed()
+          && userId == request.auth.uid
+          && joinRequestCreateAllowed(groupId);
+        allow update: if isAuthed()
+          && userId == request.auth.uid
+          && joinRequestCreateAllowed(groupId);
+
+        // Owner/admin can delete (approve/reject).
+        allow delete: if isAdmin() || isGroupAdminOrOwner(groupId) || (isAuthed() && userId == request.auth.uid);
+      }
+
+      match /invites/{userId} {
+        allow read: if isAdmin()
+          || isGroupAdminOrOwner(groupId)
+          || (isAuthed() && userId == request.auth.uid)
+          || (isAuthed()
+              && 'userId' in resource.data
+              && resource.data.userId == request.auth.uid);
+        allow create: if isAdmin()
+          || (isGroupAdminOrOwner(groupId) && subgroupInviteAllowed(groupId, userId));
+        allow delete: if isAdmin() || isGroupAdminOrOwner(groupId) || (isAuthed() && userId == request.auth.uid);
+        allow update: if false;
+      }
+
+      /** Group activity feed — readable by active members; share rows: owner or members when `membersMayShareContent` (private/restricted); owner may edit/delete; sharers may delete their own share rows. Share rows must not store `allowEditing` / `hideFutureWorkouts` (use `planGroupShares/...`; resolve plans via `objectId` + `groups/{id}/sharedPlans`). */
+      match /feed/{feedItemId} {
+        allow read: if isAdmin()
+          || canReadGroupFeed(groupId);
+
+        allow create: if (isAdmin()
+              && request.resource.data.groupId == groupId
+              && !('allowEditing' in request.resource.data)
+              && !('hideFutureWorkouts' in request.resource.data))
+          || (isAuthed()
+              && request.resource.data.groupId == groupId
+              && (request.resource.data.actionType == 'sharePlan' || request.resource.data.actionType == 'shareCollection' || request.resource.data.actionType == 'shareWorkout')
+              && request.resource.data.actorUserId == request.auth.uid
+              && request.resource.data.objectId is string
+              && request.resource.data.objectId.size() > 0
+              && !('allowEditing' in request.resource.data)
+              && !('hideFutureWorkouts' in request.resource.data)
+              && (!('comment' in request.resource.data)
+                  || (request.resource.data.comment is string && request.resource.data.comment.size() <= 512))
+              && (
+                   isGroupOwner(groupId)
+                || (exists(groupMemberDocPath(groupId, request.auth.uid))
+                    && get(groupMemberDocPath(groupId, request.auth.uid)).data.status == 'active'
+                    && groupMemberMayInitiateShareContent(groupId))
+              ))
+          || (isAuthed()
+              && request.resource.data.groupId == groupId
+              && request.resource.data.actionType == 'userJoin'
+              && request.resource.data.actorUserId == request.auth.uid
+              && request.resource.data.objectId == request.resource.data.actorUserId
+              && !('comment' in request.resource.data)
+              && (
+                   isGroupOwner(groupId)
+                || (exists(groupMemberDocPath(groupId, request.auth.uid))
+                    && get(groupMemberDocPath(groupId, request.auth.uid)).data.status == 'active')
+                /*
+                 * Invite accept: client batches member create + invite delete + userJoin feed.
+                 * Rules see pre-commit DB state, so the new member row is not visible when feed create
+                 * is evaluated — allow when this user's invite still exists (same condition as members create).
+                 */
+                || exists(groupInviteDocPath(groupId, request.auth.uid))
+              ))
+          || (isAuthed()
+              && request.resource.data.groupId == groupId
+              && isGroupOwner(groupId)
+              && request.resource.data.actionType == 'userJoin'
+              && request.resource.data.actorUserId is string
+              && request.resource.data.actorUserId.size() > 0
+              && request.resource.data.objectId == request.resource.data.actorUserId
+              && !('comment' in request.resource.data))
+          || (isAuthed()
+              && request.resource.data.groupId == groupId
+              && request.resource.data.actionType == 'userLeave'
+              && request.resource.data.actorUserId == request.auth.uid
+              && request.resource.data.objectId == request.resource.data.actorUserId
+              && !('comment' in request.resource.data)
+              && exists(groupMemberDocPath(groupId, request.auth.uid))
+              && get(groupMemberDocPath(groupId, request.auth.uid)).data.status == 'active')
+          || (isAuthed()
+              && request.resource.data.groupId == groupId
+              && request.resource.data.actionType == 'createGroup'
+              && request.resource.data.actorUserId == request.auth.uid
+              && request.resource.data.objectId == groupId
+              && !('comment' in request.resource.data)
+              && isGroupOwner(groupId));
+
+        allow update: if isAdmin() || isGroupOwner(groupId);
+
+        allow delete: if isAdmin()
+          || isGroupOwner(groupId)
+          || (isAuthed()
+              && resource.data.actorUserId == request.auth.uid
+              && resource.data.actionType in ['sharePlan', 'shareCollection', 'shareWorkout']
+              && exists(groupMemberDocPath(groupId, request.auth.uid))
+              && get(groupMemberDocPath(groupId, request.auth.uid)).data.status == 'active');
+      }
+
+      /**
+       * Group-scoped mirrors of workouts / collections / plans (payload copies). Plan mirrors are plan metadata only;
+       * scheduled rows (`plannedWorkouts`) stay on the owner and are read after **follow** via `workoutPlanSubscriptions`.
+       * Reads: one membership check via `canReadGroupFeed`; creates require member-share flag (except owner); update/delete own mirror while an active member.
+       */
+      match /sharedWorkouts/{mirrorId} {
+        allow read: if isAdmin() || canReadGroupFeed(groupId);
+        allow create: if mayCreateGroupSharedMirror(groupId) && groupMirrorPayloadIsMapForGroup(groupId);
+        allow update: if mayMutateExistingGroupSharedMirror(groupId)
+          && resource.data.mirrorOwnerUserId == request.auth.uid
+          && groupMirrorPayloadIsMapForGroup(groupId)
+          && groupMirrorDocUnchangedIdentity();
+        allow delete: if mayMutateExistingGroupSharedMirror(groupId)
+          && resource.data.mirrorOwnerUserId == request.auth.uid;
+      }
+
+      match /sharedCollections/{mirrorId} {
+        allow read: if isAdmin() || canReadGroupFeed(groupId);
+        allow create: if mayCreateGroupSharedMirror(groupId) && groupMirrorPayloadIsMapForGroup(groupId);
+        allow update: if mayMutateExistingGroupSharedMirror(groupId)
+          && resource.data.mirrorOwnerUserId == request.auth.uid
+          && groupMirrorPayloadIsMapForGroup(groupId)
+          && groupMirrorDocUnchangedIdentity();
+        allow delete: if mayMutateExistingGroupSharedMirror(groupId)
+          && resource.data.mirrorOwnerUserId == request.auth.uid;
+      }
+
+      match /sharedPlans/{mirrorId} {
+        allow read: if isAdmin() || canReadGroupFeed(groupId);
+        allow create: if mayCreateGroupSharedMirror(groupId) && groupMirrorPayloadIsMapForGroup(groupId);
+        allow update: if mayMutateExistingGroupSharedMirror(groupId)
+          && resource.data.mirrorOwnerUserId == request.auth.uid
+          && groupMirrorPayloadIsMapForGroup(groupId)
+          && groupMirrorDocUnchangedIdentity();
+        allow delete: if mayMutateExistingGroupSharedMirror(groupId)
+          && resource.data.mirrorOwnerUserId == request.auth.uid;
+      }
+    }
+
+    /*
+     * REQUIRED for collectionGroup("invites") (Groups inbox — invitations for you).
+     * Nested match /groups/{groupId}/invites/{userId} alone does NOT authorize collection-group queries.
+     *
+     * The client query uses whereField("userId", == auth.uid). Security rules must allow every document
+     * that could match that filter — not only when the document id equals auth.uid (id and field can differ).
+     */
+    match /{path=**}/invites/{inviteUserId} {
+      allow read: if isAdmin()
+        || (isAuthed() && inviteUserId == request.auth.uid)
+        || (isAuthed()
+            && 'userId' in resource.data
+            && resource.data.userId == request.auth.uid);
+    }
+
+    /*
+     * REQUIRED for collectionGroup("feed") (Community tab merged group activity).
+     * Nested match /groups/{groupId}/feed/{feedItemId} alone does NOT authorize collection-group queries.
+     *
+     * Reads use resource.data.groupId (required on writes by nested rules) so membership/owner checks apply
+     * per document. Writes stay on the nested match only.
+     */
+    match /{path=**}/feed/{feedItemId} {
+      allow read: if isAdmin()
+        || (isAuthed()
+            && 'groupId' in resource.data
+            && resource.data.groupId is string
+            && resource.data.groupId.size() > 0
+            && canReadGroupFeed(resource.data.groupId));
+      allow create, update, delete: if false;
+    }
+
+    /*
+     * REQUIRED for collectionGroup("workoutPlanSubscriptions") (followers list).
+     * Nested rules under match /users/{uid}/workoutPlanSubscriptions/{id} alone do NOT
+     * authorize collection-group queries — use match /{path=**}/.../{subId}.
+     */
+    match /{path=**}/workoutPlanSubscriptions/{subId} {
+      allow read: if isAdmin()
+        || (isAuthed() && resource.data.subscriberUserId == request.auth.uid)
+        || (isAuthed() && resource.data.ownerUserId == request.auth.uid);
+    }
+
+    /*
+     * REQUIRED for collectionGroup("workoutSubscriptions") / ("workoutCollectionSubscriptions") (subscriber lists).
+     * Nested rules alone do NOT authorize collection-group queries.
+     */
+    match /{path=**}/workoutSubscriptions/{subId} {
+      allow read: if isAdmin()
+        || (isAuthed() && resource.data.subscriberUserId == request.auth.uid)
+        || (isAuthed() && resource.data.ownerUserId == request.auth.uid);
+    }
+    match /{path=**}/workoutCollectionSubscriptions/{subId} {
+      allow read: if isAdmin()
+        || (isAuthed() && resource.data.subscriberUserId == request.auth.uid)
+        || (isAuthed() && resource.data.ownerUserId == request.auth.uid);
+    }
+
+    /* =========================
+       User-Owned Data
+    ========================== */
+    match /users/{userId} {
+      allow read, write: if isOwner(userId) || isAdmin();
+
+      match /groupMembershipIndex/{groupId} {
+        allow read: if isOwner(userId) || isAdmin();
+        /*
+         * Group owner/admin must be able to maintain `users/{memberUid}/groupMembershipIndex/{groupId}` when
+         * approving join requests, updating join policy for members, and removing members — the member is
+         * not the signed-in user. Pre-batch evaluation: pending `joinRequests/{memberUid}` still exists
+         * while the approve batch runs; existing `members/{memberUid}` covers policy sync and removals.
+         */
+        allow create, update: if isOwner(userId) || isAdmin()
+          || (isAuthed()
+              && isGroupAdminOrOwner(groupId)
+              && (
+                   exists(groupMemberDocPath(groupId, userId))
+                || exists(groupJoinRequestDocPath(groupId, userId))
+              ));
+        allow delete: if isOwner(userId) || isAdmin()
+          || (isAuthed()
+              && isGroupAdminOrOwner(groupId)
+              && exists(groupMemberDocPath(groupId, userId)));
+      }
+
+      match /workoutPlans/{planId} {
+        allow read: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed()
+              && !('deletedAt' in resource.data)
+              && hasActiveSubscriptionToPlan(userId, planId));
+        allow write: if isOwner(userId) || isAdmin();
+      }
+
+      match /workoutCollections/{collectionId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if isOwner(userId) || isAdmin();
+      }
+
+      match /workouts/{workoutId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if isOwner(userId) || isAdmin();
+      }
+
+      match /plannedWorkouts/{pwId} {
+        allow read: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed()
+              && !('deletedAt' in resource.data)
+              && resource.data.keys().hasAll(['planId'])
+              && hasActiveSubscriptionToPlan(userId, resource.data.planId));
+        allow write: if isOwner(userId) || isAdmin();
+      }
+
+      match /workoutPlanSubscriptions/{subId} {
+        allow read: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed() && resource.data.ownerUserId == request.auth.uid);
+
+        allow create: if isAdmin()
+          || (isOwner(userId)
+              && request.resource.data.keys().hasAll([
+                'subscriberUserId', 'ownerUserId', 'remotePlanId', 'status'
+              ])
+              && request.resource.data.subscriberUserId == userId
+              && request.resource.data.ownerUserId != userId
+              && request.resource.data.status in ['pending', 'active']
+              && subId == subscriptionDocId(
+                   request.resource.data.ownerUserId,
+                   request.resource.data.remotePlanId))
+          // Plan owner creates invite on the athlete's user doc (private training only).
+          || (isAuthed()
+              && request.auth.uid == request.resource.data.ownerUserId
+              && request.resource.data.keys().hasAll([
+                'subscriberUserId', 'ownerUserId', 'remotePlanId', 'status'
+              ])
+              && request.resource.data.subscriberUserId == userId
+              && request.resource.data.subscriberUserId != request.resource.data.ownerUserId
+              && request.resource.data.status == 'invited'
+              && subId == subscriptionDocId(
+                   request.resource.data.ownerUserId,
+                   request.resource.data.remotePlanId)
+              && planIsPrivateTrainingForInvites(
+                   request.resource.data.ownerUserId,
+                   request.resource.data.remotePlanId));
+
+        allow update: if isAdmin()
+          || (isOwner(userId)
+              && request.resource.data.subscriberUserId == resource.data.subscriberUserId
+              && request.resource.data.ownerUserId == resource.data.ownerUserId
+              && request.resource.data.remotePlanId == resource.data.remotePlanId
+              && subId == subscriptionDocId(resource.data.ownerUserId, resource.data.remotePlanId))
+          || (isAuthed()
+              && resource.data.ownerUserId == request.auth.uid
+              && request.resource.data.status in ['pending', 'active', 'blocked', 'invited']
+              && request.resource.data.subscriberUserId == resource.data.subscriberUserId
+              && request.resource.data.ownerUserId == resource.data.ownerUserId
+              && request.resource.data.remotePlanId == resource.data.remotePlanId
+              && subId == subscriptionDocId(resource.data.ownerUserId, resource.data.remotePlanId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']));
+
+        allow delete: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed() && resource.data.ownerUserId == request.auth.uid);
+      }
+
+      match /workoutSubscriptions/{subId} {
+        allow read: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed() && resource.data.ownerUserId == request.auth.uid);
+
+        allow create: if isAdmin()
+          || (isOwner(userId)
+              && request.resource.data.keys().hasAll([
+                'subscriberUserId', 'ownerUserId', 'remoteWorkoutId', 'status'
+              ])
+              && request.resource.data.subscriberUserId == userId
+              && request.resource.data.ownerUserId != userId
+              && request.resource.data.status in ['pending', 'active']
+              && subId == request.resource.data.ownerUserId + '_' + request.resource.data.remoteWorkoutId);
+
+        allow update: if isAdmin()
+          || (isOwner(userId)
+              && resource.data.subscriberUserId == userId
+              && request.resource.data.subscriberUserId == userId
+              && request.resource.data.ownerUserId == resource.data.ownerUserId
+              && request.resource.data.remoteWorkoutId == resource.data.remoteWorkoutId);
+
+        allow delete: if isAdmin()
+          || (isOwner(userId) && resource.data.subscriberUserId == userId);
+      }
+
+      match /workoutCollectionSubscriptions/{subId} {
+        allow read: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed() && resource.data.ownerUserId == request.auth.uid);
+
+        allow create: if isAdmin()
+          || (isOwner(userId)
+              && request.resource.data.keys().hasAll([
+                'subscriberUserId', 'ownerUserId', 'remoteCollectionId', 'status'
+              ])
+              && request.resource.data.subscriberUserId == userId
+              && request.resource.data.ownerUserId != userId
+              && request.resource.data.status in ['pending', 'active']
+              && subId == request.resource.data.ownerUserId + '_' + request.resource.data.remoteCollectionId);
+
+        allow update: if isAdmin()
+          || (isOwner(userId)
+              && resource.data.subscriberUserId == userId
+              && request.resource.data.subscriberUserId == userId
+              && request.resource.data.ownerUserId == resource.data.ownerUserId
+              && request.resource.data.remoteCollectionId == resource.data.remoteCollectionId);
+
+        allow delete: if isAdmin()
+          || (isOwner(userId) && resource.data.subscriberUserId == userId);
+      }
+
+      /**
+       * Direct user connection invites: stored on the invitee (`users/{invitee}/userConnectionInvites/{inviter}`).
+       */
+      match /userConnectionInvites/{inviterId} {
+        // Invitee owns the path; inviter must read their own pending doc to show "Cancel invite" on public profile.
+        allow read: if isOwner(userId) || isAdmin()
+          || (isAuthed() && request.auth.uid == inviterId);
+
+        // Note: `invitedAt` uses serverTimestamp on write; omit from keys().hasAll (see userConnections create).
+        allow create: if isAuthed()
+          && request.auth.uid == inviterId
+          && inviterId != userId
+          && request.resource.data.keys().hasAll(['invitedByUserId'])
+          && request.resource.data.invitedByUserId == inviterId
+          && publicUserProfileHasHandle(inviterId)
+          && publicUserProfileHasHandle(userId)
+          && !exists(userConnectionDocPathForPair(inviterId, userId));
+
+        allow delete: if isOwner(userId) || isAdmin() || request.auth.uid == inviterId;
+
+        allow update: if false;
+      }
+
+      /**
+       * Connection-scoped mirrors on the **recipient** (`users/{recipientUid}/shared*`) — writable by the content owner when a mutual connection exists.
+       */
+      match /sharedWorkouts/{mirrorId} {
+        allow read: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed() && resource.data.mirrorOwnerUserId == request.auth.uid);
+
+        allow create: if isAuthed()
+          && userConnectionMirrorPayloadValid(userId)
+          && userConnectionPairExists(request.auth.uid, userId);
+
+        allow update: if isAuthed()
+          && userConnectionMirrorDocIdentityUnchanged()
+          && resource.data.mirrorOwnerUserId == request.auth.uid
+          && request.resource.data.keys().hasAll(['mirrorOwnerUserId', 'recipientUserId', 'payload'])
+          && request.resource.data.payload is map
+          && userConnectionPairExists(request.auth.uid, userId);
+
+        allow delete: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed()
+              && resource.data.mirrorOwnerUserId == request.auth.uid
+              && userConnectionPairExists(request.auth.uid, userId));
+      }
+
+      match /sharedCollections/{mirrorId} {
+        allow read: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed() && resource.data.mirrorOwnerUserId == request.auth.uid);
+
+        allow create: if isAuthed()
+          && userConnectionMirrorPayloadValid(userId)
+          && userConnectionPairExists(request.auth.uid, userId);
+
+        allow update: if isAuthed()
+          && userConnectionMirrorDocIdentityUnchanged()
+          && resource.data.mirrorOwnerUserId == request.auth.uid
+          && request.resource.data.keys().hasAll(['mirrorOwnerUserId', 'recipientUserId', 'payload'])
+          && request.resource.data.payload is map
+          && userConnectionPairExists(request.auth.uid, userId);
+
+        allow delete: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed()
+              && resource.data.mirrorOwnerUserId == request.auth.uid
+              && userConnectionPairExists(request.auth.uid, userId));
+      }
+
+      match /sharedPlans/{mirrorId} {
+        allow read: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed() && resource.data.mirrorOwnerUserId == request.auth.uid);
+
+        allow create: if isAuthed()
+          && userConnectionMirrorPayloadValid(userId)
+          && userConnectionPairExists(request.auth.uid, userId);
+
+        allow update: if isAuthed()
+          && userConnectionMirrorDocIdentityUnchanged()
+          && resource.data.mirrorOwnerUserId == request.auth.uid
+          && request.resource.data.keys().hasAll(['mirrorOwnerUserId', 'recipientUserId', 'payload'])
+          && request.resource.data.payload is map
+          && userConnectionPairExists(request.auth.uid, userId);
+
+        allow delete: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed()
+              && resource.data.mirrorOwnerUserId == request.auth.uid
+              && userConnectionPairExists(request.auth.uid, userId));
+      }
+
+      /**
+       * Personal activity feed (`users/{userId}/feed/{feedItemId}`) — readable by owner; `connect` rows writable by owner or a connected peer after `userConnections` exists.
+       *
+       * Share rows (`sharePlan` / …) must not store `allowEditing` or `hideFutureWorkouts` — those belong on
+       * `planUserShares/...`; clients resolve shared plans using `objectId` and the recipient’s `sharedPlans` mirror.
+       *
+       * Do not require `createdAt` in keys().hasAll: `FieldValue.serverTimestamp()` is not always visible to rules
+       * the same way as plain fields, which caused spurious PERMISSION_DENIED on create.
+       */
+      match /feed/{feedItemId} {
+        allow read: if isAdmin() || isOwner(userId);
+
+        allow create: if isAuthed()
+          && request.resource.data.keys().hasAll([
+            'userFeedOwnerId', 'actionType', 'actorUserId', 'objectId'
+          ])
+          && request.resource.data.userFeedOwnerId == userId
+          && (
+            (
+              request.resource.data.actionType == 'connect'
+              && request.resource.data.actorUserId is string
+              && request.resource.data.actorUserId.size() > 0
+              && request.resource.data.objectId is string
+              && request.resource.data.objectId.size() > 0
+              && request.resource.data.actorUserId != request.resource.data.objectId
+              && !('comment' in request.resource.data)
+              && !('groupId' in request.resource.data)
+              && userConnectionPairExists(
+                request.resource.data.actorUserId,
+                request.resource.data.objectId
+              )
+              && (
+                request.auth.uid == userId
+                || (
+                  userConnectionPairExists(request.auth.uid, userId)
+                  && (
+                    request.auth.uid == request.resource.data.actorUserId
+                    || request.auth.uid == request.resource.data.objectId
+                  )
+                )
+              )
+            )
+            || (
+              (request.resource.data.actionType == 'sharePlan'
+                  || request.resource.data.actionType == 'shareCollection'
+                  || request.resource.data.actionType == 'shareWorkout')
+              && request.resource.data.actorUserId == request.auth.uid
+              && request.resource.data.objectId is string
+              && request.resource.data.objectId.size() > 0
+              && !('groupId' in request.resource.data)
+              && (
+                userConnectionPairExists(request.auth.uid, userId)
+                || (
+                  userId == request.auth.uid
+                  && 'shareRecipientUserId' in request.resource.data
+                  && request.resource.data.shareRecipientUserId is string
+                  && request.resource.data.shareRecipientUserId.size() > 0
+                  && request.resource.data.shareRecipientUserId != request.auth.uid
+                  && userConnectionPairExists(
+                    request.auth.uid,
+                    request.resource.data.shareRecipientUserId
+                  )
+                )
+              )
+              && (
+                   !('comment' in request.resource.data)
+                || (request.resource.data.comment is string && request.resource.data.comment.size() <= 512)
+              )
+              && !('allowEditing' in request.resource.data)
+              && !('hideFutureWorkouts' in request.resource.data)
+            )
+          );
+
+        allow update: if false;
+
+        allow delete: if isAuthed()
+          && resource.data.userFeedOwnerId == userId
+          && (resource.data.actionType == 'sharePlan'
+              || resource.data.actionType == 'shareCollection'
+              || resource.data.actionType == 'shareWorkout')
+          && (
+            (
+              resource.data.actorUserId == request.auth.uid
+              && (
+                userConnectionPairExists(request.auth.uid, userId)
+                || (
+                  userId == request.auth.uid
+                  && 'shareRecipientUserId' in resource.data
+                  && resource.data.shareRecipientUserId is string
+                  && resource.data.shareRecipientUserId.size() > 0
+                  && userConnectionPairExists(
+                    request.auth.uid,
+                    resource.data.shareRecipientUserId
+                  )
+                )
+              )
+            )
+            || (
+              isOwner(userId)
+              && resource.data.actorUserId != request.auth.uid
+            )
+          );
+      }
+
+      /**
+       * Private plan share index on the plan owner’s user doc (`allowEditing` / `hideFutureWorkouts` per destination).
+       * Followers read their own `items/{peerUid}` doc before subscribing; owners list all items via the catch-all below.
+       */
+      match /planUserShares/{planId}/items/{peerUid} {
+        allow get: if isAdmin()
+          || isOwner(userId)
+          || (
+               isAuthed()
+               && peerUid == request.auth.uid
+               && userConnectionPairExists(request.auth.uid, userId)
+             );
+      }
+
+      match /planGroupShares/{planId}/items/{shareGroupId} {
+        allow get: if isAdmin()
+          || isOwner(userId)
+          || (isAuthed() && canReadGroupFeed(shareGroupId));
+      }
+
+      match /{document=**} {
+        allow read, write: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    match /users/{app_user_id}/purchaser-info/{uid} {
+      allow read: if request.auth.uid == uid;
+    }
+
+    match /revenuecat_webhook_events/{id} {
+      allow read: if request.auth.uid == resource.data.app_user_id;
+    }
+
+    /* Admin-only fallback — keep last so specific rules above take effect for non-admins */
+    match /{document=**} {
+      allow read, write: if isAdmin();
+    }
+  }
+}
+
