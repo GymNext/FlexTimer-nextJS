@@ -22,7 +22,7 @@ export async function GET(request: NextRequest) {
 
   const queryRaw = (request.nextUrl.searchParams.get('query') ?? '').trim().toLowerCase()
   const query = queryRaw.startsWith('@') ? queryRaw.slice(1) : queryRaw
-  if (!query || query.length < 2) {
+  if (!query || query.length < 1) {
     return NextResponse.json({ items: [] satisfies HandleSearchResult[] })
   }
 

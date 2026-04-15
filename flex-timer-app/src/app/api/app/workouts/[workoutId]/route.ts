@@ -4,14 +4,18 @@ import { adminAuth } from '@/lib/firebase-admin'
 import {
   clearWorkoutDeletedAt,
   deleteWorkout,
+  getCollectionById,
   getWorkoutById,
   getUserWorkoutCollections,
+  getWorkoutIdsReferencedByActiveCollections,
+  getWorkoutsByIds,
   setWorkoutDeletedAt,
   updateCollectionWorkoutIds,
   updateWorkoutMetadata,
   updateWorkoutSingleSegment,
   updateWorkoutMultiSegment,
 } from '@/lib/firestore'
+import { getSubscriptionLimits } from '@/lib/subscription-limits'
 import type { WorkoutSegment } from '@/types/user'
 
 type RouteParams = Promise<{ workoutId: string }>
@@ -60,6 +64,8 @@ export async function GET(
 /**
  * PATCH /api/app/workouts/[workoutId]
  * - Soft delete / recover: body { recover: true } to recover, otherwise soft-delete.
+ *   Optional { restoreToCollectionId } adds the workout to that collection after recover (non-deleted collection only; enforces favorites limit).
+ * - Active orphan (not deleted, not on any non-deleted collection): body { addToCollectionId } appends the workout to that collection.
  * - Update metadata: body { workoutName?: string | null, workoutDescription?: string | null }.
  */
 export async function PATCH(
@@ -100,10 +106,102 @@ export async function PATCH(
     const hasMetadataUpdate =
       'workoutName' in body || 'workoutDescription' in body || 'workoutDetails' in body
 
+    const addToCollectionId =
+      typeof body.addToCollectionId === 'string' ? body.addToCollectionId.trim() : ''
+    if (addToCollectionId && body.recover !== true) {
+      if (workout.deletedAt) {
+        return NextResponse.json(
+          { error: 'This workout is deleted. Use recover with a collection, or clear deleted state first.' },
+          { status: 400 }
+        )
+      }
+      const allCollections = await getUserWorkoutCollections(uid)
+      const referenced = getWorkoutIdsReferencedByActiveCollections(allCollections)
+      if (referenced.has(workoutId)) {
+        return NextResponse.json(
+          { error: 'Workout is already listed on a collection' },
+          { status: 400 }
+        )
+      }
+      const collection = await getCollectionById(uid, addToCollectionId)
+      if (!collection) {
+        return NextResponse.json({ error: 'Collection not found' }, { status: 404 })
+      }
+      if (collection.deletedAt) {
+        return NextResponse.json(
+          { error: 'Cannot add a workout to a deleted collection' },
+          { status: 400 }
+        )
+      }
+      const existingIds = [...(collection.workoutIds ?? [])]
+      const willAdd = !existingIds.includes(workoutId)
+      const mergedIds = willAdd ? [...existingIds, workoutId] : existingIds
+
+      if (addToCollectionId === 'favorite') {
+        const limits = await getSubscriptionLimits(uid)
+        const collWorkouts = await getWorkoutsByIds(uid, mergedIds)
+        const activeAfter = collWorkouts.filter((w) => !w.deletedAt).length
+        if (activeAfter > limits.maxFavorites) {
+          return NextResponse.json(
+            {
+              error: `Your plan allows up to ${limits.maxFavorites} favorites. Remove one or choose another collection.`,
+              code: 'SUBSCRIPTION_LIMIT_FAVORITES',
+            },
+            { status: 403 }
+          )
+        }
+      }
+
+      if (willAdd) {
+        await updateCollectionWorkoutIds(uid, addToCollectionId, mergedIds)
+      }
+      return NextResponse.json({ ok: true })
+    }
+
     if (body.recover === true) {
       if (!workout.deletedAt) {
         return NextResponse.json({ error: 'Workout is not deleted' }, { status: 400 })
       }
+      const restoreTo =
+        typeof body.restoreToCollectionId === 'string' ? body.restoreToCollectionId.trim() : ''
+      if (restoreTo) {
+        const collection = await getCollectionById(uid, restoreTo)
+        if (!collection) {
+          return NextResponse.json({ error: 'Collection not found' }, { status: 404 })
+        }
+        if (collection.deletedAt) {
+          return NextResponse.json(
+            { error: 'Cannot restore into a deleted collection' },
+            { status: 400 }
+          )
+        }
+        const existingIds = [...(collection.workoutIds ?? [])]
+        const willAdd = !existingIds.includes(workoutId)
+        const mergedIds = willAdd ? [...existingIds, workoutId] : existingIds
+
+        if (restoreTo === 'favorite') {
+          const limits = await getSubscriptionLimits(uid)
+          const collWorkouts = await getWorkoutsByIds(uid, mergedIds)
+          let activeAfter = collWorkouts.filter((w) => !w.deletedAt).length
+          if (collWorkouts.some((w) => w.id === workoutId && w.deletedAt)) activeAfter += 1
+          if (activeAfter > limits.maxFavorites) {
+            return NextResponse.json(
+              {
+                error: `Your plan allows up to ${limits.maxFavorites} favorites. Remove one or choose another collection.`,
+                code: 'SUBSCRIPTION_LIMIT_FAVORITES',
+              },
+              { status: 403 }
+            )
+          }
+        }
+
+        await clearWorkoutDeletedAt(uid, workoutId)
+        if (willAdd) {
+          await updateCollectionWorkoutIds(uid, restoreTo, mergedIds)
+        }
+        return NextResponse.json({ ok: true })
+      }
+
       await clearWorkoutDeletedAt(uid, workoutId)
       return NextResponse.json({ ok: true })
     }
@@ -211,7 +309,7 @@ export async function PATCH(
 
 /**
  * DELETE /api/app/workouts/[workoutId]
- * Permanently deletes a soft-deleted workout.
+ * Permanently deletes a soft-deleted workout, or an active workout that is not on any non-deleted collection (orphan).
  */
 export async function DELETE(
   request: NextRequest,
@@ -240,9 +338,18 @@ export async function DELETE(
     if (!workout) {
       return NextResponse.json({ error: 'Workout not found' }, { status: 404 })
     }
-    if (!workout.deletedAt) {
+    if (workout.deletedAt) {
+      await deleteWorkout(uid, workoutId)
+      return new NextResponse(null, { status: 204 })
+    }
+    const allCollections = await getUserWorkoutCollections(uid)
+    const referenced = getWorkoutIdsReferencedByActiveCollections(allCollections)
+    if (referenced.has(workoutId)) {
       return NextResponse.json(
-        { error: 'Workout must be soft-deleted before permanent deletion' },
+        {
+          error:
+            'Workout must be soft-deleted, or not listed on any collection, before it can be deleted this way.',
+        },
         { status: 400 }
       )
     }

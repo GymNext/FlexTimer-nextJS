@@ -5,7 +5,12 @@ import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { auth } from '@/lib/firebase'
 import type { AdminUserProfile } from '@/types/user'
-import { getWorkoutDisplayName, getWorkoutDisplayDescription } from '@/lib/json-workout-format'
+import { HUB_LOOKUP_ROWS } from '@/types/hub-profile'
+import {
+  getWorkoutDisplayName,
+  getWorkoutDisplayDescription,
+  getCollectionDisplayDescription,
+} from '@/lib/json-workout-format'
 import { USER_SETTINGS_SECTIONS, getSectionSubgroupsWithRows } from '@/lib/user-settings-sections'
 
 export default function AdminUserProfilePage() {
@@ -446,6 +451,22 @@ export default function AdminUserProfilePage() {
 
       <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
         <div className="border-b border-gray-200 bg-gray-50 px-4 py-2">
+          <h2 className="text-xs font-medium uppercase tracking-wide text-gray-500">Hub profile (catalog)</h2>
+        </div>
+        <dl className="divide-y divide-gray-200">
+          {HUB_LOOKUP_ROWS.map((row) => (
+            <div key={row.key} className="px-4 py-2.5 sm:grid sm:grid-cols-3 sm:gap-4">
+              <dt className="text-sm font-medium text-gray-500">{row.label}</dt>
+              <dd className="mt-0.5 text-sm text-gray-900 sm:col-span-2">
+                {profile.hubLookupLabels?.[row.key]?.trim() || '—'}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+
+      <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+        <div className="border-b border-gray-200 bg-gray-50 px-4 py-2">
           <h2 className="text-xs font-medium uppercase tracking-wide text-gray-500">User Settings</h2>
         </div>
         <div className="divide-y divide-gray-200">
@@ -584,7 +605,7 @@ export default function AdminUserProfilePage() {
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-600">{coll.workoutIds.length}</td>
                     <td className="px-4 py-3 text-sm text-gray-600">
-                      {coll.workoutCollectionDescription ?? '—'}
+                      {getCollectionDisplayDescription(coll)}
                     </td>
                   </tr>
                 ))}

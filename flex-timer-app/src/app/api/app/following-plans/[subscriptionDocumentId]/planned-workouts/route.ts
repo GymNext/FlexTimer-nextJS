@@ -40,7 +40,7 @@ export async function GET(
   try {
     const subscription = await getActiveWorkoutPlanSubscriptionById(uid, subscriptionDocumentId)
     if (!subscription) {
-      return NextResponse.json({ error: 'Followed plan not found' }, { status: 404 })
+      return NextResponse.json({ error: 'Plan subscription not found' }, { status: 404 })
     }
 
     const ownerPlan = await getPlanById(subscription.ownerUserId, subscription.remotePlanId)

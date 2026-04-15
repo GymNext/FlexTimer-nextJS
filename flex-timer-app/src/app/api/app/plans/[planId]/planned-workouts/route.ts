@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUserAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
-import { createPlannedWorkout, getPlannedWorkouts } from '@/lib/firestore'
+import { createPlannedWorkout, getPlannedWorkouts, userOwnsActiveWorkoutPlan } from '@/lib/firestore'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
 
 type RouteParams = Promise<{ planId: string }>
@@ -43,6 +43,9 @@ export async function GET(
   }
 
   try {
+    if (!(await userOwnsActiveWorkoutPlan(uid, planId))) {
+      return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
+    }
     const plannedWorkouts = await getPlannedWorkouts(uid, planId, fromDate, toDate)
     return NextResponse.json({ plannedWorkouts })
   } catch (err) {
@@ -85,6 +88,9 @@ export async function POST(
   }
 
   try {
+    if (!(await userOwnsActiveWorkoutPlan(uid, planId))) {
+      return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
+    }
     const body = await request.json().catch(() => ({}))
     const day = typeof body.day === 'string' ? body.day.slice(0, 10) : undefined
     const ordinal = typeof body.ordinal === 'number' ? body.ordinal : undefined
@@ -114,12 +120,6 @@ export async function POST(
     }
 
     const today = clientToday ?? new Date().toISOString().slice(0, 10)
-    if (day < today) {
-      return NextResponse.json(
-        { error: 'Cannot add workouts to past dates.' },
-        { status: 403 }
-      )
-    }
     if (day > today) {
       const limits = await getSubscriptionLimits(uid)
       if (limits.tier !== 'pro') {

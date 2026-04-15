@@ -7,6 +7,7 @@ import {
   getUserWorkouts,
   getUserDocument,
 } from '@/lib/firestore'
+import { EMPTY_USER_HUB_LOOKUP_IDS, resolveHubLookupLabels } from '@/types/hub-profile'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
 import type { SubscriptionLimits } from '@/lib/subscription-limits-constants'
 
@@ -85,12 +86,22 @@ export async function GET(request: NextRequest) {
       maxPlans: 1,
     }
 
+    const hubLookupIds = userDoc?.hubLookupIds ?? EMPTY_USER_HUB_LOOKUP_IDS
     return NextResponse.json({
       workouts,
       workoutPlans,
       workoutCollections,
-      publicHandle: userDoc?.publicHandle ?? null,
-      basicBio: userDoc?.basicBio ?? null,
+      handle: userDoc?.handle ?? null,
+      handleKey: userDoc?.handleKey ?? null,
+      bio: userDoc?.bio ?? null,
+      firstName: userDoc?.firstName ?? null,
+      lastName: userDoc?.lastName ?? null,
+      profilePhotoUrl: userDoc?.profilePhotoUrl ?? null,
+      city: userDoc?.city ?? null,
+      region: userDoc?.region ?? null,
+      country: userDoc?.country ?? null,
+      hubLookupIds,
+      hubLookupLabels: resolveHubLookupLabels(hubLookupIds),
       subscriptionLimits,
       timerDefaults,
       counts: {

@@ -414,12 +414,11 @@ export function getCollectionDisplayName(entry: CollectionEntryLike): string {
   return '<empty>'
 }
 
-/** Display description for collection: description if set, else count-based fallback. (UIHelper.workoutCollectionDescription) */
+/** Display description for collection: stored description if set, else in-memory “Collection of x workout(s)”. */
 export function getCollectionDisplayDescription(entry: CollectionEntryLike): string {
   if (entry.workoutCollectionDescription != null && entry.workoutCollectionDescription !== '')
     return entry.workoutCollectionDescription
-  const count = entry.workoutIds?.length ?? 0
-  if (count === 0) return 'Empty collection of workouts'
+  const count = Array.isArray(entry.workoutIds) ? entry.workoutIds.length : 0
   if (count === 1) return 'Collection of 1 workout'
   return `Collection of ${count} workouts`
 }

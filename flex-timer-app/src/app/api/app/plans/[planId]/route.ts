@@ -11,6 +11,12 @@ import {
 
 type RouteParams = Promise<{ planId: string }>
 
+function parseTrainingIntentPatch(raw: unknown): 0 | 1 | undefined {
+  if (raw === 0 || raw === '0') return 0
+  if (raw === 1 || raw === '1') return 1
+  return undefined
+}
+
 /**
  * GET /api/app/plans/[planId]
  * Returns a single workout plan belonging to the signed-in user.
@@ -84,6 +90,8 @@ export async function PATCH(
     workoutPlanDescription?: string | null
     privacy?: number
     handle?: string | null
+    trainingIntent?: unknown
+    showInSchedule?: unknown
   }
   try {
     body = await request.json().catch(() => ({}))
@@ -97,15 +105,31 @@ export async function PATCH(
       return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
     }
 
+    const trainingIntentNext = parseTrainingIntentPatch(body.trainingIntent)
+    if (
+      'trainingIntent' in body &&
+      trainingIntentNext !== 0 &&
+      trainingIntentNext !== 1
+    ) {
+      return NextResponse.json(
+        { error: 'trainingIntent must be 0 or 1' },
+        { status: 400 }
+      )
+    }
+
     const hasNameUpdate = typeof body.workoutPlanName === 'string'
     const hasSharingUpdate = typeof body.privacy === 'number' || 'handle' in body
+    const hasTrainingIntentUpdate = trainingIntentNext === 0 || trainingIntentNext === 1
+    const hasShowInScheduleUpdate = typeof body.showInSchedule === 'boolean'
     // Update plan metadata/sharing when provided.
-    if (hasNameUpdate || hasSharingUpdate) {
+    if (hasNameUpdate || hasSharingUpdate || hasTrainingIntentUpdate || hasShowInScheduleUpdate) {
       const patch: {
         name?: string
         description?: string | null
         privacy?: number
         handle?: string | null
+        trainingIntent?: 0 | 1
+        showInSchedule?: boolean
       } = {}
       if (hasNameUpdate) {
         const name = body.workoutPlanName!.trim()
@@ -114,6 +138,27 @@ export async function PATCH(
         }
         patch.name = name
         patch.description = body.workoutPlanDescription
+      }
+      if (hasTrainingIntentUpdate) {
+        if (plan.isPersonal) {
+          return NextResponse.json(
+            { error: 'Personal plans cannot set training intent' },
+            { status: 400 }
+          )
+        }
+        const currentResolved =
+          plan.trainingIntent === 1 ? 1 : plan.trainingIntent === 0 ? 0 : null
+        if (currentResolved === null) {
+          patch.trainingIntent = trainingIntentNext
+        } else if (trainingIntentNext !== currentResolved) {
+          return NextResponse.json(
+            {
+              error:
+                'Training type (private vs group training) cannot be changed after the plan is created.',
+            },
+            { status: 400 }
+          )
+        }
       }
       if (typeof body.privacy === 'number') {
         if (![1, 2, 3].includes(body.privacy)) {
@@ -135,6 +180,9 @@ export async function PATCH(
           )
         }
         patch.handle = typeof body.handle === 'string' ? body.handle : null
+      }
+      if (hasShowInScheduleUpdate) {
+        patch.showInSchedule = body.showInSchedule as boolean
       }
       await updatePlanMetadata(uid, planId, patch)
       const updated = await getPlanById(uid, planId)

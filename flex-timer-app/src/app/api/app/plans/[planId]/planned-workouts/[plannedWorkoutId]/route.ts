@@ -7,6 +7,7 @@ import {
   updatePlannedWorkoutDayAndOrdinal,
   updatePlannedWorkoutWorkout,
   updatePlannedWorkoutWorkoutMetadata,
+  userOwnsActiveWorkoutPlan,
 } from '@/lib/firestore'
 
 type RouteParams = Promise<{ planId: string; plannedWorkoutId: string }>
@@ -41,6 +42,9 @@ export async function GET(
   }
 
   try {
+    if (!(await userOwnsActiveWorkoutPlan(uid, planId))) {
+      return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
+    }
     const plannedWorkout = await getPlannedWorkout(uid, plannedWorkoutId)
     if (!plannedWorkout || plannedWorkout.planId !== planId) {
       return NextResponse.json({ error: 'Planned workout not found' }, { status: 404 })
@@ -57,7 +61,7 @@ export async function GET(
 
 /**
  * PATCH /api/app/plans/[planId]/planned-workouts/[plannedWorkoutId]
- * Move / reorder a planned workout: body { day?: string (YYYY-MM-DD), ordinal?: number }.
+ * Move / reorder a planned workout: body { day?, ordinal?, planId? (another owned plan) }.
  */
 export async function PATCH(
   request: NextRequest,
@@ -84,7 +88,15 @@ export async function PATCH(
     )
   }
 
-  let body: { day?: unknown; ordinal?: unknown; workoutName?: unknown; workoutDescription?: unknown; workoutDetails?: unknown; workout?: unknown }
+  let body: {
+    day?: unknown
+    ordinal?: unknown
+    planId?: unknown
+    workoutName?: unknown
+    workoutDescription?: unknown
+    workoutDetails?: unknown
+    workout?: unknown
+  }
   try {
     body = await request.json().catch(() => ({}))
   } catch {
@@ -92,10 +104,18 @@ export async function PATCH(
   }
 
   try {
+    if (!(await userOwnsActiveWorkoutPlan(uid, planId))) {
+      return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
+    }
     const plannedWorkout = await getPlannedWorkout(uid, plannedWorkoutId)
     if (!plannedWorkout || plannedWorkout.planId !== planId) {
       return NextResponse.json({ error: 'Planned workout not found' }, { status: 404 })
     }
+
+    const workoutDetails =
+      body.workoutDetails === null || typeof body.workoutDetails === 'string'
+        ? (body.workoutDetails as string | null)
+        : undefined
 
     const workoutPayload =
       body.workout != null && typeof body.workout === 'object'
@@ -110,6 +130,9 @@ export async function PATCH(
         workoutDescription: existing.workoutDescription ?? workoutPayload.workoutDescription,
       }
       await updatePlannedWorkoutWorkout(uid, plannedWorkoutId, merged)
+      if (workoutDetails !== undefined) {
+        await updatePlannedWorkoutWorkoutMetadata(uid, plannedWorkoutId, { workoutDetails })
+      }
       const updated = await getPlannedWorkout(uid, plannedWorkoutId)
       return NextResponse.json(updated ?? plannedWorkout)
     }
@@ -122,6 +145,19 @@ export async function PATCH(
       typeof body.ordinal === 'number'
         ? (body.ordinal as number)
         : undefined
+    const bodyPlanId =
+      typeof body.planId === 'string' && body.planId.trim() !== ''
+        ? body.planId.trim()
+        : undefined
+    let planIdPatch: string | undefined
+    if (bodyPlanId !== undefined) {
+      if (!(await userOwnsActiveWorkoutPlan(uid, bodyPlanId))) {
+        return NextResponse.json({ error: 'Target plan not found' }, { status: 404 })
+      }
+      if (bodyPlanId !== plannedWorkout.planId) {
+        planIdPatch = bodyPlanId
+      }
+    }
     const workoutName =
       body.workoutName === null || typeof body.workoutName === 'string'
         ? (body.workoutName as string | null)
@@ -129,10 +165,6 @@ export async function PATCH(
     const workoutDescription =
       body.workoutDescription === null || typeof body.workoutDescription === 'string'
         ? (body.workoutDescription as string | null)
-        : undefined
-    const workoutDetails =
-      body.workoutDetails === null || typeof body.workoutDetails === 'string'
-        ? (body.workoutDetails as string | null)
         : undefined
 
     if (workoutName !== undefined || workoutDescription !== undefined || workoutDetails !== undefined) {
@@ -145,9 +177,16 @@ export async function PATCH(
       return NextResponse.json(updated ?? plannedWorkout)
     }
 
-    if (day === undefined && ordinal === undefined && workoutName === undefined && workoutDescription === undefined && workoutDetails === undefined) {
+    if (
+      day === undefined &&
+      ordinal === undefined &&
+      planIdPatch === undefined &&
+      workoutName === undefined &&
+      workoutDescription === undefined &&
+      workoutDetails === undefined
+    ) {
       return NextResponse.json(
-        { error: 'Provide day, ordinal, or workout name/description/details' },
+        { error: 'Provide day, ordinal, planId, or workout name/description/details' },
         { status: 400 }
       )
     }
@@ -161,6 +200,7 @@ export async function PATCH(
     await updatePlannedWorkoutDayAndOrdinal(uid, plannedWorkoutId, {
       day,
       ordinal,
+      planId: planIdPatch,
     })
     const updated = await getPlannedWorkout(uid, plannedWorkoutId)
     return NextResponse.json(updated ?? plannedWorkout)
@@ -203,6 +243,9 @@ export async function DELETE(
   }
 
   try {
+    if (!(await userOwnsActiveWorkoutPlan(uid, planId))) {
+      return NextResponse.json({ error: 'Plan not found' }, { status: 404 })
+    }
     const plannedWorkout = await getPlannedWorkout(uid, plannedWorkoutId)
     if (!plannedWorkout || plannedWorkout.planId !== planId) {
       return NextResponse.json({ error: 'Planned workout not found' }, { status: 404 })

@@ -3,6 +3,7 @@ import { requireAdminAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
 import { getRevenueCatCustomer } from '@/lib/revenuecat'
 import { getUserDataCounts, getUserDocument, getUserWorkoutCollections, getUserWorkoutPlans, getUserWorkouts } from '@/lib/firestore'
+import { EMPTY_USER_HUB_LOOKUP_IDS, resolveHubLookupLabels } from '@/types/hub-profile'
 import type { AdminUserProfile } from '@/types/user'
 
 /** When RevenueCat has no subscription, compute Classic from override or effective/expiry dates (matches Swift). */
@@ -95,6 +96,8 @@ export async function GET(
         ? [...new Set(userRecord.providerData.map((p) => providerIdToLabel[p.providerId] ?? p.providerId))]
         : [unknownProviderLabel]
 
+    const hubIds = userDoc?.hubLookupIds ?? EMPTY_USER_HUB_LOOKUP_IDS
+
     const profile: AdminUserProfile = {
       uid: userRecord.uid,
       email: userRecord.email ?? userDoc?.email ?? null,
@@ -109,6 +112,15 @@ export async function GET(
       },
       firstName: userDoc?.firstName ?? null,
       lastName: userDoc?.lastName ?? null,
+      handle: userDoc?.handle ?? null,
+      handleKey: userDoc?.handleKey ?? null,
+      bio: userDoc?.bio ?? null,
+      profilePhotoUrl: userDoc?.profilePhotoUrl ?? null,
+      city: userDoc?.city ?? null,
+      region: userDoc?.region ?? null,
+      country: userDoc?.country ?? null,
+      ...hubIds,
+      hubLookupLabels: resolveHubLookupLabels(hubIds),
       connectedUserDisplay:
         typeof userDoc?.hasConnectedToDisplay === 'boolean'
           ? userDoc.hasConnectedToDisplay

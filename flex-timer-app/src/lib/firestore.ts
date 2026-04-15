@@ -1,7 +1,36 @@
 import { randomUUID } from 'node:crypto'
+import { normalizeBioDisplayText } from '@/lib/format-bio-display'
 import { DocumentSnapshot, FieldPath, FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase-admin'
+import type { OwnedGroupFlat } from '@/lib/build-owned-hub-tree'
+import { isAppGroupType, parseFirestoreJoinPolicy } from '@/types/group'
+import { USER_HUB_LOOKUP_ID_KEYS, userHubLookupIdsFromFirestore, type UserHubLookupIds } from '@/types/hub-profile'
+import {
+  bareWorkoutIdForGroupSharedMirror,
+  deleteCollectionUserConnectionMirrors,
+  deletePlanUserConnectionMirrors,
+  deleteWorkoutHubMirrors,
+  deleteWorkoutUserConnectionMirrors,
+  syncCollectionUserConnectionMirrors,
+  syncPlanUserConnectionMirrors,
+  syncWorkoutHubMirrors,
+  syncWorkoutUserConnectionMirrors,
+} from '@/lib/user-connection-mirrors'
+import {
+  purgeWorkoutMirrorsFromCollectionDerivedShares,
+  syncCollectionHubWorkoutMirrors,
+  syncCollectionUserWorkoutMirrors,
+} from '@/lib/workout-collection-share'
+import { normalizePlanTrainingIntentFromFirestore } from '@/lib/plan-training-intent'
 import { USER_COLLECTIONS, type UserDataCounts, type PlanDay, type PlanDayEntry, type PlannedWorkout, type Workout, type WorkoutCollection, type WorkoutPlan, type WorkoutSegment, type WorkoutType } from '@/types/user'
+
+/** Matches iOS `StorageManager.USER_HANDLE_INDEX_COLLECTION`. */
+const USER_HANDLE_INDEX_COLLECTION = 'userHandleIndex'
+/** Older web builds; entries removed when handles change. */
+const LEGACY_PUBLIC_HANDLE_INDEX_COLLECTION = 'publicHandleIndex'
+
+/** Matches iOS `_normalizeUserHandle` (max length 64). */
+const MAX_USER_HANDLE_KEY_LENGTH = 64
 
 export type WorkoutPlanSubscriptionStatus = 'pending' | 'active' | 'blocked'
 
@@ -13,9 +42,19 @@ export interface WorkoutPlanSubscriptionRecord {
   status: WorkoutPlanSubscriptionStatus
   remotePlanName: string | null
   remotePlanHandle: string | null
+  /** From planDescriptionSnapshot or other denormalized copy when live plan is unavailable. */
+  remotePlanDescription: string | null
   ordinal: number
   subscriberFullName: string | null
-  subscriberPublicHandle: string | null
+  /** Denormalized subscriber display handle (Firestore: subscriberHandle, legacy subscriberPublicHandle). */
+  subscriberHandle: string | null
+  /** e.g. `groupFeed` when following from hub activity (iOS parity). */
+  followSource?: string | null
+  /** Hub id the subscriber followed from, when `followSource` is group feed. */
+  followContextGroupId?: string | null
+  /** Denormalized from share at follow time or owner connection share doc. */
+  shareAllowEditing?: boolean
+  shareHideFutureWorkouts?: boolean
 }
 
 function mapSegmentFromEntry(seg: Record<string, unknown>, index: number, fallbackWorkoutId: string): WorkoutSegment {
@@ -97,17 +136,47 @@ function mapWorkoutPlanSubscriptionDoc(
   const remotePlanId = typeof d.remotePlanId === 'string' ? d.remotePlanId : ''
   const subscriberUserId = typeof d.subscriberUserId === 'string' ? d.subscriberUserId : ''
   if (!ownerUserId || !remotePlanId || !subscriberUserId) return null
+  const followSource =
+    typeof d.followSource === 'string' && d.followSource.trim() !== '' ? d.followSource.trim() : null
+  const followContextGroupId =
+    typeof d.followContextGroupId === 'string' && d.followContextGroupId.trim() !== ''
+      ? d.followContextGroupId.trim()
+      : null
+  const shareAllowEditing = typeof d.shareAllowEditing === 'boolean' ? d.shareAllowEditing : undefined
+  const shareHideFutureWorkouts =
+    typeof d.shareHideFutureWorkouts === 'boolean' ? d.shareHideFutureWorkouts : undefined
+
   return {
     subscriptionDocumentId: doc.id,
     subscriberUserId,
     ownerUserId,
     remotePlanId,
     status,
-    remotePlanName: typeof d.remotePlanName === 'string' ? d.remotePlanName : null,
+    remotePlanName:
+      typeof d.remotePlanName === 'string'
+        ? d.remotePlanName
+        : typeof d.planNameSnapshot === 'string'
+          ? d.planNameSnapshot
+          : null,
     remotePlanHandle: typeof d.remotePlanHandle === 'string' ? d.remotePlanHandle : null,
+    remotePlanDescription:
+      typeof d.planDescriptionSnapshot === 'string' && d.planDescriptionSnapshot.trim() !== ''
+        ? d.planDescriptionSnapshot.trim()
+        : typeof d.remotePlanDescription === 'string' && d.remotePlanDescription.trim() !== ''
+          ? d.remotePlanDescription.trim()
+          : null,
     ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
     subscriberFullName: typeof d.subscriberFullName === 'string' ? d.subscriberFullName : null,
-    subscriberPublicHandle: typeof d.subscriberPublicHandle === 'string' ? d.subscriberPublicHandle : null,
+    subscriberHandle:
+      typeof d.subscriberHandle === 'string'
+        ? d.subscriberHandle
+        : typeof d.subscriberPublicHandle === 'string'
+          ? d.subscriberPublicHandle
+          : null,
+    followSource,
+    followContextGroupId,
+    shareAllowEditing,
+    shareHideFutureWorkouts,
   }
 }
 
@@ -180,6 +249,108 @@ function toPlainValue(value: unknown): unknown {
   return value
 }
 
+function normalizeUserHandleKey(raw: string): string | null {
+  let value = raw.trim().toLowerCase()
+  if (value.startsWith('@')) value = value.slice(1)
+  if (!value) return null
+  if (value.length > MAX_USER_HANDLE_KEY_LENGTH) return null
+  if (!/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/.test(value)) return null
+  return value
+}
+
+function stripUserHandleInput(raw: string): string {
+  let v = raw.trim()
+  if (v.startsWith('@')) v = v.slice(1)
+  return v
+}
+
+/** Swift `_userHandleDisplayString` — stored `handle` uses a leading `@`. */
+function userHandleDisplayForFirestore(strippedNoAt: string, normalizedKey: string): string {
+  const t = strippedNoAt.trim()
+  if (t !== '') return t.startsWith('@') ? t : `@${t}`
+  return `@${normalizedKey}`
+}
+
+/** Swift `_normalizedFullNameSearchKey` on composed display name. */
+function normalizedFullNameSearchKey(fullName: string): string | null {
+  let s = fullName.trim()
+  if (s.startsWith('@')) s = s.slice(1).trim()
+  if (!s) return null
+  const folded = s
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+  const parts = folded.split(/\s+/).filter(Boolean)
+  return parts.length > 0 ? parts.join(' ') : null
+}
+
+function effectiveUserHandleKeyFromUserData(d: Record<string, unknown>): string | null {
+  const k = typeof d.handleKey === 'string' ? d.handleKey.trim().toLowerCase() : ''
+  if (k) return k
+  const h = typeof d.handle === 'string' ? d.handle : null
+  if (h) return normalizeUserHandleKey(h)
+  const legacy = typeof d.publicHandle === 'string' ? d.publicHandle : null
+  return legacy ? normalizeUserHandleKey(legacy) : null
+}
+
+function trimmedBioFromUserData(d: Record<string, unknown>): string | null {
+  const b = typeof d.bio === 'string' ? d.bio.trim() : ''
+  if (b !== '') return normalizeBioDisplayText(b)
+  const legacy = typeof d.basicBio === 'string' ? d.basicBio.trim() : ''
+  return legacy !== '' ? normalizeBioDisplayText(legacy) : null
+}
+
+/**
+ * `publicUserProfiles/{userId}` merge payload aligned with iOS `_syncPublicUserProfileAndHandleIndex`.
+ */
+function publicUserProfileMergePayload(userId: string, d: Record<string, unknown>): Record<string, unknown> {
+  const firstName = typeof d.firstName === 'string' ? d.firstName : ''
+  const lastName = typeof d.lastName === 'string' ? d.lastName : ''
+  const fullName = [firstName.trim(), lastName.trim()].filter(Boolean).join(' ')
+  const nameSearch = normalizedFullNameSearchKey(fullName)
+
+  const handleKey = effectiveUserHandleKeyFromUserData(d)
+  let handle: string | null = null
+  if (handleKey) {
+    const rawHandle = typeof d.handle === 'string' ? d.handle : ''
+    handle = userHandleDisplayForFirestore(stripUserHandleInput(rawHandle), handleKey)
+  }
+
+  const bio = trimmedBioFromUserData(d)
+
+  const out: Record<string, unknown> = {
+    userId,
+    firstName,
+    lastName,
+    fullName,
+    updatedAt: FieldValue.serverTimestamp(),
+    fullNameSearch: nameSearch ?? null,
+    handleKey: handleKey ?? null,
+    handle: handleKey ? handle : null,
+    bio: bio ?? null,
+    publicHandle: FieldValue.delete(),
+  }
+
+  const photo = typeof d.profilePhotoUrl === 'string' ? d.profilePhotoUrl.trim() : ''
+  if (photo !== '') out.profilePhotoUrl = photo
+
+  const city = typeof d.city === 'string' ? d.city.trim() : ''
+  out.city = city !== '' ? city : FieldValue.delete()
+
+  const region = typeof d.region === 'string' ? d.region.trim() : ''
+  out.region = region !== '' ? region : FieldValue.delete()
+
+  const country = typeof d.country === 'string' ? d.country.trim() : ''
+  out.country = country !== '' ? country : FieldValue.delete()
+
+  const hubIds = userHubLookupIdsFromFirestore(d)
+  for (const key of USER_HUB_LOOKUP_ID_KEYS) {
+    out[key] = hubIds[key]
+  }
+
+  return out
+}
+
 /** User document at users/<userId> (top-level fields). Settings come from users/<userId>/meta/<category>. */
 export async function getUserDocument(
   userId: string
@@ -187,8 +358,14 @@ export async function getUserDocument(
   firstName?: string | null
   lastName?: string | null
   email?: string | null
-  publicHandle?: string | null
-  basicBio?: string | null
+  handle?: string | null
+  handleKey?: string | null
+  bio?: string | null
+  profilePhotoUrl?: string | null
+  city?: string | null
+  region?: string | null
+  country?: string | null
+  hubLookupIds: UserHubLookupIds
   /** From user doc (UserDetails) */
   hasConnectedToDisplay?: boolean
   connectedToDisplayType?: string | null
@@ -220,8 +397,21 @@ export async function getUserDocument(
     firstName: typeof d.firstName === 'string' ? d.firstName : null,
     lastName: typeof d.lastName === 'string' ? d.lastName : null,
     email: typeof d.email === 'string' ? d.email : null,
-    publicHandle: typeof d.publicHandle === 'string' ? d.publicHandle : null,
-    basicBio: typeof d.basicBio === 'string' ? d.basicBio : null,
+    handle: (() => {
+      const h = typeof d.handle === 'string' ? d.handle.trim() : null
+      if (h) return h
+      const legacy = typeof d.publicHandle === 'string' ? d.publicHandle.trim() : null
+      return legacy || null
+    })(),
+    handleKey: effectiveUserHandleKeyFromUserData(d),
+    bio: trimmedBioFromUserData(d),
+    profilePhotoUrl:
+      typeof d.profilePhotoUrl === 'string' && d.profilePhotoUrl.trim() !== ''
+        ? d.profilePhotoUrl.trim()
+        : null,
+    city: typeof d.city === 'string' && d.city.trim() !== '' ? d.city.trim() : null,
+    region: typeof d.region === 'string' && d.region.trim() !== '' ? d.region.trim() : null,
+    country: typeof d.country === 'string' && d.country.trim() !== '' ? d.country.trim() : null,
     hasConnectedToDisplay: typeof d.hasConnectedToDisplay === 'boolean' ? d.hasConnectedToDisplay : undefined,
     connectedToDisplayType: typeof d.connectedToDisplayType === 'string' ? d.connectedToDisplayType : null,
     classicEligibleOverride: typeof d.classicEligibleOverride === 'boolean' ? d.classicEligibleOverride : undefined,
@@ -231,92 +421,147 @@ export async function getUserDocument(
       ? (d.mergedUserIds as unknown[]).filter((id): id is string => typeof id === 'string')
       : undefined,
     settings: Object.keys(settings).length > 0 ? settings : undefined,
+    hubLookupIds: userHubLookupIdsFromFirestore(d),
   }
 }
+
+export type UserProfileFieldUpdates = {
+  bio?: string | null
+  firstName?: string | null
+  lastName?: string | null
+  city?: string | null
+  region?: string | null
+  country?: string | null
+} & Partial<UserHubLookupIds>
 
 export async function updateUserProfileFields(
   userId: string,
-  updates: { publicHandle?: string | null; basicBio?: string | null }
+  updates: UserProfileFieldUpdates,
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const patch: Record<string, unknown> = {}
-  if ('publicHandle' in updates) {
-    patch.publicHandle =
-      updates.publicHandle != null && updates.publicHandle.trim() !== ''
-        ? updates.publicHandle.trim()
+  if ('bio' in updates) {
+    patch.bio =
+      updates.bio != null && updates.bio.trim() !== '' ? updates.bio.trim() : null
+    patch.basicBio = FieldValue.delete()
+  }
+  if ('firstName' in updates) {
+    patch.firstName =
+      updates.firstName != null && updates.firstName.trim() !== ''
+        ? updates.firstName.trim()
         : null
   }
-  if ('basicBio' in updates) {
-    patch.basicBio =
-      updates.basicBio != null && updates.basicBio.trim() !== ''
-        ? updates.basicBio.trim()
-        : null
+  if ('lastName' in updates) {
+    patch.lastName =
+      updates.lastName != null && updates.lastName.trim() !== '' ? updates.lastName.trim() : null
+  }
+  if ('city' in updates) {
+    patch.city = updates.city != null && updates.city.trim() !== '' ? updates.city.trim() : null
+  }
+  if ('region' in updates) {
+    patch.region =
+      updates.region != null && updates.region.trim() !== '' ? updates.region.trim() : null
+  }
+  if ('country' in updates) {
+    patch.country =
+      updates.country != null && updates.country.trim() !== '' ? updates.country.trim() : null
+  }
+  for (const key of USER_HUB_LOOKUP_ID_KEYS) {
+    if (!(key in updates)) continue
+    const v = updates[key]
+    patch[key] = v != null && String(v).trim() !== '' ? String(v).trim() : null
   }
   if (Object.keys(patch).length === 0) return
   await adminDb.collection('users').doc(userId).update(patch)
+  await syncPublicUserProfileFromUserDocument(userId)
 }
 
-function normalizePublicHandle(raw: string): string | null {
-  let value = raw.trim().toLowerCase()
-  if (value.startsWith('@')) value = value.slice(1)
-  if (!value) return null
-  if (value.length > 32) return null
-  if (!/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/.test(value)) return null
-  return value
+/** Rewrites `publicUserProfiles/{userId}` from the current `users/{userId}` document (iOS parity). */
+export async function syncPublicUserProfileFromUserDocument(userId: string): Promise<void> {
+  if (!adminDb) return
+  const snap = await adminDb.collection('users').doc(userId).get()
+  if (!snap.exists) return
+  const d = snap.data() as Record<string, unknown>
+  await adminDb
+    .collection('publicUserProfiles')
+    .doc(userId)
+    .set(publicUserProfileMergePayload(userId, d), { merge: true })
 }
 
-export async function updateUserPublicHandle(userId: string, rawHandle: string | null): Promise<string | null> {
+export async function updateUserPublicHandle(userId: string, rawHandle: string | null): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
-  const normalized = rawHandle == null ? null : normalizePublicHandle(rawHandle)
-  if (rawHandle != null && normalized == null) {
-    throw new Error('Handle must be 1-32 characters and use letters, numbers, ".", "_" or "-"')
+  const trimmed = rawHandle == null ? '' : rawHandle.trim()
+  const normalized = trimmed === '' ? null : normalizeUserHandleKey(rawHandle!)
+  const handleRuleErr = `Handle must be 1-${MAX_USER_HANDLE_KEY_LENGTH} characters and use letters, numbers, ".", "_" or "-"`
+  if (trimmed !== '' && normalized == null) {
+    throw new Error(handleRuleErr)
   }
+  const strippedForDisplay = trimmed === '' ? '' : stripUserHandleInput(rawHandle!)
+  if (normalized && strippedForDisplay !== '' && normalizeUserHandleKey(strippedForDisplay) !== normalized) {
+    throw new Error(handleRuleErr)
+  }
+
+  const displayWithAt = normalized == null ? null : userHandleDisplayForFirestore(strippedForDisplay, normalized)
+
   const usersRef = adminDb.collection('users').doc(userId)
-  const handleIndexRef = adminDb.collection('publicHandleIndex')
+  const userHandleIndex = adminDb.collection(USER_HANDLE_INDEX_COLLECTION)
+  const legacyHandleIndex = adminDb.collection(LEGACY_PUBLIC_HANDLE_INDEX_COLLECTION)
   const publicProfileRef = adminDb.collection('publicUserProfiles').doc(userId)
+
   const userSnap = await usersRef.get()
-  const userData = userSnap.data() as Record<string, unknown> | undefined
-  const previousRaw = typeof userData?.publicHandle === 'string' ? userData.publicHandle : null
-  const previousNormalized = previousRaw ? normalizePublicHandle(previousRaw) : null
+  const userData = (userSnap.data() as Record<string, unknown> | undefined) ?? {}
+  const previousKey = effectiveUserHandleKeyFromUserData(userData)
+
+  const mergedForProfile: Record<string, unknown> = {
+    ...userData,
+    handle: displayWithAt,
+    handleKey: normalized,
+  }
+  delete mergedForProfile.publicHandle
+  const profilePayload = publicUserProfileMergePayload(userId, mergedForProfile)
 
   await adminDb.runTransaction(async (tx) => {
     if (normalized) {
-      const targetRef = handleIndexRef.doc(normalized)
-      const targetSnap = await tx.get(targetRef)
-      if (targetSnap.exists) {
-        const ownerUserId = targetSnap.get('ownerUserId')
+      const newRef = userHandleIndex.doc(normalized)
+      const legRef = legacyHandleIndex.doc(normalized)
+      const [snNew, snLeg] = await Promise.all([tx.get(newRef), tx.get(legRef)])
+      for (const snap of [snNew, snLeg]) {
+        if (!snap.exists) continue
+        const ownerUserId = snap.get('ownerUserId')
         if (typeof ownerUserId === 'string' && ownerUserId !== userId) {
           throw new Error('That handle is already taken')
         }
       }
       tx.set(
-        targetRef,
+        newRef,
         {
           ownerUserId: userId,
           handleKey: normalized,
+          handle: displayWithAt,
           updatedAt: FieldValue.serverTimestamp(),
         },
         { merge: true }
       )
+      if (snLeg.exists) {
+        const legOwner = snLeg.get('ownerUserId')
+        if (legOwner == null || legOwner === userId) {
+          tx.delete(legRef)
+        }
+      }
     }
 
-    tx.update(usersRef, { publicHandle: normalized })
-    tx.set(
-      publicProfileRef,
-      {
-        userId,
-        publicHandle: normalized,
-        updatedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    )
+    tx.update(usersRef, {
+      handle: displayWithAt,
+      handleKey: normalized,
+      publicHandle: FieldValue.delete(),
+    })
+    tx.set(publicProfileRef, profilePayload, { merge: true })
 
-    if (previousNormalized && previousNormalized !== normalized) {
-      tx.delete(handleIndexRef.doc(previousNormalized))
+    if (previousKey && previousKey !== normalized) {
+      tx.delete(userHandleIndex.doc(previousKey))
+      tx.delete(legacyHandleIndex.doc(previousKey))
     }
   })
-
-  return normalized
 }
 
 export async function getUserDataCounts(userId: string): Promise<UserDataCounts> {
@@ -336,6 +581,13 @@ export async function getUserDataCounts(userId: string): Promise<UserDataCounts>
   }
 }
 
+/** Firestore `showInSchedule`: when false, plan is hidden from Today; missing/legacy treated as true. */
+function normalizePlanShowInScheduleFromFirestore(raw: unknown): boolean | null {
+  if (raw === false) return false
+  if (raw === true) return true
+  return null
+}
+
 export async function getUserWorkoutPlans(userId: string): Promise<WorkoutPlan[]> {
   if (!adminDb) return []
   const snapshot = await adminDb
@@ -353,9 +605,11 @@ export async function getUserWorkoutPlans(userId: string): Promise<WorkoutPlan[]
       workoutPlanDescription: d.workoutPlanDescription ?? null,
       workoutPlanId: typeof d.workoutPlanId === 'string' ? d.workoutPlanId : '',
       workoutPlanName: typeof d.workoutPlanName === 'string' ? d.workoutPlanName : '',
+      trainingIntent: normalizePlanTrainingIntentFromFirestore(d.trainingIntent),
       privacy: typeof d.privacy === 'number' ? d.privacy : null,
       handle: typeof d.handle === 'string' ? d.handle : null,
       deletedAt: parseDeletedAt(d),
+      showInSchedule: normalizePlanShowInScheduleFromFirestore(d.showInSchedule),
     }
   })
   plans.sort((a, b) => a.ordinal - b.ordinal)
@@ -397,7 +651,7 @@ export async function getWorkoutPlanSubscriptionsForPlan(
       const item = mapWorkoutPlanSubscriptionDoc(doc)
       if (!item) continue
       if (query) {
-        const hay = `${item.subscriberFullName ?? ''} ${item.subscriberPublicHandle ?? ''} ${item.subscriberUserId}`.toLowerCase()
+        const hay = `${item.subscriberFullName ?? ''} ${item.subscriberHandle ?? ''} ${item.subscriberUserId}`.toLowerCase()
         if (!hay.includes(query)) continue
       }
       items.push(item)
@@ -515,6 +769,38 @@ export async function getUserWorkoutCollections(userId: string): Promise<Workout
   return collections
 }
 
+async function resyncCollectionMirrorsAfterWorkoutChange(userId: string, workoutId: string): Promise<void> {
+  const cols = await getUserWorkoutCollections(userId)
+  const w = workoutId.trim()
+  if (!w) return
+  const seen = new Set<string>()
+  for (const c of cols) {
+    if (c.deletedAt) continue
+    const ids = c.workoutIds ?? []
+    const has = ids.some(
+      (id) => typeof id === 'string' && bareWorkoutIdForGroupSharedMirror(userId, id) === w
+    )
+    if (!has) continue
+    const cid = (c.workoutCollectionId && c.workoutCollectionId.trim()) || c.id
+    if (!cid || seen.has(cid)) continue
+    seen.add(cid)
+    await syncCollectionHubWorkoutMirrors(userId, cid)
+    await syncCollectionUserWorkoutMirrors(userId, cid)
+  }
+}
+
+async function pushWorkoutShareMirrors(userId: string, workoutId: string): Promise<void> {
+  await syncWorkoutUserConnectionMirrors(userId, workoutId)
+  await syncWorkoutHubMirrors(userId, workoutId)
+  await resyncCollectionMirrorsAfterWorkoutChange(userId, workoutId)
+}
+
+async function pushCollectionShareMirrors(userId: string, collectionId: string): Promise<void> {
+  await syncCollectionUserConnectionMirrors(userId, collectionId)
+  await syncCollectionHubWorkoutMirrors(userId, collectionId)
+  await syncCollectionUserWorkoutMirrors(userId, collectionId)
+}
+
 /** Fetch a single workout collection by doc id from users/<userId>/workoutCollections. */
 export async function getCollectionById(userId: string, collectionId: string): Promise<WorkoutCollection | null> {
   if (!adminDb) return null
@@ -541,6 +827,18 @@ export async function getCollectionById(userId: string, collectionId: string): P
     workoutIds,
     deletedAt: parseDeletedAt(d),
   }
+}
+
+/** Every workout id listed on a non-deleted collection (including `favorite`). */
+export function getWorkoutIdsReferencedByActiveCollections(collections: WorkoutCollection[]): Set<string> {
+  const ids = new Set<string>()
+  for (const c of collections) {
+    if (c.deletedAt) continue
+    for (const id of c.workoutIds ?? []) {
+      if (typeof id === 'string' && id.trim() !== '') ids.add(id.trim())
+    }
+  }
+  return ids
 }
 
 /** Fetch all workout documents from users/<userId>/workouts (for profile list). Uses full mapping so display name/description work. */
@@ -687,6 +985,7 @@ export async function setWorkoutDeletedAt(userId: string, workoutId: string, del
     .collection(USER_COLLECTIONS.workouts)
     .doc(workoutId)
   await ref.update({ deletedAt: Timestamp.fromDate(deletedAt) })
+  await pushWorkoutShareMirrors(userId, workoutId)
 }
 
 /** Clear deletedAt on a workout (recover). */
@@ -698,11 +997,15 @@ export async function clearWorkoutDeletedAt(userId: string, workoutId: string): 
     .collection(USER_COLLECTIONS.workouts)
     .doc(workoutId)
   await ref.update({ deletedAt: FieldValue.delete() })
+  await pushWorkoutShareMirrors(userId, workoutId)
 }
 
 /** Permanently delete a workout document from users/<userId>/workouts/<workoutId>. */
 export async function deleteWorkout(userId: string, workoutId: string): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
+  await deleteWorkoutUserConnectionMirrors(userId, workoutId)
+  await deleteWorkoutHubMirrors(userId, workoutId)
+  await purgeWorkoutMirrorsFromCollectionDerivedShares(userId, workoutId)
   const ref = adminDb
     .collection('users')
     .doc(userId)
@@ -720,6 +1023,7 @@ export async function setCollectionDeletedAt(userId: string, collectionId: strin
     .collection(USER_COLLECTIONS.workoutCollections)
     .doc(collectionId)
   await ref.update({ deletedAt: Timestamp.fromDate(deletedAt) })
+  await pushCollectionShareMirrors(userId, collectionId)
 }
 
 /** Clear deletedAt on a collection (recover). */
@@ -731,11 +1035,13 @@ export async function clearCollectionDeletedAt(userId: string, collectionId: str
     .collection(USER_COLLECTIONS.workoutCollections)
     .doc(collectionId)
   await ref.update({ deletedAt: FieldValue.delete() })
+  await pushCollectionShareMirrors(userId, collectionId)
 }
 
 /** Permanently delete a workout collection document from users/<userId>/workoutCollections/<collectionId>. */
 export async function deleteCollection(userId: string, collectionId: string): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
+  await deleteCollectionUserConnectionMirrors(userId, collectionId)
   const ref = adminDb
     .collection('users')
     .doc(userId)
@@ -785,6 +1091,7 @@ export async function createWorkout(
   })
   const created = await getWorkoutById(userId, id)
   if (!created) throw new Error('Failed to read created workout')
+  await pushWorkoutShareMirrors(userId, id)
   return created
 }
 
@@ -810,6 +1117,7 @@ export async function createMultiSegmentWorkout(userId: string): Promise<Workout
   })
   const created = await getWorkoutById(userId, id)
   if (!created) throw new Error('Failed to read created workout')
+  await pushWorkoutShareMirrors(userId, id)
   return created
 }
 
@@ -828,6 +1136,123 @@ export async function addWorkoutToCollection(
     .collection(USER_COLLECTIONS.workoutCollections)
     .doc(collectionId)
   await ref.update({ workoutIds: [...coll.workoutIds, workoutId] })
+  await pushCollectionShareMirrors(userId, collectionId)
+}
+
+/**
+ * Deep-copy another user's workout document into `targetUserId`'s `workouts` with new root (and segment) ids.
+ * Used when duplicating a shared / feed-visible workout into the viewer's library.
+ */
+export async function cloneWorkoutToUserLibrary(
+  sourceOwnerUserId: string,
+  sourceWorkoutId: string,
+  targetUserId: string
+): Promise<string> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const owner = sourceOwnerUserId.trim()
+  const sid = sourceWorkoutId.trim()
+  const uid = targetUserId.trim()
+  if (!owner || !sid || !uid) throw new Error('Invalid ids')
+
+  const srcRef = adminDb
+    .collection('users')
+    .doc(owner)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(sid)
+  const snap = await srcRef.get()
+  if (!snap.exists) throw new Error('Source workout not found')
+  const raw = snap.data() as Record<string, unknown>
+  if (raw.deletedAt != null) throw new Error('Source workout not found')
+
+  const newRootId = randomUUID()
+  const type = raw.type === 'MultiSegmentWorkout' ? 'MultiSegmentWorkout' : 'SingleSegmentWorkout'
+  const payload: Record<string, unknown> = {
+    ...raw,
+    userId: uid,
+    workoutId: newRootId,
+    workoutShareId: '',
+  }
+  delete payload.deletedAt
+
+  if (type === 'MultiSegmentWorkout' && Array.isArray(raw.segments)) {
+    payload.segments = (raw.segments as Record<string, unknown>[]).map((seg) => ({
+      ...seg,
+      workoutId: randomUUID(),
+    }))
+  }
+
+  const targetRef = adminDb
+    .collection('users')
+    .doc(uid)
+    .collection(USER_COLLECTIONS.workouts)
+    .doc(newRootId)
+  await targetRef.set(payload)
+  await pushWorkoutShareMirrors(uid, newRootId)
+  return newRootId
+}
+
+/**
+ * Deep-copy another user's workout collection and each listed workout into `targetUserId`'s library.
+ * Preserves order from `workoutIds`. Skips source workouts that are missing or soft-deleted.
+ */
+export async function cloneSharedCollectionToUserLibrary(
+  sourceOwnerUserId: string,
+  sourceCollectionId: string,
+  targetUserId: string
+): Promise<{
+  newCollectionId: string
+  clonedWorkoutCount: number
+  skippedWorkoutCount: number
+}> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const owner = sourceOwnerUserId.trim()
+  const scid = sourceCollectionId.trim()
+  const uid = targetUserId.trim()
+  if (!owner || !scid || !uid) throw new Error('Invalid ids')
+
+  const sourceColl = await getCollectionById(owner, scid)
+  if (!sourceColl || sourceColl.deletedAt) throw new Error('Source collection not found')
+
+  const orderedSourceIds = sourceColl.workoutIds.filter((id) => typeof id === 'string' && id.trim() !== '')
+  const newWorkoutIds: string[] = []
+  let skippedWorkoutCount = 0
+  for (const wid of orderedSourceIds) {
+    const w = await getWorkoutById(owner, wid.trim())
+    if (!w || w.deletedAt) {
+      skippedWorkoutCount += 1
+      continue
+    }
+    const clonedId = await cloneWorkoutToUserLibrary(owner, wid.trim(), uid)
+    newWorkoutIds.push(clonedId)
+  }
+
+  const existing = await getUserWorkoutCollections(uid)
+  const nextOrdinal =
+    existing.length === 0 ? 0 : Math.max(...existing.map((c) => c.ordinal), 0) + 1
+
+  const newCollectionId = randomUUID()
+  const colRef = adminDb
+    .collection('users')
+    .doc(uid)
+    .collection(USER_COLLECTIONS.workoutCollections)
+    .doc(newCollectionId)
+
+  await colRef.set({
+    ordinal: nextOrdinal,
+    userId: uid,
+    workoutCollectionId: newCollectionId,
+    workoutCollectionName: sourceColl.workoutCollectionName?.trim() || 'Untitled collection',
+    workoutCollectionDescription: sourceColl.workoutCollectionDescription?.trim() || null,
+    workoutCollectionShareId: '',
+    workoutIds: newWorkoutIds,
+  })
+  await pushCollectionShareMirrors(uid, newCollectionId)
+
+  return {
+    newCollectionId,
+    clonedWorkoutCount: newWorkoutIds.length,
+    skippedWorkoutCount,
+  }
 }
 
 /**
@@ -849,6 +1274,7 @@ export async function updateCollectionWorkoutIds(
     .collection(USER_COLLECTIONS.workoutCollections)
     .doc(collectionId)
   await ref.update({ workoutIds: uniqueIds })
+  await pushCollectionShareMirrors(userId, collectionId)
 }
 
 /**
@@ -870,6 +1296,9 @@ export async function updateCollectionOrdinals(
     batch.update(ref, { ordinal: index })
   })
   await batch.commit()
+  for (const collectionId of collectionIds) {
+    await pushCollectionShareMirrors(userId, collectionId)
+  }
 }
 
 /** Update a collection's name and/or description. */
@@ -888,6 +1317,7 @@ export async function updateCollectionMetadata(
     workoutCollectionName: data.name.trim() || 'Untitled collection',
     workoutCollectionDescription: data.description?.trim() || null,
   })
+  await pushCollectionShareMirrors(userId, collectionId)
 }
 
 const FIRESTORE_BATCH_SIZE = 500
@@ -901,6 +1331,7 @@ export async function setPlanDeletedAt(userId: string, planId: string, deletedAt
     .collection(USER_COLLECTIONS.workoutPlans)
     .doc(planId)
   await ref.update({ deletedAt: Timestamp.fromDate(deletedAt) })
+  await syncPlanUserConnectionMirrors(userId, planId)
 }
 
 /** Clear deletedAt on a plan (recover). */
@@ -912,6 +1343,7 @@ export async function clearPlanDeletedAt(userId: string, planId: string): Promis
     .collection(USER_COLLECTIONS.workoutPlans)
     .doc(planId)
   await ref.update({ deletedAt: FieldValue.delete() })
+  await syncPlanUserConnectionMirrors(userId, planId)
 }
 
 /** Update a plan's name and/or description. */
@@ -923,6 +1355,8 @@ export async function updatePlanMetadata(
     description?: string | null
     privacy?: number
     handle?: string | null
+    trainingIntent?: 0 | 1
+    showInSchedule?: boolean
   }
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
@@ -938,6 +1372,9 @@ export async function updatePlanMetadata(
     patch.workoutPlanName = data.name.trim() || 'Untitled plan'
     patch.workoutPlanDescription = data.description?.trim() || null
   }
+  if (data.trainingIntent === 0 || data.trainingIntent === 1) {
+    patch.trainingIntent = data.trainingIntent === 1 ? 1 : 0
+  }
   if (typeof data.privacy === 'number') {
     patch.privacy = data.privacy
   }
@@ -946,6 +1383,21 @@ export async function updatePlanMetadata(
     patch.handleNormalized = normalizeWorkoutPlanHandle(
       typeof data.handle === 'string' ? data.handle : null
     )
+  }
+  if (typeof data.showInSchedule === 'boolean') {
+    patch.showInSchedule = data.showInSchedule
+  }
+  // Rewrite legacy string trainingIntent on the canonical plan doc to numeric 0|1.
+  if (beforeData.isPersonal !== true) {
+    const resolved = normalizePlanTrainingIntentFromFirestore(beforeData.trainingIntent)
+    if (resolved === 0 || resolved === 1) {
+      const raw = beforeData.trainingIntent
+      const alreadyCleanNumber = raw === 0 || raw === 1
+      const patchAlreadySetsTi = patch.trainingIntent === 0 || patch.trainingIntent === 1
+      if (!alreadyCleanNumber && !patchAlreadySetsTi) {
+        patch.trainingIntent = resolved
+      }
+    }
   }
   if (Object.keys(patch).length === 0) return
   await ref.update(patch)
@@ -977,11 +1429,13 @@ export async function updatePlanMetadata(
     nextPrivacy,
     planDeleted
   )
+  await syncPlanUserConnectionMirrors(userId, planId)
 }
 
 /** Permanently delete a workout plan: deletes all planDays subcollection docs, then the plan document. */
 export async function deletePlan(userId: string, planId: string): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
+  await deletePlanUserConnectionMirrors(userId, planId)
   const planRef = adminDb
     .collection('users')
     .doc(userId)
@@ -1019,13 +1473,19 @@ export async function createWorkoutCollection(
   })
   const created = await getCollectionById(userId, id)
   if (!created) throw new Error('Failed to read created collection')
+  await pushCollectionShareMirrors(userId, id)
   return created
 }
 
 /** Create a new workout plan under users/<userId>/workoutPlans. Returns the created plan. */
 export async function createWorkoutPlan(
   userId: string,
-  data: { name: string; description?: string | null; isPersonal?: boolean }
+  data: {
+    name: string
+    description?: string | null
+    isPersonal?: boolean
+    trainingIntent?: 0 | 1
+  }
 ): Promise<WorkoutPlan> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const colRef = adminDb
@@ -1034,18 +1494,25 @@ export async function createWorkoutPlan(
     .collection(USER_COLLECTIONS.workoutPlans)
   const id = randomUUID()
   const newRef = colRef.doc(id)
-  await newRef.set({
+  const isPersonal = data.isPersonal ?? true
+  const doc: Record<string, unknown> = {
     ordinal: 0,
     userId,
-    isPersonal: data.isPersonal ?? true,
+    isPersonal,
     workoutPlanId: id,
     workoutPlanName: data.name.trim() || 'Untitled plan',
     workoutPlanDescription: data.description?.trim() || null,
     privacy: 1, // private by default
     handle: null,
-  })
+    showInSchedule: true,
+  }
+  if (!isPersonal) {
+    doc.trainingIntent = data.trainingIntent === 1 ? 1 : 0
+  }
+  await newRef.set(doc)
   const created = await getPlanById(userId, id)
   if (!created) throw new Error('Failed to read created plan')
+  await syncPlanUserConnectionMirrors(userId, id)
   return created
 }
 
@@ -1079,6 +1546,73 @@ export async function updatePlanOrdinals(userId: string, planIds: string[]): Pro
   await batch.commit()
 }
 
+/** Buckets for plan list ordinals (each bucket uses ordinals 0..n-1 independently). */
+export type OwnedPlanOrdinalSection = 'personal' | 'privateTraining' | 'groupTraining'
+
+export function ownedPlanOrdinalSection(plan: WorkoutPlan): OwnedPlanOrdinalSection {
+  if (plan.isPersonal) return 'personal'
+  if (plan.trainingIntent === 1) return 'groupTraining'
+  return 'privateTraining'
+}
+
+/**
+ * Set ordinals 0..n-1 for the given owned plans only (same training bucket).
+ * `planIdsInOrder` must list every active plan in that bucket exactly once.
+ */
+export async function updatePlanOrdinalsForSection(
+  userId: string,
+  section: OwnedPlanOrdinalSection,
+  planIdsInOrder: string[]
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const allPlans = await getUserWorkoutPlans(userId)
+  const active = allPlans.filter((p) => !p.deletedAt)
+  const inSection = active.filter((p) => ownedPlanOrdinalSection(p) === section)
+  const expected = new Set(inSection.map((p) => p.id))
+  const received = new Set(planIdsInOrder)
+  if (expected.size !== planIdsInOrder.length || ![...expected].every((id) => received.has(id))) {
+    throw new Error('planIds must list every plan in this section exactly once')
+  }
+  const colRef = adminDb
+    .collection('users')
+    .doc(userId)
+    .collection(USER_COLLECTIONS.workoutPlans)
+  const batch = adminDb.batch()
+  planIdsInOrder.forEach((planId, index) => {
+    batch.update(colRef.doc(planId), { ordinal: index })
+  })
+  await batch.commit()
+}
+
+/**
+ * Set ordinals 0..n-1 for active workout plan subscriptions for the subscriber.
+ * `subscriptionDocumentIdsInOrder` must list every active subscription doc id exactly once.
+ */
+export async function updateWorkoutPlanSubscriptionOrdinals(
+  subscriberUserId: string,
+  subscriptionDocumentIdsInOrder: string[]
+): Promise<void> {
+  if (!adminDb) throw new Error('Firebase Admin not configured')
+  const subs = await getActiveWorkoutPlanSubscriptionsForUser(subscriberUserId)
+  const expected = new Set(subs.map((s) => s.subscriptionDocumentId))
+  const received = new Set(subscriptionDocumentIdsInOrder)
+  if (
+    expected.size !== subscriptionDocumentIdsInOrder.length ||
+    ![...expected].every((id) => received.has(id))
+  ) {
+    throw new Error('subscriptionDocumentIds must list every active subscription exactly once')
+  }
+  const base = adminDb
+    .collection('users')
+    .doc(subscriberUserId)
+    .collection('workoutPlanSubscriptions')
+  const batch = adminDb.batch()
+  subscriptionDocumentIdsInOrder.forEach((id, index) => {
+    batch.update(base.doc(id), { ordinal: index, updatedAt: FieldValue.serverTimestamp() })
+  })
+  await batch.commit()
+}
+
 /** Fetch a single workout plan by doc id from users/<userId>/workoutPlans. */
 export async function getPlanById(userId: string, planId: string): Promise<WorkoutPlan | null> {
   if (!adminDb) return null
@@ -1098,10 +1632,18 @@ export async function getPlanById(userId: string, planId: string): Promise<Worko
     workoutPlanDescription: d.workoutPlanDescription ?? null,
     workoutPlanId: typeof d.workoutPlanId === 'string' ? d.workoutPlanId : '',
     workoutPlanName: typeof d.workoutPlanName === 'string' ? d.workoutPlanName : '',
+    trainingIntent: normalizePlanTrainingIntentFromFirestore(d.trainingIntent),
     privacy: typeof d.privacy === 'number' ? d.privacy : null,
     handle: typeof d.handle === 'string' ? d.handle : null,
     deletedAt: parseDeletedAt(d),
+    showInSchedule: normalizePlanShowInScheduleFromFirestore(d.showInSchedule),
   }
+}
+
+/** True when `planId` is a non-deleted document under users/<userId>/workoutPlans (not a followed coach plan id alone). */
+export async function userOwnsActiveWorkoutPlan(userId: string, planId: string): Promise<boolean> {
+  const plan = await getPlanById(userId, planId)
+  return Boolean(plan && !plan.deletedAt)
 }
 
 /** Fetch plan days in date range from users/<userId>/workoutPlans/<planId>/planDays. Document IDs are date strings (e.g. YYYY-MM-DD). */
@@ -1256,11 +1798,11 @@ export async function createPlannedWorkout(
   return created
 }
 
-/** Update a planned workout's day and/or ordinal. day is YYYY-MM-DD; ordinal is a number (can be fractional for insert-between). */
+/** Update a planned workout's day and/or ordinal and optionally move it to another owned plan. day is YYYY-MM-DD; ordinal is a number (can be fractional for insert-between). */
 export async function updatePlannedWorkoutDayAndOrdinal(
   userId: string,
   plannedWorkoutId: string,
-  updates: { day?: string; ordinal?: number }
+  updates: { day?: string; ordinal?: number; planId?: string }
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const ref = adminDb
@@ -1274,6 +1816,9 @@ export async function updatePlannedWorkoutDayAndOrdinal(
   }
   if (updates.ordinal !== undefined) {
     data.ordinal = updates.ordinal
+  }
+  if (updates.planId !== undefined) {
+    data.planId = updates.planId
   }
   if (Object.keys(data).length === 0) return
   await ref.update(data)
@@ -1387,6 +1932,7 @@ export async function updateWorkoutMetadata(
     .collection(USER_COLLECTIONS.workouts)
     .doc(workoutId)
   await ref.update(data)
+  await pushWorkoutShareMirrors(userId, workoutId)
 }
 
 /** Allowed fields when updating a SingleSegmentWorkout (no meta settings). */
@@ -1434,6 +1980,7 @@ export async function updateWorkoutSingleSegment(
   if ('continuity' in updates) data.continuity = updates.continuity === true
   if (Object.keys(data).length === 0) return
   await ref.update(data)
+  await pushWorkoutShareMirrors(userId, workoutId)
 }
 
 /** Allowed fields when updating a MultiSegmentWorkout (no meta settings). */
@@ -1483,6 +2030,7 @@ export async function updateWorkoutMultiSegment(
   if ('timerModes' in updates) data.timerModes = Array.isArray(updates.timerModes) ? updates.timerModes : []
   if (Object.keys(data).length === 0) return
   await ref.update(data)
+  await pushWorkoutShareMirrors(userId, workoutId)
 }
 
 function mapPlanDayEntry(e: Record<string, unknown>): PlanDayEntry {
@@ -1516,4 +2064,81 @@ function mapPlanDayEntry(e: Record<string, unknown>): PlanDayEntry {
     autoProgress: e.autoProgress === true,
     timerModes: timerModes?.length ? timerModes : undefined,
   }
+}
+
+function optionalParentGroupId(data: Record<string, unknown>): string | null {
+  const v = data.parentGroupId
+  if (v == null) return null
+  if (typeof v !== 'string') return null
+  const t = v.trim()
+  return t || null
+}
+
+/**
+ * Owned hubs: `groups` where `ownerUserId` matches (iOS StorageManager `_ownedGroupsListener` query).
+ * Excludes soft-deleted documents (`deletedAt`).
+ */
+export async function getOwnedGroupsForUser(userId: string): Promise<OwnedGroupFlat[]> {
+  if (!adminDb) return []
+  const snap = await adminDb.collection('groups').where('ownerUserId', '==', userId).get()
+  const out: OwnedGroupFlat[] = []
+  for (const doc of snap.docs) {
+    const d = doc.data() as Record<string, unknown>
+    if (parseDeletedAt(d)) continue
+    const name = typeof d.name === 'string' ? d.name.trim() : ''
+    if (!name) continue
+    const handleRaw = d.handle
+    const handleTrim = typeof handleRaw === 'string' ? handleRaw.trim() : ''
+    const handle = handleTrim !== '' ? handleTrim : null
+    const joinPolicy = parseFirestoreJoinPolicy(d.joinPolicy)
+    const gtRaw = d.groupType
+    const gt = typeof gtRaw === 'string' ? gtRaw.trim() : ''
+    const groupType = gt && isAppGroupType(gt) ? gt : null
+    out.push({
+      groupId: doc.id,
+      name,
+      parentGroupId: optionalParentGroupId(d),
+      groupType,
+      handle,
+      joinPolicy,
+    })
+  }
+  return out
+}
+
+export type SoftDeletedOwnedGroupRow = {
+  groupId: string
+  name: string
+  groupType: string | null
+  deletedAt: string | null
+}
+
+/**
+ * Owned hubs that are soft-deleted (`deletedAt` set), for recovery UI.
+ */
+export async function getSoftDeletedOwnedGroupsForUser(userId: string): Promise<SoftDeletedOwnedGroupRow[]> {
+  if (!adminDb) return []
+  const snap = await adminDb.collection('groups').where('ownerUserId', '==', userId).get()
+  const out: SoftDeletedOwnedGroupRow[] = []
+  for (const doc of snap.docs) {
+    const d = doc.data() as Record<string, unknown>
+    const deletedAt = parseDeletedAt(d)
+    if (!deletedAt) continue
+    const name = typeof d.name === 'string' ? d.name.trim() : ''
+    const gtRaw = d.groupType
+    const gt = typeof gtRaw === 'string' ? gtRaw.trim() : ''
+    const groupType = gt && isAppGroupType(gt) ? gt : null
+    out.push({
+      groupId: doc.id,
+      name: name || doc.id,
+      groupType,
+      deletedAt,
+    })
+  }
+  out.sort((a, b) => {
+    const ta = a.deletedAt ? Date.parse(a.deletedAt) : 0
+    const tb = b.deletedAt ? Date.parse(b.deletedAt) : 0
+    return (Number.isNaN(tb) ? 0 : tb) - (Number.isNaN(ta) ? 0 : ta)
+  })
+  return out
 }

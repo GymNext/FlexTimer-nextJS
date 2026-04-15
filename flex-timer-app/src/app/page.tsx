@@ -1,11 +1,38 @@
 /* Main user app: Firebase Auth gating + favorites / collections / plans UI */
 'use client'
 
-import { useEffect, useMemo, useState, Fragment, forwardRef, useImperativeHandle, useCallback, useRef } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useState,
+  Fragment,
+  forwardRef,
+  useImperativeHandle,
+  useCallback,
+  useRef,
+} from 'react'
 import { createPortal } from 'react-dom'
 import Image from 'next/image'
 import toast from 'react-hot-toast'
+import {
+  ArchiveRestore,
+  Bookmark,
+  CalendarCheck2,
+  CalendarDays,
+  CalendarRange,
+  ChevronDown,
+  ChevronUp,
+  Star,
+  LayoutGrid,
+  Library,
+  Link2,
+  Newspaper,
+  Settings,
+  Share2,
+  Users,
+} from 'lucide-react'
 import headerIcon from './icon.png'
+import { PlanKindIcon, planVisualKindFromPlan } from '@/components/PlanKindIcon'
 import {
   GoogleAuthProvider,
   FacebookAuthProvider,
@@ -17,6 +44,26 @@ import {
   type User,
 } from 'firebase/auth'
 import { auth } from '@/lib/firebase'
+import {
+  PENDING_INVITES_NAV_CHANGED_EVENT,
+  usePendingInvitationsNavBadges,
+} from '@/hooks/usePendingInvitationsNavBadges'
+import { useHubJoinRequestNavBadges } from '@/hooks/useHubJoinRequestNavBadges'
+import { NavCountBadge } from '@/components/NavCountBadge'
+import { workoutToPlanDayEntry } from '@/lib/workout-to-plan-day-entry'
+import { ConnectFeedSection } from '@/components/ConnectFeedSection'
+import { ConnectSharedContentSection } from '@/components/ConnectSharedContentSection'
+import { LibraryBookmarksSection } from '@/components/LibraryBookmarksSection'
+import { ConnectionsSection } from '@/components/ConnectionsSection'
+import { MembershipsSection } from '@/components/MembershipsSection'
+import { MyHubsSection } from '@/components/MyHubsSection'
+import { PlanningTodaySection, type PlanAheadLookTarget } from '@/components/PlanningTodaySection'
+import { PlanShareDialogs } from '@/components/PlanShareDialogs'
+import { ContentShareDialogs } from '@/components/ContentShareDialogs'
+import { RecoverDeletedItemsSection } from '@/components/RecoverDeletedItemsSection'
+import { UserSettingsScreen } from '@/components/UserSettingsScreen'
+import { GroupPublicProfileDialog } from '@/components/GroupPublicProfileDialog'
+import { PublicUserProfileDialog } from '@/components/PublicUserProfileDialog'
 import type {
   Workout,
   WorkoutCollection,
@@ -24,8 +71,16 @@ import type {
   PlannedWorkout,
   WorkoutSegment,
 } from '@/types/user'
+import type { PublicUserProfileView } from '@/types/public-profile'
 import { UNLIMITED } from '@/lib/subscription-limits-constants'
 import type { SubscriptionLimits, SubscriptionTier } from '@/lib/subscription-limits-constants'
+import {
+  EMPTY_USER_HUB_LOOKUP_IDS,
+  HUB_LOOKUP_ROWS,
+  resolveHubLookupLabels,
+  type UserHubLookupIds,
+  type UserHubLookupLabels,
+} from '@/types/hub-profile'
 import {
   getWorkoutDisplayDescription,
   getWorkoutDetailDescription,
@@ -35,18 +90,62 @@ import {
   getTimerModeColor,
   getWorkoutBarColor,
   timerModeToDisplayString,
+  getCollectionDisplayDescription,
 } from '@/lib/json-workout-format'
+import { formatSharedOnLine } from '@/lib/format-shared-at'
 
-type MainNavId = 'home' | 'library' | 'planning'
-type LibrarySubTabId = 'favorites' | 'collections'
-type PlanningSubTabId = 'plans' | 'following'
+type MainNavId = 'home' | 'library' | 'planning' | 'connect' | 'connections' | 'settings' | 'support'
+type LibrarySubTabId = 'favorites' | 'collections' | 'bookmarks'
+type ConnectSubTabId = 'feed' | 'shared-content' | 'hubs'
+type PlanningSubTabId = 'today' | 'plans' | 'plan-ahead'
+
+/** Row from GET /api/app/following-plans (`users/{uid}/workoutPlanSubscriptions`, status active). */
+type FollowingPlanRow = {
+  subscriptionDocumentId: string
+  subscriberUserId: string
+  ownerUserId: string
+  remotePlanId: string
+  status: string
+  remotePlanName: string | null
+  remotePlanHandle: string | null
+  /** Coach plan description (live or subscription snapshot). */
+  remotePlanDescription?: string | null
+  ordinal: number
+  subscriberFullName: string | null
+  subscriberHandle: string | null
+  /** Resolved for UI: owner allowed editing on the connection share (otherwise read-only). */
+  shareAllowEditing: boolean
+  /** Resolved for UI: future scheduled workouts hidden from this follow / share. */
+  shareHideFutureWorkouts: boolean
+  /** From live coach plan (GET /api/app/following-plans); drives subscription “Your access” copy. */
+  remotePlanIsPersonal?: boolean
+  /** 0 = private training, 1 = group training; omitted when personal or plan unavailable. */
+  remotePlanTrainingIntent?: 0 | 1
+}
+
+function normalizeFollowingPlanRows(raw: FollowingPlanRow[] | undefined): FollowingPlanRow[] {
+  return (raw ?? []).map((r) => ({
+    ...r,
+    shareAllowEditing: Boolean(r.shareAllowEditing),
+    shareHideFutureWorkouts: r.shareHideFutureWorkouts !== false,
+  }))
+}
+type ConnectionsSubTabId = 'connections' | 'memberships'
+
+type LibraryShareTarget = { kind: 'workout' | 'collection'; id: string; title: string }
 
 interface OverviewData {
   workouts: Workout[]
   workoutPlans: WorkoutPlan[]
   workoutCollections: WorkoutCollection[]
-  publicHandle?: string | null
-  basicBio?: string | null
+  handle?: string | null
+  handleKey?: string | null
+  bio?: string | null
+  firstName?: string | null
+  lastName?: string | null
+  city?: string | null
+  region?: string | null
+  country?: string | null
   subscriptionLimits?: SubscriptionLimits
   /** Timer Defaults from user settings (e.g. direction = count up/down, restDirection, warmup/cooldown). */
   timerDefaults?: {
@@ -58,47 +157,8 @@ interface OverviewData {
     cooldownDirection?: boolean
   }
   counts?: { favorites: number; collections: number; plans: number }
-}
-
-interface FollowingPlan {
-  subscriptionDocumentId: string
-  subscriberUserId: string
-  ownerUserId: string
-  remotePlanId: string
-  status: 'active'
-  remotePlanName: string | null
-  remotePlanHandle: string | null
-  ordinal: number
-}
-
-interface FollowPlanSearchResult {
-  handleKey: string
-  ownerUserId: string
-  planId: string
-  privacy: number | null
-  workoutPlanName: string | null
-}
-
-const PLAN_PRIVACY = {
-  private: 1,
-  protected: 2,
-  public: 3,
-} as const
-
-type PlanPrivacyKey = keyof typeof PLAN_PRIVACY
-type FollowerStatus = 'active' | 'pending' | 'blocked'
-
-interface PlanFollower {
-  subscriptionDocumentId: string
-  subscriberUserId: string
-  ownerUserId: string
-  remotePlanId: string
-  status: FollowerStatus
-  remotePlanName: string | null
-  remotePlanHandle: string | null
-  ordinal: number
-  subscriberFullName: string | null
-  subscriberPublicHandle: string | null
+  hubLookupIds: UserHubLookupIds
+  hubLookupLabels: UserHubLookupLabels
 }
 
 export default function HomePage() {
@@ -111,9 +171,32 @@ export default function HomePage() {
   const [overviewError, setOverviewError] = useState<string | null>(null)
 
   const [mainNav, setMainNav] = useState<MainNavId>('home')
-  const [mainNavDrawerOpen, setMainNavDrawerOpen] = useState(false)
+  const [connectionsTab, setConnectionsTab] = useState<ConnectionsSubTabId>('connections')
+  const [libraryTab, setLibraryTab] = useState<LibrarySubTabId>('favorites')
+  const [connectTab, setConnectTab] = useState<ConnectSubTabId>('feed')
+  const [planningTab, setPlanningTab] = useState<PlanningSubTabId>('plan-ahead')
+  /** Plan Ahead schedule columns; forced to Full View when opening Plan Ahead from Today’s Plan. */
+  const [planAheadColumnCount, setPlanAheadColumnCount] = useState<1 | 2>(2)
+
+  const { connectionInvites, membershipInvites, refreshPendingInvitations } =
+    usePendingInvitationsNavBadges(user)
+  const { pendingHubJoinRequests, refreshHubJoinRequestBadges } = useHubJoinRequestNavBadges(user)
 
   const resetToDefaultRef = useRef<(() => void) | null>(null)
+  const openHandleEditorRef = useRef<(() => void) | null>(null)
+  const openUserProfileEditorRef = useRef<(() => void) | null>(null)
+  const registerOpenHandleEditor = useCallback((fn: () => void) => {
+    openHandleEditorRef.current = fn
+  }, [])
+  const registerOpenUserProfileEditor = useCallback((fn: () => void) => {
+    openUserProfileEditorRef.current = fn
+  }, [])
+  const openHandleEditor = useCallback(() => {
+    openHandleEditorRef.current?.()
+  }, [])
+  const openUserProfileEditor = useCallback(() => {
+    openUserProfileEditorRef.current?.()
+  }, [])
 
   useEffect(() => {
     // Fail-safe: if Firebase auth init hangs (rare), don't trap the UI on Loading forever.
@@ -164,8 +247,16 @@ export default function HomePage() {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || `HTTP ${res.status}`)
       }
-      const data = (await res.json()) as OverviewData
-      setOverview(data)
+      const raw = (await res.json()) as OverviewData & {
+        hubLookupIds?: UserHubLookupIds
+        hubLookupLabels?: UserHubLookupLabels
+      }
+      const hubLookupIds = raw.hubLookupIds ?? EMPTY_USER_HUB_LOOKUP_IDS
+      setOverview({
+        ...raw,
+        hubLookupIds,
+        hubLookupLabels: raw.hubLookupLabels ?? resolveHubLookupLabels(hubLookupIds),
+      })
     } catch (e) {
       console.error('[overview]', e)
       setOverview(null)
@@ -187,6 +278,26 @@ export default function HomePage() {
     }
   }, [user])
 
+  useEffect(() => {
+    if (mainNav === 'connections') {
+      void refreshPendingInvitations()
+    }
+  }, [mainNav, connectionsTab, refreshPendingInvitations])
+
+  useEffect(() => {
+    if (mainNav === 'connect') {
+      void refreshHubJoinRequestBadges()
+    }
+  }, [mainNav, refreshHubJoinRequestBadges])
+
+  useEffect(() => {
+    const handler = () => {
+      void refreshPendingInvitations()
+    }
+    window.addEventListener(PENDING_INVITES_NAV_CHANGED_EVENT, handler)
+    return () => window.removeEventListener(PENDING_INVITES_NAV_CHANGED_EVENT, handler)
+  }, [refreshPendingInvitations])
+
   if (authLoading) {
     return (
       <main className="min-h-screen flex items-center justify-center bg-gymnext-page">
@@ -204,101 +315,166 @@ export default function HomePage() {
   }
 
   return (
-    <main className="min-h-screen bg-gymnext-page flex flex-col">
+    <main className="flex h-[100dvh] max-h-[100dvh] flex-col overflow-hidden bg-neutral-100">
       <AppHeader
         user={user}
-        publicHandle={overview?.publicHandle}
-        basicBio={overview?.basicBio}
+        handle={overview?.handle}
+        handleKey={overview?.handleKey}
+        bio={overview?.bio}
+        firstName={overview?.firstName}
+        lastName={overview?.lastName}
+        hubLookupIds={overview?.hubLookupIds}
+        hubLookupLabels={overview?.hubLookupLabels}
         subscriptionTier={overview?.subscriptionLimits?.tier ?? 'basic'}
         onLogoClick={() => {
-          setMainNavDrawerOpen(false)
           resetToDefaultRef.current?.()
         }}
-        onOpenMainNav={() => setMainNavDrawerOpen(true)}
-        mainNavDrawerOpen={mainNavDrawerOpen}
         onProfileUpdated={(profile) =>
           setOverview((prev) => (prev ? { ...prev, ...profile } : prev))
         }
+        registerOpenHandleEditor={registerOpenHandleEditor}
+        registerOpenUserProfileEditor={registerOpenUserProfileEditor}
       />
-      <MainNavDrawer
-        open={mainNavDrawerOpen}
-        onClose={() => setMainNavDrawerOpen(false)}
-        mainNav={mainNav}
-        setMainNav={setMainNav}
-      />
-      <section className="flex-1 max-w-6xl mx-auto w-full px-4 py-6">
-        <UserAppLayout
-          user={user}
-          overview={overview}
-          overviewLoading={overviewLoading}
-          overviewError={overviewError}
-          reloadOverview={() => loadOverview(user)}
+      <div className="flex min-h-0 min-w-0 flex-1">
+        <MainNavSidebar
           mainNav={mainNav}
+          connectionsTab={connectionsTab}
+          libraryTab={libraryTab}
+          connectTab={connectTab}
+          planningTab={planningTab}
+          pendingConnectionInvites={connectionInvites}
+          pendingMembershipInvites={membershipInvites}
+          pendingHubJoinRequests={pendingHubJoinRequests}
           setMainNav={setMainNav}
-          registerResetToDefault={(fn) => {
-            resetToDefaultRef.current = fn
-          }}
+          setConnectionsTab={setConnectionsTab}
+          setLibraryTab={setLibraryTab}
+          setConnectTab={setConnectTab}
+          setPlanningTab={setPlanningTab}
+          setPlanAheadColumnCount={setPlanAheadColumnCount}
         />
-      </section>
-      <footer className="border-t border-gymnext-muted/30 bg-white">
-        <div className="max-w-6xl mx-auto px-4 py-3 text-xs text-gray-500 flex items-center justify-center">
-          <span>GymNext Flex Timer · © 1804282 Ontario Limited dba GymNext</span>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#f1f1f1]">
+          <section className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pb-8 pt-5 lg:px-8 lg:pb-8 lg:pt-6">
+            <div className="flex min-h-0 w-full max-w-full flex-1 flex-col">
+            <UserAppLayout
+              user={user}
+              overview={overview}
+              overviewLoading={overviewLoading}
+              overviewError={overviewError}
+              reloadOverview={() => loadOverview(user)}
+              mainNav={mainNav}
+              setMainNav={setMainNav}
+              connectionsTab={connectionsTab}
+              setConnectionsTab={setConnectionsTab}
+              libraryTab={libraryTab}
+              setLibraryTab={setLibraryTab}
+              connectTab={connectTab}
+              setConnectTab={setConnectTab}
+              planningTab={planningTab}
+              setPlanningTab={setPlanningTab}
+              planAheadColumnCount={planAheadColumnCount}
+              setPlanAheadColumnCount={setPlanAheadColumnCount}
+              registerResetToDefault={(fn) => {
+                resetToDefaultRef.current = fn
+              }}
+              openHandleEditor={openHandleEditor}
+              onProfileUpdated={(profile) =>
+                setOverview((prev) => (prev ? { ...prev, ...profile } : prev))
+              }
+            />
+            </div>
+          </section>
+          <footer className="shrink-0 border-t border-neutral-200 bg-white">
+            <div className="flex items-center justify-center px-4 py-3 text-xs text-gray-500 lg:px-8">
+              <span>GymNext Flex Timer · © 1804282 Ontario Limited dba GymNext</span>
+            </div>
+          </footer>
         </div>
-      </footer>
+      </div>
     </main>
   )
 }
 
-function providerLabel(providerId: string): string {
-  switch (providerId) {
-    case 'google.com':
-      return 'Google'
-    case 'apple.com':
-      return 'Apple'
-    case 'facebook.com':
-      return 'Facebook'
-    case 'password':
-      return 'Email / Password'
-    default:
-      return providerId
-  }
-}
-
 function AppHeader({
   user,
-  publicHandle,
-  basicBio,
+  handle,
+  handleKey,
+  bio,
+  firstName,
+  lastName,
+  hubLookupIds,
+  hubLookupLabels,
   subscriptionTier = 'basic',
   onLogoClick,
-  onOpenMainNav,
-  mainNavDrawerOpen = false,
   onProfileUpdated,
+  registerOpenHandleEditor,
+  registerOpenUserProfileEditor,
 }: {
   user: User
-  publicHandle?: string | null
-  basicBio?: string | null
+  handle?: string | null
+  handleKey?: string | null
+  bio?: string | null
+  firstName?: string | null
+  lastName?: string | null
+  hubLookupIds?: UserHubLookupIds
+  hubLookupLabels?: UserHubLookupLabels
   subscriptionTier?: SubscriptionTier
   onLogoClick: () => void
-  onOpenMainNav?: () => void
-  mainNavDrawerOpen?: boolean
-  onProfileUpdated: (profile: { publicHandle?: string | null; basicBio?: string | null }) => void
+  onProfileUpdated: (profile: {
+    handle?: string | null
+    handleKey?: string | null
+    bio?: string | null
+    firstName?: string | null
+    lastName?: string | null
+    hubLookupIds?: UserHubLookupIds
+    hubLookupLabels?: UserHubLookupLabels
+  }) => void
+  registerOpenHandleEditor?: (open: () => void) => void
+  registerOpenUserProfileEditor?: (open: () => void) => void
 }) {
   const [upgradePromptOpen, setUpgradePromptOpen] = useState(false)
   const [userInfoDialogOpen, setUserInfoDialogOpen] = useState(false)
-  const [accountMenuOpen, setAccountMenuOpen] = useState(false)
-  const [bioEditorOpen, setBioEditorOpen] = useState(false)
+  const [userEditorOpen, setUserEditorOpen] = useState(false)
   const [handleEditorOpen, setHandleEditorOpen] = useState(false)
-  const [handleDraft, setHandleDraft] = useState(publicHandle ?? '')
+  const handleWithoutAt = (h: string | null | undefined) => (h ?? '').trim().replace(/^@/, '')
+  const [handleDraft, setHandleDraft] = useState(
+    handleWithoutAt(handle) || handleKey || ''
+  )
   const [handleSaving, setHandleSaving] = useState(false)
-  const [bioDraft, setBioDraft] = useState(basicBio ?? '')
-  const [bioSaving, setBioSaving] = useState(false)
+  const [bioDraft, setBioDraft] = useState(bio ?? '')
+  const [firstNameDraft, setFirstNameDraft] = useState(firstName ?? '')
+  const [lastNameDraft, setLastNameDraft] = useState(lastName ?? '')
+  const [userProfileSaving, setUserProfileSaving] = useState(false)
 
   useEffect(() => {
-    setBioDraft(basicBio ?? '')
-  }, [basicBio])
+    setBioDraft(bio ?? '')
+  }, [bio])
   useEffect(() => {
-    setHandleDraft(publicHandle ?? '')
-  }, [publicHandle])
+    setFirstNameDraft(firstName ?? '')
+  }, [firstName])
+  useEffect(() => {
+    setLastNameDraft(lastName ?? '')
+  }, [lastName])
+  useEffect(() => {
+    setHandleDraft(handleWithoutAt(handle) || handleKey || '')
+  }, [handle, handleKey])
+
+  useEffect(() => {
+    if (!registerOpenHandleEditor) return
+    registerOpenHandleEditor(() => {
+      setUserInfoDialogOpen(false)
+      setHandleEditorOpen(true)
+    })
+    return () => registerOpenHandleEditor(() => {})
+  }, [registerOpenHandleEditor])
+
+  useEffect(() => {
+    if (!registerOpenUserProfileEditor) return
+    registerOpenUserProfileEditor(() => {
+      setUserInfoDialogOpen(false)
+      setUserEditorOpen(true)
+    })
+    return () => registerOpenUserProfileEditor(() => {})
+  }, [registerOpenUserProfileEditor])
 
   async function handleSignOut() {
     await signOut(auth)
@@ -311,15 +487,17 @@ function AppHeader({
         ? 'Classic Tier'
         : 'Basic Tier'
   const isPro = subscriptionTier === 'pro'
-  const preferredUserName = user.displayName?.trim() || user.email?.trim() || 'Signed in'
-  const headerUserLabel =
-    publicHandle?.trim()
-      ? `${preferredUserName} (@${publicHandle.trim()})`
-      : preferredUserName
+  const firestoreFullName = [firstName?.trim(), lastName?.trim()].filter(Boolean).join(' ')
+  const preferredUserName =
+    firestoreFullName || user.displayName?.trim() || user.email?.trim() || 'Signed in'
+  const headerAtHandle = handleWithoutAt(handle) || handleKey?.trim() || ''
+  const headerUserLabel = headerAtHandle
+    ? `${preferredUserName} (@${headerAtHandle})`
+    : preferredUserName
 
-  async function handleSaveBio() {
-    if (bioSaving) return
-    setBioSaving(true)
+  async function handleSaveUserProfile() {
+    if (userProfileSaving) return
+    setUserProfileSaving(true)
     try {
       const token = await user.getIdToken()
       const res = await fetch('/api/app/profile', {
@@ -328,23 +506,40 @@ function AppHeader({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ basicBio: bioDraft }),
+        body: JSON.stringify({
+          bio: bioDraft,
+          firstName: firstNameDraft,
+          lastName: lastNameDraft,
+        }),
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || `HTTP ${res.status}`)
       }
-      const data = (await res.json()) as { publicHandle?: string | null; basicBio?: string | null }
+      const data = (await res.json()) as {
+        handle?: string | null
+        handleKey?: string | null
+        bio?: string | null
+        firstName?: string | null
+        lastName?: string | null
+        hubLookupIds?: UserHubLookupIds
+        hubLookupLabels?: UserHubLookupLabels
+      }
       onProfileUpdated({
-        publicHandle: data.publicHandle ?? publicHandle ?? null,
-        basicBio: data.basicBio ?? null,
+        handle: data.handle ?? handle ?? null,
+        handleKey: data.handleKey ?? handleKey ?? null,
+        bio: data.bio ?? null,
+        firstName: data.firstName ?? null,
+        lastName: data.lastName ?? null,
+        hubLookupIds: data.hubLookupIds,
+        hubLookupLabels: data.hubLookupLabels,
       })
-      setBioEditorOpen(false)
-      toast.success('Bio saved')
+      setUserEditorOpen(false)
+      toast.success('Profile saved')
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to save bio')
+      toast.error(err instanceof Error ? err.message : 'Failed to save profile')
     } finally {
-      setBioSaving(false)
+      setUserProfileSaving(false)
     }
   }
 
@@ -359,16 +554,29 @@ function AppHeader({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ publicHandle: handleDraft }),
+        body: JSON.stringify({ handle: handleDraft }),
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || `HTTP ${res.status}`)
       }
-      const data = (await res.json()) as { publicHandle?: string | null; basicBio?: string | null }
+      const data = (await res.json()) as {
+        handle?: string | null
+        handleKey?: string | null
+        bio?: string | null
+        firstName?: string | null
+        lastName?: string | null
+        hubLookupIds?: UserHubLookupIds
+        hubLookupLabels?: UserHubLookupLabels
+      }
       onProfileUpdated({
-        publicHandle: data.publicHandle ?? null,
-        basicBio: data.basicBio ?? basicBio ?? null,
+        handle: data.handle ?? null,
+        handleKey: data.handleKey ?? null,
+        bio: data.bio ?? bio ?? null,
+        firstName: data.firstName ?? firstName ?? null,
+        lastName: data.lastName ?? lastName ?? null,
+        hubLookupIds: data.hubLookupIds,
+        hubLookupLabels: data.hubLookupLabels,
       })
       setHandleEditorOpen(false)
       toast.success('Handle saved')
@@ -380,42 +588,16 @@ function AppHeader({
   }
 
   return (
-    <header className="relative z-[102] border-b border-gymnext-muted/30 bg-white">
-      <div className="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-1 min-w-0">
-          {onOpenMainNav && (
-            <button
-              type="button"
-              onClick={onOpenMainNav}
-              className="shrink-0 rounded-md p-2 text-gray-700 hover:bg-gymnext-background focus:outline-none focus:ring-2 focus:ring-gymnext/50"
-              aria-label="Open navigation menu"
-              aria-expanded={mainNavDrawerOpen}
-              aria-controls="main-nav-drawer"
-            >
-              <svg
-                className="h-6 w-6"
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-                strokeWidth={1.5}
-                stroke="currentColor"
-                aria-hidden
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5"
-                />
-              </svg>
-            </button>
-          )}
+    <header className="relative z-[102] shrink-0 border-b border-neutral-800 bg-neutral-950 text-white">
+      <div className="flex h-14 w-full items-center gap-4 px-4 sm:px-6 lg:px-8">
+        <div className="flex min-w-0 shrink-0 items-center">
           <button
             type="button"
             onClick={onLogoClick}
-            className="flex items-center gap-2 rounded-md hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-gymnext/50 min-w-0"
+            className="flex min-w-0 items-center gap-2 rounded-md hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-white/40"
             aria-label="Go to home"
           >
-            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center bg-white">
+            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded bg-white/10">
               <Image
                 src={headerIcon}
                 alt="Flex Timer"
@@ -424,33 +606,34 @@ function AppHeader({
                 className="h-8 w-8 object-contain"
               />
             </span>
-            <div className="flex flex-col items-start min-w-0">
-              <span className="text-sm font-semibold text-gray-900 truncate">
+            <div className="hidden min-w-0 flex-col items-start sm:flex">
+              <span className="truncate text-sm font-semibold text-white">
                 GymNext Flex Timer
               </span>
-              <span className="text-xs text-gray-500 truncate max-w-[12rem] sm:max-w-none">
-                The world's most advanced interval timer
+              <span className="max-w-[12rem] truncate text-xs text-neutral-400 sm:max-w-md lg:max-w-xl">
+                The world&apos;s most advanced interval timer
               </span>
             </div>
           </button>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="hidden sm:flex flex-col items-end text-right">
+        <div className="min-w-0 flex-1" aria-hidden="true" />
+        <div className="flex shrink-0 items-center justify-end gap-3 sm:gap-4">
+          <div className="hidden min-w-0 flex-col items-end text-right sm:flex">
             <button
               type="button"
               onClick={() => setUserInfoDialogOpen(true)}
-              className="text-xs font-medium text-gray-900 hover:text-gymnext hover:underline cursor-pointer text-right"
+              className="cursor-pointer text-right text-xs font-medium text-white hover:text-neutral-200 hover:underline"
               title="View account info"
             >
               {headerUserLabel}
             </button>
             {isPro ? (
-              <span className="text-xs text-gray-500">{tierLabel}</span>
+              <span className="text-xs text-neutral-400">{tierLabel}</span>
             ) : (
               <button
                 type="button"
                 onClick={() => setUpgradePromptOpen(true)}
-                className="text-xs text-gray-500 hover:text-gymnext hover:underline cursor-pointer"
+                className="cursor-pointer text-xs text-neutral-400 hover:text-white hover:underline"
                 title="Upgrade to Pro"
               >
                 {tierLabel}
@@ -459,8 +642,30 @@ function AppHeader({
           </div>
           <button
             type="button"
+            onClick={() => setUserInfoDialogOpen(true)}
+            className="sm:hidden rounded-md p-2 text-neutral-200 hover:bg-white/10"
+            aria-label="Account info"
+          >
+            <svg
+              className="h-6 w-6"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+              aria-hidden
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"
+              />
+            </svg>
+          </button>
+          <button
+            type="button"
             onClick={handleSignOut}
-            className="rounded border border-gymnext-muted/50 px-3 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-background"
+            className="rounded border border-neutral-600 bg-transparent px-3 py-1.5 text-xs font-medium text-neutral-100 hover:bg-neutral-800"
           >
             Sign out
           </button>
@@ -499,44 +704,8 @@ function AppHeader({
             onClick={() => setUserInfoDialogOpen(false)}
           />
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg overflow-hidden">
-            <div className="border-b border-gymnext-muted/30 px-4 py-3 flex items-center justify-between gap-3">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
               <h2 className="text-sm font-semibold text-gray-800">Account info</h2>
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setAccountMenuOpen((open) => !open)}
-                  className="rounded px-2 py-1 text-sm font-semibold text-gray-500 hover:bg-gymnext-background hover:text-gray-800"
-                  aria-haspopup="menu"
-                  aria-expanded={accountMenuOpen}
-                  aria-label="Account actions"
-                >
-                  ...
-                </button>
-                {accountMenuOpen && (
-                  <div className="absolute right-0 mt-1 min-w-[8rem] rounded-md border border-gymnext-muted/40 bg-white py-1 shadow-lg z-10">
-                    <button
-                      type="button"
-                      className="block w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gymnext-background"
-                      onClick={() => {
-                        setAccountMenuOpen(false)
-                        setHandleEditorOpen(true)
-                      }}
-                    >
-                      {publicHandle?.trim() ? 'Change handle' : 'Set handle'}
-                    </button>
-                    <button
-                      type="button"
-                      className="block w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gymnext-background"
-                      onClick={() => {
-                        setAccountMenuOpen(false)
-                        setBioEditorOpen(true)
-                      }}
-                    >
-                      Edit bio
-                    </button>
-                  </div>
-                )}
-              </div>
             </div>
             <div className="p-4 space-y-4">
               <div className="flex items-center gap-4">
@@ -549,12 +718,12 @@ function AppHeader({
                   />
                 ) : (
                   <div className="h-16 w-16 rounded-full bg-gymnext-muted/30 flex items-center justify-center text-xl font-medium text-gray-600">
-                    {(user.displayName?.[0] ?? user.email?.[0] ?? '?').toUpperCase()}
+                    {(firestoreFullName?.[0] ?? user.displayName?.[0] ?? user.email?.[0] ?? '?').toUpperCase()}
                   </div>
                 )}
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium text-gray-900 truncate">
-                    {user.displayName || '—'}
+                    {firestoreFullName || user.displayName?.trim() || '—'}
                   </p>
                   {user.email && (
                     <p className="text-xs text-gray-500 truncate">{user.email}</p>
@@ -562,89 +731,113 @@ function AppHeader({
                 </div>
               </div>
               <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-sm">
-                {publicHandle?.trim() && (
+                <dt className="text-gray-500 font-medium">First name</dt>
+                <dd className="text-gray-900">{firstName?.trim() || '—'}</dd>
+                <dt className="text-gray-500 font-medium">Last name</dt>
+                <dd className="text-gray-900">{lastName?.trim() || '—'}</dd>
+                {headerAtHandle && (
                   <>
                     <dt className="text-gray-500 font-medium">Handle</dt>
-                    <dd className="text-gray-900">@{publicHandle.trim()}</dd>
+                    <dd className="text-gray-900">@{headerAtHandle}</dd>
                   </>
                 )}
-                {basicBio?.trim() && (
+                {bio?.trim() && (
                   <>
                     <dt className="text-gray-500 font-medium">Bio</dt>
-                    <dd className="text-gray-900 whitespace-pre-wrap">{basicBio.trim()}</dd>
+                    <dd className="min-w-0 max-w-full whitespace-pre-wrap break-words text-gray-900">
+                      {bio.trim()}
+                    </dd>
                   </>
                 )}
-                <dt className="text-gray-500 font-medium">User ID</dt>
-                <dd className="font-mono text-gray-900 break-all">{user.uid}</dd>
-
+                {HUB_LOOKUP_ROWS.map((row) => {
+                  const text = hubLookupLabels?.[row.key]
+                  if (!text) return null
+                  return (
+                    <Fragment key={row.key}>
+                      <dt className="text-gray-500 font-medium">{row.label}</dt>
+                      <dd className="text-gray-900">{text}</dd>
+                    </Fragment>
+                  )
+                })}
                 {user.phoneNumber && (
                   <>
                     <dt className="text-gray-500 font-medium">Phone</dt>
                     <dd className="text-gray-900">{user.phoneNumber}</dd>
                   </>
                 )}
-
-                <dt className="text-gray-500 font-medium">Email verified</dt>
-                <dd className="text-gray-900">{user.emailVerified ? 'Yes' : 'No'}</dd>
-
-                <dt className="text-gray-500 font-medium">Login providers</dt>
-                <dd className="text-gray-900">
-                  {user.providerData?.length
-                    ? user.providerData.map((p) => providerLabel(p.providerId)).join(', ')
-                    : '—'}
-                </dd>
-
-                {user.metadata?.creationTime && (
-                  <>
-                    <dt className="text-gray-500 font-medium">Account created</dt>
-                    <dd className="text-gray-900">
-                      {new Date(user.metadata.creationTime).toLocaleString()}
-                    </dd>
-                  </>
-                )}
-                {user.metadata?.lastSignInTime && (
-                  <>
-                    <dt className="text-gray-500 font-medium">Last sign-in</dt>
-                    <dd className="text-gray-900">
-                      {new Date(user.metadata.lastSignInTime).toLocaleString()}
-                    </dd>
-                  </>
-                )}
               </dl>
             </div>
-            <div className="flex justify-end gap-2 px-4 pb-4">
-              <button
-                type="button"
-                onClick={() => setUserInfoDialogOpen(false)}
-                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
-              >
-                Close
-              </button>
+            <div className="px-4 pb-4 space-y-3">
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setUserInfoDialogOpen(false)}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
+                >
+                  Close
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-500 text-center">
+                <span className="font-medium text-gray-600">User ID:</span>{' '}
+                <span className="font-mono break-all">{user.uid}</span>
+              </p>
             </div>
           </div>
         </div>
       )}
-      {bioEditorOpen && (
+      {userEditorOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <div
             className="absolute inset-0 bg-black/50"
             aria-hidden
             onClick={() => {
-              if (bioSaving) return
-              setBioDraft(basicBio ?? '')
-              setBioEditorOpen(false)
+              if (userProfileSaving) return
+              setBioDraft(bio ?? '')
+              setFirstNameDraft(firstName ?? '')
+              setLastNameDraft(lastName ?? '')
+              setUserEditorOpen(false)
             }}
           />
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg overflow-hidden">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
-              <h2 className="text-sm font-semibold text-gray-800">Edit bio</h2>
+              <h2 className="text-sm font-semibold text-gray-800">Edit user</h2>
             </div>
             <div className="p-4 space-y-3">
-              <label htmlFor="basic-bio" className="block text-xs font-medium text-gray-700">
-                Basic bio
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="profile-first-name" className="block text-xs font-medium text-gray-700">
+                    First name
+                  </label>
+                  <input
+                    id="profile-first-name"
+                    type="text"
+                    value={firstNameDraft}
+                    onChange={(e) => setFirstNameDraft(e.target.value)}
+                    autoComplete="given-name"
+                    className="mt-1 w-full rounded border border-gymnext-muted/40 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gymnext/40"
+                    placeholder="First name"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="profile-last-name" className="block text-xs font-medium text-gray-700">
+                    Last name
+                  </label>
+                  <input
+                    id="profile-last-name"
+                    type="text"
+                    value={lastNameDraft}
+                    onChange={(e) => setLastNameDraft(e.target.value)}
+                    autoComplete="family-name"
+                    className="mt-1 w-full rounded border border-gymnext-muted/40 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gymnext/40"
+                    placeholder="Last name"
+                  />
+                </div>
+              </div>
+              <label htmlFor="profile-bio" className="block text-xs font-medium text-gray-700">
+                Bio
               </label>
               <textarea
-                id="basic-bio"
+                id="profile-bio"
                 value={bioDraft}
                 onChange={(e) => setBioDraft(e.target.value)}
                 rows={4}
@@ -655,10 +848,12 @@ function AppHeader({
             <div className="flex justify-end gap-2 px-4 pb-4">
               <button
                 type="button"
-                disabled={bioSaving}
+                disabled={userProfileSaving}
                 onClick={() => {
-                  setBioDraft(basicBio ?? '')
-                  setBioEditorOpen(false)
+                  setBioDraft(bio ?? '')
+                  setFirstNameDraft(firstName ?? '')
+                  setLastNameDraft(lastName ?? '')
+                  setUserEditorOpen(false)
                 }}
                 className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -666,11 +861,11 @@ function AppHeader({
               </button>
               <button
                 type="button"
-                onClick={handleSaveBio}
-                disabled={bioSaving}
+                onClick={handleSaveUserProfile}
+                disabled={userProfileSaving}
                 className="rounded bg-gymnext px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {bioSaving ? 'Saving…' : 'Save bio'}
+                {userProfileSaving ? 'Saving…' : 'Save'}
               </button>
             </div>
           </div>
@@ -683,7 +878,7 @@ function AppHeader({
             aria-hidden
             onClick={() => {
               if (handleSaving) return
-              setHandleDraft(publicHandle ?? '')
+              setHandleDraft(handleWithoutAt(handle) || handleKey || '')
               setHandleEditorOpen(false)
             }}
           />
@@ -692,11 +887,11 @@ function AppHeader({
               <h2 className="text-sm font-semibold text-gray-800">Edit handle</h2>
             </div>
             <div className="p-4 space-y-3">
-              <label htmlFor="public-handle" className="block text-xs font-medium text-gray-700">
-                Public handle
+              <label htmlFor="profile-handle" className="block text-xs font-medium text-gray-700">
+                Handle
               </label>
               <input
-                id="public-handle"
+                id="profile-handle"
                 type="text"
                 value={handleDraft}
                 onChange={(e) => setHandleDraft(e.target.value)}
@@ -704,7 +899,7 @@ function AppHeader({
                 placeholder="@yourname"
               />
               <p className="text-xs text-gray-500">
-                1-32 chars. Letters, numbers, period, underscore, and dash.
+                1-64 characters. Letters, numbers, period, underscore, and dash.
               </p>
             </div>
             <div className="flex justify-end gap-2 px-4 pb-4">
@@ -712,7 +907,7 @@ function AppHeader({
                 type="button"
                 disabled={handleSaving}
                 onClick={() => {
-                  setHandleDraft(publicHandle ?? '')
+                  setHandleDraft(handleWithoutAt(handle) || handleKey || '')
                   setHandleEditorOpen(false)
                 }}
                 className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:cursor-not-allowed disabled:opacity-60"
@@ -907,7 +1102,19 @@ function UserAppLayout({
   reloadOverview,
   mainNav,
   setMainNav,
+  connectionsTab,
+  setConnectionsTab,
+  libraryTab,
+  setLibraryTab,
+  connectTab,
+  setConnectTab,
+  planningTab,
+  setPlanningTab,
+  planAheadColumnCount,
+  setPlanAheadColumnCount,
   registerResetToDefault,
+  openHandleEditor,
+  onProfileUpdated,
 }: {
   user: User
   overview: OverviewData | null
@@ -916,13 +1123,36 @@ function UserAppLayout({
   reloadOverview: () => void
   mainNav: MainNavId
   setMainNav: (id: MainNavId) => void
+  connectionsTab: ConnectionsSubTabId
+  setConnectionsTab: (id: ConnectionsSubTabId) => void
+  libraryTab: LibrarySubTabId
+  setLibraryTab: (id: LibrarySubTabId) => void
+  connectTab: ConnectSubTabId
+  setConnectTab: (id: ConnectSubTabId) => void
+  planningTab: PlanningSubTabId
+  setPlanningTab: (id: PlanningSubTabId) => void
+  planAheadColumnCount: 1 | 2
+  setPlanAheadColumnCount: (count: 1 | 2) => void
   registerResetToDefault: (fn: () => void) => void
+  openHandleEditor: () => void
+  onProfileUpdated: (profile: {
+    handle?: string | null
+    handleKey?: string | null
+    bio?: string | null
+    firstName?: string | null
+    lastName?: string | null
+    hubLookupIds?: UserHubLookupIds
+    hubLookupLabels?: UserHubLookupLabels
+  }) => void
 }) {
-  const [libraryTab, setLibraryTab] = useState<LibrarySubTabId>('favorites')
-  const [planningTab, setPlanningTab] = useState<PlanningSubTabId>('plans')
   const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null)
-  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
-  const [selectedFollowingPlanId, setSelectedFollowingPlanId] = useState<string | null>(null)
+  const [selectedPlanId, setSelectedPlanIdRaw] = useState<string | null>(null)
+  /** Second plan on Plan Ahead: same schedule editor as the first column when both are selected. */
+  const [selectedPlanIdSecondary, setSelectedPlanIdSecondary] = useState<string | null>(null)
+  const [selectedFollowingSubscriptionId, setSelectedFollowingSubscriptionId] = useState<string | null>(null)
+  const [followingPlans, setFollowingPlans] = useState<FollowingPlanRow[]>([])
+  const [followingPlansLoading, setFollowingPlansLoading] = useState(false)
+  const [followingPlansError, setFollowingPlansError] = useState<string | null>(null)
   const [selectedFavoriteWorkout, setSelectedFavoriteWorkout] = useState<Workout | null>(null)
   const [reorderFavoritesError, setReorderFavoritesError] = useState<string | null>(null)
   const [reorderCollectionsError, setReorderCollectionsError] = useState<string | null>(null)
@@ -933,16 +1163,18 @@ function UserAppLayout({
   } | null>(null)
   const [collectionLoading, setCollectionLoading] = useState(false)
   const [collectionError, setCollectionError] = useState<string | null>(null)
+  const [expandWorkoutIdAfterCollectionOpen, setExpandWorkoutIdAfterCollectionOpen] = useState<string | null>(null)
+  const [libraryShareTarget, setLibraryShareTarget] = useState<LibraryShareTarget | null>(null)
 
   const [plannedWorkouts, setPlannedWorkouts] = useState<PlannedWorkout[]>([])
+  const [plannedWorkoutsSecondary, setPlannedWorkoutsSecondary] = useState<PlannedWorkout[]>([])
   const [optimisticPlannedWorkouts, setOptimisticPlannedWorkouts] = useState<PlannedWorkout[] | null>(null)
   const [plansLoading, setPlansLoading] = useState(false)
   const [plansError, setPlansError] = useState<string | null>(null)
-  const [followingPlans, setFollowingPlans] = useState<FollowingPlan[]>([])
-  const [followingPlansLoading, setFollowingPlansLoading] = useState(false)
-  const [followingPlansError, setFollowingPlansError] = useState<string | null>(null)
   const [weekStart, setWeekStart] = useState<string>(() => getLocalYYYYMMDD(new Date()))
+  const [weekStartSecondary, setWeekStartSecondary] = useState<string>(() => getLocalYYYYMMDD(new Date()))
   const [planViewMode, setPlanViewMode] = useState<'week' | '3day' | '1day'>('3day')
+  const [planViewModeSecondary, setPlanViewModeSecondary] = useState<'week' | '3day' | '1day'>('3day')
 
   useEffect(() => {
     const today = getLocalYYYYMMDD(new Date())
@@ -955,15 +1187,39 @@ function UserAppLayout({
     }
   }, [planViewMode])
 
+  useEffect(() => {
+    const today = getLocalYYYYMMDD(new Date())
+    if (planViewModeSecondary === '1day') {
+      setWeekStartSecondary(today)
+    } else if (planViewModeSecondary === '3day') {
+      setWeekStartSecondary(addDays(today, -1))
+    } else {
+      setWeekStartSecondary(getMondayOfWeekLocal(new Date()))
+    }
+  }, [planViewModeSecondary])
+
   const planDayCount = planViewMode === 'week' ? 7 : planViewMode === '3day' ? 3 : 1
+  const planDayCountSecondary =
+    planViewModeSecondary === 'week' ? 7 : planViewModeSecondary === '3day' ? 3 : 1
   const weekEnd = useMemo(
     () => addDays(weekStart, planDayCount - 1),
     [weekStart, planDayCount]
+  )
+  const weekEndSecondary = useMemo(
+    () => addDays(weekStartSecondary, planDayCountSecondary - 1),
+    [weekStartSecondary, planDayCountSecondary]
   )
 
   useEffect(() => {
     setOptimisticPlannedWorkouts(null)
   }, [selectedPlanId, weekStart, planDayCount])
+
+  useEffect(() => {
+    if (planningTab === 'plans') {
+      setSelectedPlanIdSecondary(null)
+      setPlannedWorkoutsSecondary([])
+    }
+  }, [planningTab])
 
   const sortedCollections = useMemo(
     () =>
@@ -991,19 +1247,73 @@ function UserAppLayout({
     [sortedCollections]
   )
 
-  const sortedPlans = useMemo(
+  const sortedPlans = useMemo(() => {
+    const list = [...(overview?.workoutPlans ?? [])]
+    const bucket = (p: WorkoutPlan) => {
+      if (p.isPersonal) return 0
+      if (p.trainingIntent === 1) return 2
+      return 1
+    }
+    return list.sort((a, b) => {
+      const ba = bucket(a)
+      const bb = bucket(b)
+      if (ba !== bb) return ba - bb
+      return a.ordinal - b.ordinal || a.id.localeCompare(b.id)
+    })
+  }, [overview?.workoutPlans])
+
+  const selectOwnedPlanIdClearingFollowIfOwned = useCallback(
+    (id: string | null) => {
+      if (id !== null && sortedPlans.some((p) => p.id === id)) {
+        setSelectedFollowingSubscriptionId(null)
+      }
+      setSelectedPlanIdRaw(id)
+    },
+    [sortedPlans]
+  )
+
+  const goToPlansWithOwnedPlanSelected = useCallback(
+    (planId: string) => {
+      setMainNav('planning')
+      setPlanningTab('plans')
+      selectOwnedPlanIdClearingFollowIfOwned(planId)
+    },
+    [selectOwnedPlanIdClearingFollowIfOwned, setMainNav, setPlanningTab]
+  )
+
+  /** Activity feed (etc.): jump to Plan Ahead with a followed plan selected when the user already subscribes. */
+  const goToPlanAheadWithFollowedPlanActive = useCallback(
+    (ownerUserId: string, remotePlanId: string) => {
+      const row = followingPlans.find(
+        (f) => f.ownerUserId === ownerUserId && f.remotePlanId === remotePlanId
+      )
+      if (!row) {
+        toast.error('Could not open this plan. Try refreshing your followed plans.')
+        return
+      }
+      setMainNav('planning')
+      setPlanningTab('plan-ahead')
+      setPlanAheadColumnCount(1)
+      setSelectedPlanIdSecondary(null)
+      setSelectedFollowingSubscriptionId(row.subscriptionDocumentId)
+      setSelectedPlanIdRaw(row.remotePlanId)
+    },
+    [followingPlans]
+  )
+
+  const scheduleComparePlan = useMemo(
     () =>
-      [...(overview?.workoutPlans ?? [])].sort(
-        (a, b) => a.ordinal - b.ordinal
-      ),
-    [overview?.workoutPlans]
+      selectedPlanIdSecondary
+        ? sortedPlans.find((p) => p.id === selectedPlanIdSecondary) ?? null
+        : null,
+    [sortedPlans, selectedPlanIdSecondary]
   )
 
   useEffect(() => {
-    if (!overview) return
-    loadFollowingPlans()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overview])
+    if (selectedPlanId && selectedPlanIdSecondary && selectedPlanId === selectedPlanIdSecondary) {
+      setSelectedPlanIdSecondary(null)
+    }
+  }, [selectedPlanId, selectedPlanIdSecondary])
 
   async function authedFetch(input: string, init?: RequestInit) {
     const token = await user.getIdToken()
@@ -1143,6 +1453,26 @@ function UserAppLayout({
     return (await res.json()) as Workout
   }
 
+  async function handleDuplicateFavoriteWorkout(workoutId: string, collectionIds: string[]) {
+    const res = await authedFetch('/api/app/workouts/duplicate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceWorkoutId: workoutId, collectionIds }),
+    })
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}))
+      throw new Error(typeof json.error === 'string' ? json.error : `HTTP ${res.status}`)
+    }
+    const created = (await res.json()) as Workout
+    await reloadOverview()
+    await reloadCollectionDetail()
+    if (collectionIds.includes('favorite')) {
+      setSelectedFavoriteWorkout(created)
+    }
+    toast.success('Workout duplicated')
+    return created
+  }
+
   async function handleCreateCollection(name: string, description: string | null) {
     const res = await authedFetch('/api/app/collections', {
       method: 'POST',
@@ -1161,7 +1491,8 @@ function UserAppLayout({
   async function handleCreatePlan(
     name: string,
     description: string | null,
-    isPersonal: boolean
+    isPersonal: boolean,
+    trainingIntent?: 0 | 1
   ) {
     const res = await authedFetch('/api/app/plans', {
       method: 'POST',
@@ -1170,6 +1501,7 @@ function UserAppLayout({
         name: name.trim(),
         description: description?.trim() || null,
         isPersonal,
+        ...(!isPersonal ? { trainingIntent: trainingIntent ?? 0 } : {}),
       }),
     })
     if (!res.ok) {
@@ -1259,6 +1591,64 @@ function UserAppLayout({
       console.error('[reload collection detail]', e)
     }
   }
+
+  const consumeExpandWorkoutRequest = useCallback(() => {
+    setExpandWorkoutIdAfterCollectionOpen(null)
+  }, [])
+
+  const goToLibraryWithOwnedWorkoutSelected = useCallback(
+    (workoutId: string) => {
+      const w = overview?.workouts?.find((x) => x.id === workoutId)
+      if (!w) {
+        toast.error('Workout not found in your library.')
+        return
+      }
+      setMainNav('library')
+      if (favoritesCollection?.workoutIds.includes(workoutId)) {
+        setLibraryTab('favorites')
+        setSelectedFavoriteWorkout(w)
+        setExpandWorkoutIdAfterCollectionOpen(null)
+        return
+      }
+      const coll = sortedCollections.find(
+        (c) => c.id !== 'favorite' && Array.isArray(c.workoutIds) && c.workoutIds.includes(workoutId),
+      )
+      if (coll) {
+        setLibraryTab('collections')
+        setExpandWorkoutIdAfterCollectionOpen(workoutId)
+        if (collectionDetail?.collection.id !== coll.id) {
+          void openCollectionDetail(coll.id)
+        }
+        return
+      }
+      toast.error('Could not find this workout in a collection. Open Library to edit it.')
+    },
+    [
+      overview?.workouts,
+      favoritesCollection,
+      sortedCollections,
+      setMainNav,
+      setLibraryTab,
+      collectionDetail?.collection.id,
+      openCollectionDetail,
+    ],
+  )
+
+  const goToLibraryWithOwnedCollectionSelected = useCallback(
+    (collectionId: string) => {
+      if (!sortedCollections.some((c) => c.id === collectionId)) {
+        toast.error('Collection not found in your library.')
+        return
+      }
+      setMainNav('library')
+      setLibraryTab('collections')
+      setExpandWorkoutIdAfterCollectionOpen(null)
+      if (collectionDetail?.collection.id !== collectionId) {
+        void openCollectionDetail(collectionId)
+      }
+    },
+    [sortedCollections, setMainNav, setLibraryTab, collectionDetail?.collection.id, openCollectionDetail],
+  )
 
   async function handleSaveCollectionWorkout(
     workoutId: string,
@@ -1407,7 +1797,8 @@ function UserAppLayout({
   async function handleUpdatePlan(
     planId: string,
     name: string,
-    description: string | null
+    description: string | null,
+    trainingIntent?: 0 | 1
   ) {
     const res = await authedFetch(
       `/api/app/plans/${encodeURIComponent(planId)}`,
@@ -1417,6 +1808,7 @@ function UserAppLayout({
         body: JSON.stringify({
           workoutPlanName: name,
           workoutPlanDescription: description,
+          ...(trainingIntent === 0 || trainingIntent === 1 ? { trainingIntent } : {}),
         }),
       }
     )
@@ -1427,41 +1819,49 @@ function UserAppLayout({
     await reloadOverview()
   }
 
-  async function handleUpdatePlanSharing(
-    planId: string,
-    privacy: number,
-    handle: string | null
-  ) {
-    const res = await authedFetch(
-      `/api/app/plans/${encodeURIComponent(planId)}`,
-      {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          privacy,
-          handle,
-        }),
-      }
-    )
+  async function handleSetPlanShowInSchedule(planId: string, showInSchedule: boolean) {
+    const res = await authedFetch(`/api/app/plans/${encodeURIComponent(planId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ showInSchedule }),
+    })
     if (!res.ok) {
-      const data = await res.json().catch(() => ({}))
-      throw new Error(data.error || 'Failed to update sharing options')
+      const data = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(data.error || 'Failed to update plan')
     }
     await reloadOverview()
   }
 
-  async function handleReorderPlans(planIds: string[]) {
+  async function handleReorderPlansInSection(
+    planSection: 'personal' | 'privateTraining' | 'groupTraining',
+    planIds: string[]
+  ) {
     try {
       await authedFetch('/api/app/plans', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ planIds }),
+        body: JSON.stringify({ planSection, planIds }),
       })
       await reloadOverview()
     } catch (e) {
       console.error('[plans reorder]', e)
       setReorderPlansError(e instanceof Error ? e.message : 'Failed to save order')
       await reloadOverview()
+    }
+  }
+
+  async function handleReorderSubscriptions(subscriptionDocumentIds: string[]) {
+    try {
+      await authedFetch('/api/app/following-plans', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscriptionDocumentIds }),
+      })
+      await refetchFollowingPlansQuiet()
+    } catch (e) {
+      console.error('[subscriptions reorder]', e)
+      setReorderPlansError(e instanceof Error ? e.message : 'Failed to save subscription order')
+      await refetchFollowingPlansQuiet()
     }
   }
 
@@ -1473,47 +1873,38 @@ function UserAppLayout({
         body: JSON.stringify({}),
       })
       await reloadOverview()
-      setSelectedPlanId(null)
+      setSelectedPlanIdRaw((cur) => (cur === planId ? null : cur))
+      setSelectedPlanIdSecondary((cur) => (cur === planId ? null : cur))
+      setSelectedFollowingSubscriptionId(null)
     } catch (e) {
       console.error('[plan delete]', e)
     }
   }
 
-  async function loadFollowingPlans() {
-    setFollowingPlansLoading(true)
-    setFollowingPlansError(null)
-    try {
-      const res = await authedFetch('/api/app/following-plans')
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `HTTP ${res.status}`)
-      }
-      const data = (await res.json()) as { followingPlans?: FollowingPlan[] }
-      const items = Array.isArray(data.followingPlans) ? data.followingPlans : []
-      setFollowingPlans(items.sort((a, b) => a.ordinal - b.ordinal))
-    } catch (e) {
-      setFollowingPlansError(
-        e instanceof Error ? e.message : 'Failed to load followed plans'
-      )
-      setFollowingPlans([])
-    } finally {
-      setFollowingPlansLoading(false)
+  async function fetchPlannedWorkoutsForSelection(
+    followingSubId: string | null,
+    ownedPlanId: string | null
+  ) {
+    if (!followingSubId && !ownedPlanId) {
+      setPlannedWorkouts([])
+      setPlannedWorkoutsSecondary([])
+      setOptimisticPlannedWorkouts(null)
+      setPlansError(null)
+      setPlansLoading(false)
+      return
     }
-  }
-
-  async function loadPlannedWorkoutsForPlan(planId: string) {
-    setSelectedPlanId(planId)
-    setSelectedFollowingPlanId(null)
     setPlansLoading(true)
     setPlansError(null)
     try {
-      const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(
-          planId
-        )}/planned-workouts?from=${encodeURIComponent(
-          weekStart
-        )}&to=${encodeURIComponent(weekEnd)}`
-      )
+      const res = followingSubId
+        ? await authedFetch(
+            `/api/app/following-plans/${encodeURIComponent(followingSubId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+          )
+        : await authedFetch(
+            `/api/app/plans/${encodeURIComponent(
+              ownedPlanId!
+            )}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+          )
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.error || `HTTP ${res.status}`)
@@ -1522,46 +1913,66 @@ function UserAppLayout({
       setPlannedWorkouts(data.plannedWorkouts ?? [])
       setOptimisticPlannedWorkouts(null)
     } catch (e) {
-      setPlansError(
-        e instanceof Error ? e.message : 'Failed to load planned workouts'
-      )
+      setPlansError(e instanceof Error ? e.message : 'Failed to load planned workouts')
       setPlannedWorkouts([])
+      setPlannedWorkoutsSecondary([])
       setOptimisticPlannedWorkouts(null)
     } finally {
       setPlansLoading(false)
     }
   }
 
-  async function loadPlannedWorkoutsForFollowingPlan(subscriptionDocumentId: string) {
-    setSelectedFollowingPlanId(subscriptionDocumentId)
-    setSelectedPlanId(null)
-    setPlansLoading(true)
-    setPlansError(null)
-    try {
-      const res = await authedFetch(
-        `/api/app/following-plans/${encodeURIComponent(
-          subscriptionDocumentId
-        )}/planned-workouts?from=${encodeURIComponent(
-          weekStart
-        )}&to=${encodeURIComponent(weekEnd)}`
-      )
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `HTTP ${res.status}`)
-      }
-      const data = (await res.json()) as { plannedWorkouts: PlannedWorkout[] }
-      setPlannedWorkouts(data.plannedWorkouts ?? [])
-      setOptimisticPlannedWorkouts(null)
-    } catch (e) {
-      setPlansError(
-        e instanceof Error ? e.message : 'Failed to load planned workouts'
-      )
-      setPlannedWorkouts([])
-      setOptimisticPlannedWorkouts(null)
-    } finally {
-      setPlansLoading(false)
+  const refreshPlannedWorkoutsDisplay = useCallback(async () => {
+    if (selectedFollowingSubscriptionId) {
+      await fetchPlannedWorkoutsForSelection(selectedFollowingSubscriptionId, selectedPlanId)
+      setPlannedWorkoutsSecondary([])
+      return
     }
-  }
+    if (mainNav !== 'planning' || planningTab !== 'plan-ahead') {
+      await fetchPlannedWorkoutsForSelection(null, selectedPlanId)
+      setPlannedWorkoutsSecondary([])
+      return
+    }
+    try {
+      if (selectedPlanId) {
+        const res = await authedFetch(
+          `/api/app/plans/${encodeURIComponent(selectedPlanId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+        )
+        if (res.ok) {
+          const data = (await res.json()) as { plannedWorkouts?: PlannedWorkout[] }
+          setPlannedWorkouts(data.plannedWorkouts ?? [])
+        }
+      } else {
+        setPlannedWorkouts([])
+      }
+      const secId =
+        selectedPlanIdSecondary && selectedPlanIdSecondary !== selectedPlanId ? selectedPlanIdSecondary : null
+      if (secId) {
+        const res2 = await authedFetch(
+          `/api/app/plans/${encodeURIComponent(secId)}/planned-workouts?from=${encodeURIComponent(weekStartSecondary)}&to=${encodeURIComponent(weekEndSecondary)}`
+        )
+        if (res2.ok) {
+          const data2 = (await res2.json()) as { plannedWorkouts?: PlannedWorkout[] }
+          setPlannedWorkoutsSecondary(data2.plannedWorkouts ?? [])
+        }
+      } else {
+        setPlannedWorkoutsSecondary([])
+      }
+      setOptimisticPlannedWorkouts(null)
+    } catch {
+      /* leave lists unchanged on error */
+    }
+  }, [
+    selectedFollowingSubscriptionId,
+    selectedPlanId,
+    selectedPlanIdSecondary,
+    weekStart,
+    weekEnd,
+    weekStartSecondary,
+    weekEndSecondary,
+    mainNav,
+    planningTab,
+  ])
 
   function updatePlannedWorkoutMetadataInPlace(
     plannedWorkoutId: string,
@@ -1586,6 +1997,7 @@ function UserAppLayout({
       )
     setPlannedWorkouts((prev) => updater(prev))
     setOptimisticPlannedWorkouts((prev) => (prev ? updater(prev) : null))
+    setPlannedWorkoutsSecondary((prev) => updater(prev))
   }
 
   const byDay = useMemo(() => {
@@ -1606,12 +2018,35 @@ function UserAppLayout({
     return map
   }, [optimisticPlannedWorkouts, plannedWorkouts, weekStart, planDayCount])
 
+  const byDaySecondary = useMemo(() => {
+    const map: Record<string, PlannedWorkout[]> = {}
+    const weekDays = Array.from({ length: planDayCountSecondary }, (_, i) =>
+      addDays(weekStartSecondary, i)
+    )
+    weekDays.forEach((d) => (map[d] = []))
+    plannedWorkoutsSecondary.forEach((pw) => {
+      const key = pw.day.slice(0, 10)
+      if (!map[key]) map[key] = []
+      map[key].push(pw)
+    })
+    weekDays.forEach((d) => {
+      if (map[d]) map[d].sort((a, b) => a.ordinal - b.ordinal)
+    })
+    return map
+  }, [plannedWorkoutsSecondary, weekStartSecondary, planDayCountSecondary])
+
   async function handleReorderPlannedWithinDay(
     dayKey: string,
     index: number,
-    direction: 'up' | 'down'
+    direction: 'up' | 'down',
+    planId?: string | null
   ) {
-    const items = [...(byDay[dayKey] ?? [])]
+    if (selectedFollowingSubscriptionId) return
+    const pid = planId ?? selectedPlanId
+    if (!pid) return
+    const columnByDay = pid === selectedPlanId ? byDay : pid === selectedPlanIdSecondary ? byDaySecondary : null
+    if (!columnByDay) return
+    const items = [...(columnByDay[dayKey] ?? [])]
     const targetIndex = direction === 'up' ? index - 1 : index + 1
     if (targetIndex < 0 || targetIndex >= items.length) return
     ;[items[index], items[targetIndex]] = [items[targetIndex], items[index]]
@@ -1631,16 +2066,24 @@ function UserAppLayout({
           )
         )
       )
-      if (selectedPlanId) {
-        await loadPlannedWorkoutsForPlan(selectedPlanId)
-      }
+      await refreshPlannedWorkoutsDisplay()
     } catch (e) {
       console.error('[planned reorder]', e)
     }
   }
 
-  function handlePlannedWorkoutDrop(dayKey: string, fromIndex: number, toIndex: number) {
-    const items = [...(byDay[dayKey] ?? [])]
+  function handlePlannedWorkoutDrop(
+    dayKey: string,
+    fromIndex: number,
+    toIndex: number,
+    planId?: string | null
+  ) {
+    if (selectedFollowingSubscriptionId) return
+    const pid = planId ?? selectedPlanId
+    if (!pid) return
+    const columnByDay = pid === selectedPlanId ? byDay : pid === selectedPlanIdSecondary ? byDaySecondary : null
+    if (!columnByDay) return
+    const items = [...(columnByDay[dayKey] ?? [])]
     if (fromIndex < 0 || fromIndex >= items.length || toIndex < 0 || toIndex > items.length) return
     // toIndex is the gap (0=before first, 1=between 0 and 1, ..., n=after last). Ignore drop in gap above or below current row.
     if (toIndex === fromIndex) return
@@ -1654,33 +2097,52 @@ function UserAppLayout({
       pw.ordinal = idx
     })
     const weekDays = Array.from({ length: planDayCount }, (_, i) => addDays(weekStart, i))
-    const fullList = weekDays.flatMap((d) => (d === dayKey ? items : (byDay[d] ?? [])))
-    setOptimisticPlannedWorkouts(fullList)
-    const planId = selectedPlanId
-    if (!planId) return
-    Promise.all(
-      items.map((pw, idx) =>
-        authedFetch(
-          `/api/app/plans/${encodeURIComponent(pw.planId)}/planned-workouts/${encodeURIComponent(pw.id)}`,
-          {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ordinal: idx }),
-          }
+    const isPrimary = pid === selectedPlanId
+    if (isPrimary) {
+      const fullList = weekDays.flatMap((d) => (d === dayKey ? items : (byDay[d] ?? [])))
+      setOptimisticPlannedWorkouts(fullList)
+      Promise.all(
+        items.map((pw, idx) =>
+          authedFetch(
+            `/api/app/plans/${encodeURIComponent(pw.planId)}/planned-workouts/${encodeURIComponent(pw.id)}`,
+            {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ordinal: idx }),
+            }
+          )
         )
       )
-    )
-      .then(() => {
-        setPlannedWorkouts(fullList)
-        setOptimisticPlannedWorkouts(null)
-      })
-      .catch((e) => {
-        console.error('[planned drop reorder]', e)
-        setOptimisticPlannedWorkouts(null)
-      })
+        .then(() => {
+          setPlannedWorkouts(fullList)
+          setOptimisticPlannedWorkouts(null)
+        })
+        .catch((e) => {
+          console.error('[planned drop reorder]', e)
+          setOptimisticPlannedWorkouts(null)
+        })
+    } else {
+      Promise.all(
+        items.map((pw, idx) =>
+          authedFetch(
+            `/api/app/plans/${encodeURIComponent(pw.planId)}/planned-workouts/${encodeURIComponent(pw.id)}`,
+            {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ordinal: idx }),
+            }
+          )
+        )
+      )
+        .then(() => void refreshPlannedWorkoutsDisplay())
+        .catch((e) => {
+          console.error('[planned drop reorder]', e)
+        })
+    }
   }
 
   async function handleDeletePlanned(pw: PlannedWorkout) {
+    if (selectedFollowingSubscriptionId) return
     try {
       await authedFetch(
         `/api/app/plans/${encodeURIComponent(
@@ -1688,92 +2150,296 @@ function UserAppLayout({
         )}/planned-workouts/${encodeURIComponent(pw.id)}`,
         { method: 'DELETE' }
       )
-      if (selectedPlanId) {
-        await loadPlannedWorkoutsForPlan(selectedPlanId)
-      }
+      await refreshPlannedWorkoutsDisplay()
     } catch (e) {
       console.error('[planned delete]', e)
     }
   }
 
   useEffect(() => {
-    if (selectedPlanId) {
-      loadPlannedWorkoutsForPlan(selectedPlanId)
-    } else if (selectedFollowingPlanId) {
-      loadPlannedWorkoutsForFollowingPlan(selectedFollowingPlanId)
+    let cancelled = false
+    ;(async () => {
+      const planAheadOwned =
+        mainNav === 'planning' && planningTab === 'plan-ahead' && !selectedFollowingSubscriptionId
+      const hasScheduleSource =
+        selectedFollowingSubscriptionId !== null ||
+        selectedPlanId !== null ||
+        (planAheadOwned && selectedPlanIdSecondary !== null)
+
+      if (!hasScheduleSource) {
+        setPlannedWorkouts([])
+        setPlannedWorkoutsSecondary([])
+        setOptimisticPlannedWorkouts(null)
+        setPlansError(null)
+        setPlansLoading(false)
+        return
+      }
+      if (mainNav === 'planning' && planningTab === 'plans') {
+        if (!cancelled) setPlansLoading(false)
+        return
+      }
+      setPlansLoading(true)
+      setPlansError(null)
+      try {
+        const dualPlanAhead =
+          planAheadOwned &&
+          selectedPlanId &&
+          selectedPlanIdSecondary &&
+          selectedPlanId !== selectedPlanIdSecondary
+
+        if (dualPlanAhead) {
+          const [res1, res2] = await Promise.all([
+            authedFetch(
+              `/api/app/plans/${encodeURIComponent(selectedPlanId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+            ),
+            authedFetch(
+              `/api/app/plans/${encodeURIComponent(selectedPlanIdSecondary!)}/planned-workouts?from=${encodeURIComponent(weekStartSecondary)}&to=${encodeURIComponent(weekEndSecondary)}`
+            ),
+          ])
+          if (!res1.ok) {
+            const data = (await res1.json().catch(() => ({}))) as { error?: string }
+            throw new Error(data.error || `HTTP ${res1.status}`)
+          }
+          if (!res2.ok) {
+            const data = (await res2.json().catch(() => ({}))) as { error?: string }
+            throw new Error(data.error || `HTTP ${res2.status}`)
+          }
+          const [data1, data2] = await Promise.all([
+            res1.json() as Promise<{ plannedWorkouts?: PlannedWorkout[] }>,
+            res2.json() as Promise<{ plannedWorkouts?: PlannedWorkout[] }>,
+          ])
+          if (cancelled) return
+          setPlannedWorkouts(data1.plannedWorkouts ?? [])
+          setPlannedWorkoutsSecondary(data2.plannedWorkouts ?? [])
+          setOptimisticPlannedWorkouts(null)
+        } else if (planAheadOwned) {
+          if (selectedPlanId) {
+            const res = await authedFetch(
+              `/api/app/plans/${encodeURIComponent(selectedPlanId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+            )
+            const payload = (await res.json().catch(() => ({}))) as { error?: string; plannedWorkouts?: PlannedWorkout[] }
+            if (!res.ok) {
+              throw new Error(payload.error || `HTTP ${res.status}`)
+            }
+            if (cancelled) return
+            setPlannedWorkouts(payload.plannedWorkouts ?? [])
+          } else if (!cancelled) {
+            setPlannedWorkouts([])
+          }
+          const secId =
+            selectedPlanIdSecondary && selectedPlanIdSecondary !== selectedPlanId
+              ? selectedPlanIdSecondary
+              : null
+          if (secId) {
+            const res2 = await authedFetch(
+              `/api/app/plans/${encodeURIComponent(secId)}/planned-workouts?from=${encodeURIComponent(weekStartSecondary)}&to=${encodeURIComponent(weekEndSecondary)}`
+            )
+            const payload2 = (await res2.json().catch(() => ({}))) as {
+              error?: string
+              plannedWorkouts?: PlannedWorkout[]
+            }
+            if (!res2.ok) {
+              throw new Error(payload2.error || `HTTP ${res2.status}`)
+            }
+            if (cancelled) return
+            setPlannedWorkoutsSecondary(payload2.plannedWorkouts ?? [])
+          } else if (!cancelled) {
+            setPlannedWorkoutsSecondary([])
+          }
+          if (!cancelled) setOptimisticPlannedWorkouts(null)
+        } else {
+          const res = selectedFollowingSubscriptionId
+            ? await authedFetch(
+                `/api/app/following-plans/${encodeURIComponent(selectedFollowingSubscriptionId)}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+              )
+            : await authedFetch(
+                `/api/app/plans/${encodeURIComponent(
+                  selectedPlanId!
+                )}/planned-workouts?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekEnd)}`
+              )
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}))
+            throw new Error(data.error || `HTTP ${res.status}`)
+          }
+          const data = (await res.json()) as { plannedWorkouts: PlannedWorkout[] }
+          if (cancelled) return
+          setPlannedWorkouts(data.plannedWorkouts ?? [])
+          setPlannedWorkoutsSecondary([])
+          setOptimisticPlannedWorkouts(null)
+        }
+      } catch (e) {
+        if (cancelled) return
+        setPlansError(e instanceof Error ? e.message : 'Failed to load planned workouts')
+        setPlannedWorkouts([])
+        setPlannedWorkoutsSecondary([])
+        setOptimisticPlannedWorkouts(null)
+      } finally {
+        if (!cancelled) setPlansLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [weekStart, planDayCount, selectedFollowingPlanId])
+  }, [
+    selectedFollowingSubscriptionId,
+    selectedPlanId,
+    selectedPlanIdSecondary,
+    weekStart,
+    weekEnd,
+    weekStartSecondary,
+    weekEndSecondary,
+    mainNav,
+    planningTab,
+  ])
+
+  const refetchFollowingPlansQuiet = useCallback(async () => {
+    try {
+      const token = await user.getIdToken()
+      const res = await fetch('/api/app/following-plans', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) return
+      const data = (await res.json()) as { followingPlans?: FollowingPlanRow[] }
+      setFollowingPlans(normalizeFollowingPlanRows(data.followingPlans))
+    } catch {
+      /* leave list unchanged */
+    }
+  }, [user])
+
+  useEffect(() => {
+    const needFollowingPlans =
+      overview &&
+      ((mainNav === 'planning' &&
+        (planningTab === 'plans' || planningTab === 'plan-ahead' || planningTab === 'today')) ||
+        (mainNav === 'connect' &&
+          (connectTab === 'feed' || connectTab === 'shared-content')))
+    if (!needFollowingPlans) return
+    let cancelled = false
+    ;(async () => {
+      setFollowingPlansLoading(true)
+      setFollowingPlansError(null)
+      try {
+        const res = await authedFetch('/api/app/following-plans')
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}))
+          throw new Error(data.error || `HTTP ${res.status}`)
+        }
+        const data = (await res.json()) as { followingPlans?: FollowingPlanRow[] }
+        if (!cancelled) setFollowingPlans(normalizeFollowingPlanRows(data.followingPlans))
+      } catch (e) {
+        if (!cancelled) {
+          setFollowingPlans([])
+          setFollowingPlansError(
+            e instanceof Error ? e.message : 'Failed to load subscriptions'
+          )
+        }
+      } finally {
+        if (!cancelled) setFollowingPlansLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [mainNav, planningTab, connectTab, overview, user])
+
+  const planningTodayFollowedEntries = useMemo(
+    () =>
+      followingPlans.map((row) => ({
+        subscriptionDocumentId: row.subscriptionDocumentId,
+        plan: followingSubscriptionToWorkoutPlan(row),
+      })),
+    [followingPlans]
+  )
+
+  const workoutPlansForTodayTab = useMemo(
+    () => sortedPlans.filter(planShowsInTodayTab),
+    [sortedPlans]
+  )
 
   useEffect(() => {
     registerResetToDefault(() => {
       setMainNav('home')
       setLibraryTab('favorites')
-      setPlanningTab('plans')
+      setConnectTab('feed')
+      setPlanningTab('plan-ahead')
+      setPlanAheadColumnCount(2)
+      setConnectionsTab('connections')
       setSelectedCollectionId(null)
       setCollectionDetail(null)
-      setSelectedPlanId(null)
+      setSelectedPlanIdRaw(null)
+      setSelectedPlanIdSecondary(null)
+      setSelectedFollowingSubscriptionId(null)
       setSelectedFavoriteWorkout(null)
+      setLibraryShareTarget(null)
     })
     return () => registerResetToDefault(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const hideOverviewStatusChrome =
+    mainNav === 'connect' ||
+    mainNav === 'settings' ||
+    mainNav === 'connections' ||
+    mainNav === 'support'
+
   return (
-    <div className="space-y-6">
-      {(mainNav === 'library' || mainNav === 'planning') && (
-        <div
-          className="flex flex-wrap items-center justify-end gap-2"
-          role="navigation"
-          aria-label="Section tabs"
-        >
-          {mainNav === 'library' && (
-            <div className="inline-flex rounded-md border border-gymnext-muted/40 bg-white p-0.5">
-              <SubNavTab
-                active={libraryTab === 'favorites'}
-                onClick={() => setLibraryTab('favorites')}
-              >
-                Favorites
-              </SubNavTab>
-              <SubNavTab
-                active={libraryTab === 'collections'}
-                onClick={() => setLibraryTab('collections')}
-              >
-                Collections
-              </SubNavTab>
-            </div>
-          )}
-          {mainNav === 'planning' && (
-            <div className="inline-flex rounded-md border border-gymnext-muted/40 bg-white p-0.5">
-              <SubNavTab
-                active={planningTab === 'plans'}
-                onClick={() => setPlanningTab('plans')}
-              >
-                My Plans
-              </SubNavTab>
-              <SubNavTab
-                active={planningTab === 'following'}
-                onClick={() => setPlanningTab('following')}
-              >
-                Following Plans
-              </SubNavTab>
-            </div>
-          )}
+    <div className="flex min-h-0 w-full flex-1 flex-col gap-6">
+      {mainNav === 'home' && (
+        <div className="rounded-lg border border-gymnext-muted/30 bg-white p-6 shadow-sm max-w-xl">
+          <h2 className="text-sm font-semibold text-gray-900">Welcome</h2>
+          <p className="mt-2 text-sm text-gray-600">
+            Use the menu on the left for Planning, Connect, Library, account sections, or settings. Choose the
+            app name in the header anytime to return to this welcome screen.
+          </p>
+        </div>
+      )}
+      {mainNav === 'connect' && (
+        <div className="flex min-h-0 w-full flex-1 flex-col">
+          <ConnectSection
+            connectTab={connectTab}
+            user={user}
+            followedPlansForFeed={followingPlans}
+            onFollowedPlanFromFeed={refetchFollowingPlansQuiet}
+            reloadOverview={reloadOverview}
+            onGoToOwnedPlan={goToPlansWithOwnedPlanSelected}
+            onGoToSubscribedPlanAhead={goToPlanAheadWithFollowedPlanActive}
+            onGoToOwnedWorkout={goToLibraryWithOwnedWorkoutSelected}
+            onGoToOwnedCollection={goToLibraryWithOwnedCollectionSelected}
+          />
+        </div>
+      )}
+      {mainNav === 'connections' && (
+        <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
+          <ConnectionsMembershipsSection connectionsTab={connectionsTab} user={user} />
+        </div>
+      )}
+      {mainNav === 'settings' && (
+        <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
+          <UserSettingsScreen
+            user={user}
+            overview={overview}
+            overviewLoading={overviewLoading}
+            openHandleEditor={openHandleEditor}
+            onProfileUpdated={onProfileUpdated}
+          />
+        </div>
+      )}
+      {mainNav === 'support' && (
+        <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
+          <RecoverDeletedItemsSection user={user} onLibraryChanged={reloadOverview} />
         </div>
       )}
 
-      {mainNav === 'home' && <HomeSection setMainNav={setMainNav} />}
-
-      {overviewLoading && !overview && (
+      {!hideOverviewStatusChrome && overviewLoading && !overview && (
         <p className="text-sm text-gray-500">Loading your data…</p>
       )}
-      {overviewError && (
+      {!hideOverviewStatusChrome && overviewError && (
         <div className="rounded bg-red-50 px-3 py-2 text-xs text-red-700">
           {overviewError}
         </div>
       )}
 
-      {!overview && !overviewLoading && !overviewError && (
+      {!hideOverviewStatusChrome && !overview && !overviewLoading && !overviewError && (
         <p className="text-sm text-gray-500">
           No data found yet. Create workouts and collections in the FlexTimer
           mobile app and they will appear here.
@@ -1781,7 +2447,16 @@ function UserAppLayout({
       )}
 
       {overview && (
-        <>
+        <div
+          className={`flex min-h-0 min-w-0 flex-col ${
+            mainNav === 'connect' ||
+            mainNav === 'settings' ||
+            mainNav === 'connections' ||
+            mainNav === 'support'
+              ? 'hidden'
+              : 'flex-1'
+          }`}
+        >
           {mainNav === 'library' && libraryTab === 'favorites' && (
             <FavoritesSection
               favoritesCollection={favoritesCollection}
@@ -1810,6 +2485,8 @@ function UserAppLayout({
               timerDefaultRestDirection={overview?.timerDefaults?.restDirection}
               maxFavorites={overview?.subscriptionLimits?.maxFavorites ?? UNLIMITED}
               favoritesCount={overview?.counts?.favorites ?? 0}
+              onDuplicateWorkout={handleDuplicateFavoriteWorkout}
+              onOpenContentShare={setLibraryShareTarget}
             />
           )}
           {mainNav === 'library' && libraryTab === 'collections' && (
@@ -1839,32 +2516,79 @@ function UserAppLayout({
               createWorkoutInCollection={doCreateWorkoutInCollection}
               timerDefaultDirection={overview?.timerDefaults?.direction}
               timerDefaultRestDirection={overview?.timerDefaults?.restDirection}
+              onDuplicateWorkout={handleDuplicateFavoriteWorkout}
+              onOpenContentShare={setLibraryShareTarget}
+              expandWorkoutIdWhenDetailMatches={expandWorkoutIdAfterCollectionOpen}
+              onConsumedExpandWorkoutRequest={consumeExpandWorkoutRequest}
             />
           )}
-          {mainNav === 'planning' && (
+          {mainNav === 'library' && libraryTab === 'bookmarks' && (
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <LibraryBookmarksSection user={user} />
+            </div>
+          )}
+          {mainNav === 'planning' && planningTab === 'today' && (
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <PlanningTodaySection
+                user={user}
+                plans={workoutPlansForTodayTab}
+                followedPlans={planningTodayFollowedEntries}
+                onOpenPlanAhead={(target: PlanAheadLookTarget) => {
+                  setMainNav('planning')
+                  setPlanningTab('plan-ahead')
+                  setPlanAheadColumnCount(1)
+                  setSelectedPlanIdSecondary(null)
+                  if (target.kind === 'owned') {
+                    setSelectedFollowingSubscriptionId(null)
+                    setSelectedPlanIdRaw(target.planId)
+                    return
+                  }
+                  setSelectedFollowingSubscriptionId(target.subscriptionDocumentId)
+                  const row = followingPlans.find(
+                    (f) => f.subscriptionDocumentId === target.subscriptionDocumentId
+                  )
+                  setSelectedPlanIdRaw(row?.remotePlanId ?? null)
+                }}
+              />
+            </div>
+          )}
+          {mainNav === 'planning' && (planningTab === 'plans' || planningTab === 'plan-ahead') && (
             <PlansSection
-              viewMode={planningTab === 'following' ? 'following' : 'owned'}
+              listSurfaceTitle={planningTab === 'plan-ahead' ? 'Plan Ahead' : 'Plans'}
+              rightPanelMode={planningTab === 'plans' ? 'plan-admin' : 'schedule'}
+              planAheadColumnCount={planAheadColumnCount}
+              setPlanAheadColumnCount={setPlanAheadColumnCount}
+              reloadFollowingPlans={refetchFollowingPlansQuiet}
               plans={sortedPlans}
+              selectedPlanId={selectedPlanId}
+              setSelectedPlanId={selectOwnedPlanIdClearingFollowIfOwned}
+              selectedPlanIdSecondary={selectedPlanIdSecondary}
+              setSelectedPlanIdSecondary={setSelectedPlanIdSecondary}
+              scheduleSecondPlan={scheduleComparePlan}
+              scheduleSecondByDay={byDaySecondary}
               followingPlans={followingPlans}
               followingPlansLoading={followingPlansLoading}
               followingPlansError={followingPlansError}
-              selectedPlanId={selectedPlanId}
-              selectedFollowingPlanId={selectedFollowingPlanId}
-              setSelectedPlanId={(id) => {
-                setSelectedPlanId(id)
-                if (id) loadPlannedWorkoutsForPlan(id)
-              }}
-              setSelectedFollowingPlanId={(id) => {
-                setSelectedFollowingPlanId(id)
-                if (id) loadPlannedWorkoutsForFollowingPlan(id)
+              selectedFollowingSubscriptionId={selectedFollowingSubscriptionId}
+              setSelectedFollowingSubscriptionId={(subId) => {
+                if (subId !== null) {
+                  setSelectedPlanIdRaw(null)
+                }
+                setSelectedFollowingSubscriptionId(subId)
               }}
               weekStart={weekStart}
               setWeekStart={setWeekStart}
               weekEnd={weekEnd}
+              weekStartSecondary={weekStartSecondary}
+              setWeekStartSecondary={setWeekStartSecondary}
+              weekEndSecondary={weekEndSecondary}
               byDay={byDay}
               planViewMode={planViewMode}
               setPlanViewMode={setPlanViewMode}
               planDayCount={planDayCount}
+              planViewModeSecondary={planViewModeSecondary}
+              setPlanViewModeSecondary={setPlanViewModeSecondary}
+              planDayCountSecondary={planDayCountSecondary}
               plansLoading={plansLoading}
               plansError={plansError}
               onReorderPlanned={handleReorderPlannedWithinDay}
@@ -1872,19 +2596,18 @@ function UserAppLayout({
               onDeletePlanned={handleDeletePlanned}
               user={user}
               reloadPlanned={() => {
-                if (selectedPlanId) loadPlannedWorkoutsForPlan(selectedPlanId)
-                if (selectedFollowingPlanId) loadPlannedWorkoutsForFollowingPlan(selectedFollowingPlanId)
+                void refreshPlannedWorkoutsDisplay()
               }}
-              reloadFollowingPlans={loadFollowingPlans}
               onPlannedWorkoutMetadataSaved={updatePlannedWorkoutMetadataInPlace}
               onCreatePlan={handleCreatePlan}
               onUpdatePlan={handleUpdatePlan}
-              onUpdatePlanSharing={handleUpdatePlanSharing}
+              onSetPlanShowInSchedule={handleSetPlanShowInSchedule}
               onDeletePlan={handleDeletePlan}
               maxPlans={overview?.subscriptionLimits?.maxPlans ?? UNLIMITED}
               plansCount={overview?.counts?.plans ?? 0}
               subscriptionTier={overview?.subscriptionLimits?.tier ?? 'basic'}
-              onReorderPlans={handleReorderPlans}
+              onReorderPlansInSection={handleReorderPlansInSection}
+              onReorderSubscriptions={handleReorderSubscriptions}
               reorderPlansError={reorderPlansError}
               onDismissReorderPlansError={() => setReorderPlansError(null)}
               favoriteWorkouts={favoriteWorkouts}
@@ -1893,257 +2616,470 @@ function UserAppLayout({
               timerDefaults={overview?.timerDefaults}
             />
           )}
-        </>
+        </div>
+      )}
+      {libraryShareTarget && (
+        <ContentShareDialogs
+          user={user}
+          open
+          onClose={() => setLibraryShareTarget(null)}
+          kind={libraryShareTarget.kind}
+          resourceId={libraryShareTarget.id}
+          resourceTitle={libraryShareTarget.title}
+        />
       )}
     </div>
   )
 }
 
-function IconPlanningCalendar({ className }: { className?: string }) {
+function ConnectSection({
+  connectTab,
+  user,
+  followedPlansForFeed,
+  onFollowedPlanFromFeed,
+  reloadOverview,
+  onGoToOwnedPlan,
+  onGoToSubscribedPlanAhead,
+  onGoToOwnedWorkout,
+  onGoToOwnedCollection,
+}: {
+  connectTab: ConnectSubTabId
+  user: User
+  followedPlansForFeed: FollowingPlanRow[]
+  onFollowedPlanFromFeed: () => void | Promise<void>
+  reloadOverview: () => void
+  onGoToOwnedPlan: (planId: string) => void
+  onGoToSubscribedPlanAhead: (ownerUserId: string, remotePlanId: string) => void
+  onGoToOwnedWorkout?: (workoutId: string) => void
+  onGoToOwnedCollection?: (collectionId: string) => void
+}) {
   return (
-    <svg
-      className={className}
-      xmlns="http://www.w3.org/2000/svg"
-      fill="none"
-      viewBox="0 0 24 24"
-      strokeWidth={1.5}
-      stroke="currentColor"
-      aria-hidden
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0121 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5a2.25 2.25 0 012.25 2.25v7.5m-16.5 0a.75.75 0 01.75-.75h2.25a.75.75 0 01.75.75v2.25a.75.75 0 01-.75.75h-2.25a.75.75 0 01-.75-.75v-2.25z"
-      />
-    </svg>
-  )
-}
-
-function IconLibraryBooks({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      xmlns="http://www.w3.org/2000/svg"
-      fill="none"
-      viewBox="0 0 24 24"
-      strokeWidth={1.5}
-      stroke="currentColor"
-      aria-hidden
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 018 18c-2.305 0-4.408.867-6 2.292m0-14.25v14.25"
-      />
-    </svg>
-  )
-}
-
-function IconHome({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      xmlns="http://www.w3.org/2000/svg"
-      fill="none"
-      viewBox="0 0 24 24"
-      strokeWidth={1.5}
-      stroke="currentColor"
-      aria-hidden
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"
-      />
-    </svg>
-  )
-}
-
-function HomeSection({ setMainNav }: { setMainNav: (id: MainNavId) => void }) {
-  return (
-    <div className="rounded-lg border border-gymnext-muted/30 bg-white p-6 shadow-sm">
-      <h2 className="text-sm font-semibold text-gray-900 mb-1">Home</h2>
-      <p className="text-xs text-gray-500 mb-4 max-w-xl">
-        Open a section to work with your workouts and collections, or manage plans and followed plans.
-      </p>
-      <div className="grid gap-3 sm:grid-cols-2 max-w-2xl">
-        <button
-          type="button"
-          onClick={() => setMainNav('planning')}
-          className="flex items-center gap-3 rounded-lg border border-gymnext-muted/40 bg-gymnext-background/40 px-4 py-4 text-left transition-colors hover:bg-gymnext-background hover:border-gymnext-muted/60 focus:outline-none focus:ring-2 focus:ring-gymnext/40"
-        >
-          <span
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-white text-gray-800 border border-gymnext-muted/30"
-            aria-hidden
-          >
-            <IconPlanningCalendar className="h-6 w-6" />
-          </span>
-          <span className="min-w-0">
-            <span className="block text-sm font-semibold text-gray-900">Planning</span>
-            <span className="block text-xs text-gray-600 mt-0.5">Your plans and followed plans</span>
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setMainNav('library')}
-          className="flex items-center gap-3 rounded-lg border border-gymnext-muted/40 bg-gymnext-background/40 px-4 py-4 text-left transition-colors hover:bg-gymnext-background hover:border-gymnext-muted/60 focus:outline-none focus:ring-2 focus:ring-gymnext/40"
-        >
-          <span
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-white text-gray-800 border border-gymnext-muted/30"
-            aria-hidden
-          >
-            <IconLibraryBooks className="h-6 w-6" />
-          </span>
-          <span className="min-w-0">
-            <span className="block text-sm font-semibold text-gray-900">Library</span>
-            <span className="block text-xs text-gray-600 mt-0.5">Favorites and collections</span>
-          </span>
-        </button>
-      </div>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {connectTab === 'hubs' && <MyHubsSection user={user} />}
+      {connectTab === 'shared-content' && (
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <ConnectSharedContentSection
+            user={user}
+            followedPlans={followedPlansForFeed}
+            onFollowedPlansChange={onFollowedPlanFromFeed}
+            reloadOverview={reloadOverview}
+            onGoToOwnedPlan={onGoToOwnedPlan}
+            onGoToSubscribedPlanAhead={onGoToSubscribedPlanAhead}
+          />
+        </div>
+      )}
+      {connectTab === 'feed' && (
+        <ConnectFeedSection
+          user={user}
+          followedPlans={followedPlansForFeed}
+          onFollowedPlanFromFeed={onFollowedPlanFromFeed}
+          reloadOverview={reloadOverview}
+          onGoToOwnedPlan={onGoToOwnedPlan}
+          onGoToSubscribedPlanAhead={onGoToSubscribedPlanAhead}
+          onGoToOwnedWorkout={onGoToOwnedWorkout}
+          onGoToOwnedCollection={onGoToOwnedCollection}
+        />
+      )}
     </div>
   )
 }
 
-function MainNavDrawer({
-  open,
-  onClose,
-  mainNav,
-  setMainNav,
+function ConnectionsMembershipsSection({
+  connectionsTab,
+  user,
 }: {
-  open: boolean
-  onClose: () => void
-  mainNav: MainNavId
-  setMainNav: (id: MainNavId) => void
+  connectionsTab: ConnectionsSubTabId
+  user: User
 }) {
-  useEffect(() => {
-    if (!open) return
-    const prevOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => {
-      document.body.style.overflow = prevOverflow
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [open, onClose])
-
-  if (!open) return null
-
-  const select = (id: MainNavId) => {
-    setMainNav(id)
-    onClose()
+  if (connectionsTab === 'memberships') {
+    return (
+      <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
+        <MembershipsSection user={user} />
+      </div>
+    )
   }
 
-  return createPortal(
-    <>
-      <div
-        className="fixed top-14 left-0 right-0 bottom-0 z-[100] bg-black/40"
-        aria-hidden
-        onClick={onClose}
-      />
-      <aside
-        id="main-nav-drawer"
-        className="fixed left-0 top-14 bottom-0 z-[101] flex w-[min(100vw-0.5rem,18.5rem)] max-w-[min(100vw-0.5rem,85vw)] flex-col bg-white shadow-xl border-r border-gymnext-muted/40"
-        role="dialog"
-        aria-modal="true"
-        aria-label="App sections"
-      >
-        <div className="flex items-center justify-between gap-2 border-b border-gymnext-muted/30 px-3 py-2.5">
-          <span className="text-sm font-semibold text-gray-900">Sections</span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md p-1.5 text-gray-600 hover:bg-gymnext-background hover:text-gray-900"
-            aria-label="Close menu"
-          >
-            <svg
-              className="h-5 w-5"
-              xmlns="http://www.w3.org/2000/svg"
-              fill="none"
-              viewBox="0 0 24 24"
-              strokeWidth={1.5}
-              stroke="currentColor"
-              aria-hidden
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-        <div className="flex flex-col gap-2 p-3">
-          <button
-            type="button"
-            onClick={() => select('home')}
-            className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
-              mainNav === 'home'
-                ? 'text-white shadow-sm'
-                : 'text-gray-800 hover:bg-gymnext-background'
-            }`}
-            style={mainNav === 'home' ? { backgroundColor: '#6B21A8' } : undefined}
-            aria-current={mainNav === 'home' ? 'page' : undefined}
-          >
-            <IconHome className="h-5 w-5 shrink-0 opacity-90" />
-            Home
-          </button>
-          <button
-            type="button"
-            onClick={() => select('planning')}
-            className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
-              mainNav === 'planning'
-                ? 'text-white shadow-sm'
-                : 'text-gray-800 hover:bg-gymnext-background'
-            }`}
-            style={mainNav === 'planning' ? { backgroundColor: '#6B21A8' } : undefined}
-            aria-current={mainNav === 'planning' ? 'page' : undefined}
-          >
-            <IconPlanningCalendar className="h-5 w-5 shrink-0 opacity-90" />
-            Planning
-          </button>
-          <button
-            type="button"
-            onClick={() => select('library')}
-            className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
-              mainNav === 'library'
-                ? 'text-white shadow-sm'
-                : 'text-gray-800 hover:bg-gymnext-background'
-            }`}
-            style={mainNav === 'library' ? { backgroundColor: '#6B21A8' } : undefined}
-            aria-current={mainNav === 'library' ? 'page' : undefined}
-          >
-            <IconLibraryBooks className="h-5 w-5 shrink-0 opacity-90" />
-            Library
-          </button>
-        </div>
-      </aside>
-    </>,
-    document.body
+  return (
+    <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
+      <ConnectionsSection user={user} />
+    </div>
   )
 }
 
-function SubNavTab({
-  active,
-  onClick,
-  children,
+function MainNavSidebar({
+  mainNav,
+  connectionsTab,
+  libraryTab,
+  connectTab,
+  planningTab,
+  pendingConnectionInvites,
+  pendingMembershipInvites,
+  pendingHubJoinRequests,
+  setMainNav,
+  setConnectionsTab,
+  setLibraryTab,
+  setConnectTab,
+  setPlanningTab,
+  setPlanAheadColumnCount,
 }: {
-  active: boolean
-  onClick: () => void
-  children: React.ReactNode
+  mainNav: MainNavId
+  connectionsTab: ConnectionsSubTabId
+  libraryTab: LibrarySubTabId
+  connectTab: ConnectSubTabId
+  planningTab: PlanningSubTabId
+  pendingConnectionInvites: number
+  pendingMembershipInvites: number
+  pendingHubJoinRequests: number
+  setMainNav: (id: MainNavId) => void
+  setConnectionsTab: (id: ConnectionsSubTabId) => void
+  setLibraryTab: (id: LibrarySubTabId) => void
+  setConnectTab: (id: ConnectSubTabId) => void
+  setPlanningTab: (id: PlanningSubTabId) => void
+  setPlanAheadColumnCount: (count: 1 | 2) => void
 }) {
+  const select = (id: MainNavId) => {
+    setMainNav(id)
+  }
+
+  const selectConnectionsSub = (tab: ConnectionsSubTabId) => {
+    setConnectionsTab(tab)
+    setMainNav('connections')
+  }
+
+  const selectLibrarySub = (tab: LibrarySubTabId) => {
+    setLibraryTab(tab)
+    setMainNav('library')
+  }
+
+  const selectConnectSub = (tab: ConnectSubTabId) => {
+    setConnectTab(tab)
+    setMainNav('connect')
+  }
+
+  const selectPlanningSub = (tab: PlanningSubTabId) => {
+    if (tab === 'plan-ahead' && planningTab === 'today') {
+      setPlanAheadColumnCount(1)
+    }
+    setPlanningTab(tab)
+    setMainNav('planning')
+  }
+
+  const [accountOpen, setAccountOpen] = useState(false)
+
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-        active
-          ? 'text-white shadow-sm'
-          : 'text-gray-700 hover:bg-gymnext-background'
-      }`}
-      style={active ? { backgroundColor: '#6B21A8' } : undefined}
-      aria-current={active ? 'true' : undefined}
+    <aside
+      id="main-nav-sidebar"
+      className="flex h-full w-[240px] shrink-0 flex-col border-r border-neutral-200 bg-neutral-50"
+      aria-label="App sections"
     >
-      {children}
-    </button>
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
+            <div className="flex flex-col gap-2" role="group" aria-labelledby="main-nav-planning-heading">
+              <p
+                className="px-1 text-xs font-semibold uppercase tracking-wide text-gray-500"
+                id="main-nav-planning-heading"
+              >
+                Planning
+              </p>
+              <button
+                type="button"
+                onClick={() => selectPlanningSub('today')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'planning' && planningTab === 'today'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'planning' && planningTab === 'today'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={mainNav === 'planning' && planningTab === 'today' ? 'page' : undefined}
+              >
+                <CalendarCheck2 className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                Today&apos;s Plan
+              </button>
+              <button
+                type="button"
+                onClick={() => selectPlanningSub('plan-ahead')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'planning' && planningTab === 'plan-ahead'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'planning' && planningTab === 'plan-ahead'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={mainNav === 'planning' && planningTab === 'plan-ahead' ? 'page' : undefined}
+              >
+                <CalendarRange className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                Plan Ahead
+              </button>
+              <button
+                type="button"
+                onClick={() => selectPlanningSub('plans')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'planning' && planningTab === 'plans'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'planning' && planningTab === 'plans'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={mainNav === 'planning' && planningTab === 'plans' ? 'page' : undefined}
+              >
+                <CalendarDays className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                Plans
+              </button>
+            </div>
+            <div className="flex flex-col gap-2" role="group" aria-labelledby="main-nav-library-heading">
+              <p
+                className="px-1 text-xs font-semibold uppercase tracking-wide text-gray-500"
+                id="main-nav-library-heading"
+              >
+                Library
+              </p>
+              <button
+                type="button"
+                onClick={() => selectLibrarySub('favorites')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'library' && libraryTab === 'favorites'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'library' && libraryTab === 'favorites'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={mainNav === 'library' && libraryTab === 'favorites' ? 'page' : undefined}
+              >
+                <Star className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                Favorites
+              </button>
+              <button
+                type="button"
+                onClick={() => selectLibrarySub('collections')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'library' && libraryTab === 'collections'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'library' && libraryTab === 'collections'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={mainNav === 'library' && libraryTab === 'collections' ? 'page' : undefined}
+              >
+                <Library className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                Collections
+              </button>
+              <button
+                type="button"
+                onClick={() => selectLibrarySub('bookmarks')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'library' && libraryTab === 'bookmarks'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'library' && libraryTab === 'bookmarks'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={mainNav === 'library' && libraryTab === 'bookmarks' ? 'page' : undefined}
+              >
+                <Bookmark className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                Bookmarks
+              </button>
+            </div>
+            <div className="flex flex-col gap-2" role="group" aria-labelledby="main-nav-connect-heading">
+              <p
+                className="px-1 text-xs font-semibold uppercase tracking-wide text-gray-500"
+                id="main-nav-connect-heading"
+              >
+                Connect
+              </p>
+              <button
+                type="button"
+                onClick={() => selectConnectSub('feed')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'connect' && connectTab === 'feed'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'connect' && connectTab === 'feed'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={mainNav === 'connect' && connectTab === 'feed' ? 'page' : undefined}
+              >
+                <Newspaper className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                Activity
+              </button>
+              <button
+                type="button"
+                onClick={() => selectConnectSub('shared-content')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'connect' && connectTab === 'shared-content'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'connect' && connectTab === 'shared-content'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={
+                  mainNav === 'connect' && connectTab === 'shared-content' ? 'page' : undefined
+                }
+              >
+                <Share2 className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                Shared Content
+              </button>
+              <button
+                type="button"
+                onClick={() => selectConnectionsSub('connections')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'connections' && connectionsTab === 'connections'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'connections' && connectionsTab === 'connections'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={
+                  mainNav === 'connections' && connectionsTab === 'connections' ? 'page' : undefined
+                }
+                aria-label={
+                  pendingConnectionInvites > 0
+                    ? `Connections, ${pendingConnectionInvites} pending invitation${pendingConnectionInvites === 1 ? '' : 's'}`
+                    : 'Connections'
+                }
+              >
+                <Users className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                <span className="min-w-0 flex-1">Connections</span>
+                <NavCountBadge count={pendingConnectionInvites} />
+              </button>
+              <button
+                type="button"
+                onClick={() => selectConnectionsSub('memberships')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'connections' && connectionsTab === 'memberships'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'connections' && connectionsTab === 'memberships'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={
+                  mainNav === 'connections' && connectionsTab === 'memberships' ? 'page' : undefined
+                }
+                aria-label={
+                  pendingMembershipInvites > 0
+                    ? `Memberships, ${pendingMembershipInvites} pending invitation${pendingMembershipInvites === 1 ? '' : 's'}`
+                    : 'Memberships'
+                }
+              >
+                <Link2 className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                <span className="min-w-0 flex-1">Memberships</span>
+                <NavCountBadge count={pendingMembershipInvites} />
+              </button>
+              <button
+                type="button"
+                onClick={() => selectConnectSub('hubs')}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                  mainNav === 'connect' && connectTab === 'hubs'
+                    ? 'text-white shadow-sm'
+                    : 'text-gray-800 hover:bg-gymnext-background'
+                }`}
+                style={
+                  mainNav === 'connect' && connectTab === 'hubs'
+                    ? { backgroundColor: '#6B21A8' }
+                    : undefined
+                }
+                aria-current={mainNav === 'connect' && connectTab === 'hubs' ? 'page' : undefined}
+                aria-label={
+                  pendingHubJoinRequests > 0
+                    ? `Hubs, ${pendingHubJoinRequests} pending join request${pendingHubJoinRequests === 1 ? '' : 's'}`
+                    : 'Hubs'
+                }
+              >
+                <LayoutGrid className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                <span className="min-w-0 flex-1">Hubs</span>
+                <NavCountBadge count={pendingHubJoinRequests} />
+              </button>
+            </div>
+          </div>
+          <div className="border-t border-gymnext-muted/30 bg-gymnext-background/40 p-3 flex flex-col gap-2 shrink-0">
+            {accountOpen && (
+              <div
+                id="main-nav-account-panel"
+                className="flex flex-col gap-2 rounded-lg border border-gymnext-muted/30 bg-gymnext-background/60 p-2"
+                role="group"
+                aria-label="Account"
+              >
+                <button
+                  type="button"
+                  onClick={() => select('settings')}
+                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                    mainNav === 'settings'
+                      ? 'text-white shadow-sm'
+                      : 'text-gray-800 hover:bg-gymnext-background'
+                  }`}
+                  style={mainNav === 'settings' ? { backgroundColor: '#6B21A8' } : undefined}
+                  aria-current={mainNav === 'settings' ? 'page' : undefined}
+                >
+                  <Settings className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                  User Settings
+                </button>
+                <button
+                  type="button"
+                  onClick={() => select('support')}
+                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                    mainNav === 'support'
+                      ? 'text-white shadow-sm'
+                      : 'text-gray-800 hover:bg-gymnext-background'
+                  }`}
+                  style={mainNav === 'support' ? { backgroundColor: '#6B21A8' } : undefined}
+                  aria-current={mainNav === 'support' ? 'page' : undefined}
+                >
+                  <ArchiveRestore className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                  Recover Deleted Items
+                </button>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setAccountOpen((o) => !o)}
+              className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-3 text-left text-sm font-semibold text-gray-800 hover:bg-gymnext-background/80"
+              aria-expanded={accountOpen}
+              aria-controls="main-nav-account-panel"
+            >
+              <span className="flex items-center gap-3 min-w-0">
+                <Users className="h-5 w-5 shrink-0 opacity-80" strokeWidth={2} aria-hidden />
+                Account
+              </span>
+              {accountOpen ? (
+                <ChevronDown className="h-5 w-5 shrink-0 opacity-80" strokeWidth={2} aria-hidden />
+              ) : (
+                <ChevronUp className="h-5 w-5 shrink-0 opacity-80" strokeWidth={2} aria-hidden />
+              )}
+            </button>
+          </div>
+        </div>
+    </aside>
   )
 }
 
@@ -2558,7 +3494,7 @@ function CreateWorkoutDialog({
                     value={workoutDetails}
                     onChange={(e) => setWorkoutDetails(e.target.value)}
                     className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                    placeholder="Rep scheme, weights, movements, etc."
+                    placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
                   />
                 </div>
               )}
@@ -2734,7 +3670,7 @@ function CreateWorkoutDialog({
                     value={newSegmentDetails}
                     onChange={(e) => setNewSegmentDetails(e.target.value)}
                     className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                    placeholder="Rep scheme, weights, movements, etc."
+                    placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
                   />
                 </div>
               </div>
@@ -2827,6 +3763,8 @@ function FavoritesSection({
   timerDefaultRestDirection,
   maxFavorites,
   favoritesCount,
+  onDuplicateWorkout,
+  onOpenContentShare,
 }: {
   favoritesCollection: WorkoutCollection | undefined
   favoriteWorkouts: Workout[]
@@ -2861,17 +3799,14 @@ function FavoritesSection({
   timerDefaultRestDirection?: number
   maxFavorites?: number
   favoritesCount?: number
+  onDuplicateWorkout: (workoutId: string, collectionIds: string[]) => Promise<Workout>
+  onOpenContentShare?: (target: LibraryShareTarget) => void
 }) {
   const [editingWorkout, setEditingWorkout] = useState<Workout | null>(null)
   const [editName, setEditName] = useState('')
   const [editDescription, setEditDescription] = useState('')
   const [editBusy, setEditBusy] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
-
-  const [editDetailsWorkout, setEditDetailsWorkout] = useState<Workout | null>(null)
-  const [editDetailsValue, setEditDetailsValue] = useState('')
-  const [editDetailsBusy, setEditDetailsBusy] = useState(false)
-  const [editDetailsError, setEditDetailsError] = useState<string | null>(null)
 
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false)
@@ -2881,6 +3816,11 @@ function FavoritesSection({
   const [bookmarkDialogOpen, setBookmarkDialogOpen] = useState(false)
   const [bookmarkSelectedIds, setBookmarkSelectedIds] = useState<Set<string>>(new Set())
   const [bookmarkSaving, setBookmarkSaving] = useState(false)
+
+  const [duplicateDialogOpen, setDuplicateDialogOpen] = useState(false)
+  const [duplicateSelectedIds, setDuplicateSelectedIds] = useState<Set<string>>(new Set())
+  const [duplicateBusy, setDuplicateBusy] = useState(false)
+  const [duplicateError, setDuplicateError] = useState<string | null>(null)
 
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [unsavedConfirmOpen, setUnsavedConfirmOpen] = useState(false)
@@ -2963,10 +3903,11 @@ function FavoritesSection({
     setEditError(null)
     setEditBusy(true)
     try {
-      await onSave(editingWorkout.id, {
+      const patch: Record<string, unknown> = {
         workoutName: editName.trim() || null,
         workoutDescription: editDescription.trim() || null,
-      })
+      }
+      await onSave(editingWorkout.id, patch)
       setEditingWorkout(null)
       setEditName('')
       setEditDescription('')
@@ -2978,28 +3919,31 @@ function FavoritesSection({
   }
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.8fr)]">
-      <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
-        <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex items-center justify-between gap-2">
+    <>
+    <div className="grid min-h-[28rem] w-full flex-1 gap-6 lg:min-h-0 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.8fr)] lg:grid-rows-[minmax(0,1fr)]">
+      <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-gymnext-muted/30 bg-white">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3">
           <h3 className="text-sm font-medium text-gray-800">
             Favorites
             {favoritesLabel}
           </h3>
-          {favoritesCollection && (
-            <button
-              type="button"
-              onClick={onOpenCreateDialog}
-              disabled={atFavoritesLimit}
-              title={atFavoritesLimit ? `Your plan allows up to ${maxFav} favorites. Upgrade to add more.` : undefined}
-              className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90 disabled:opacity-50"
-              style={{ backgroundColor: '#6B21A8' }}
-            >
-              Create favorite
-            </button>
-          )}
+          <div className="flex shrink-0 items-center gap-2">
+            {favoritesCollection && (
+              <button
+                type="button"
+                onClick={onOpenCreateDialog}
+                disabled={atFavoritesLimit}
+                title={atFavoritesLimit ? `Your plan allows up to ${maxFav} favorites. Upgrade to add more.` : undefined}
+                className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90 disabled:opacity-50"
+                style={{ backgroundColor: '#6B21A8' }}
+              >
+                Create favorite
+              </button>
+            )}
+          </div>
         </div>
         {reorderError && (
-          <div className="px-4 py-2 flex items-center justify-between gap-2 bg-red-50 border-b border-red-200">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-red-200 bg-red-50 px-4 py-2">
             <p className="text-xs text-red-800">{reorderError}</p>
             <button
               type="button"
@@ -3010,6 +3954,7 @@ function FavoritesSection({
             </button>
           </div>
         )}
+        <div className="min-h-0 flex-1 overflow-y-auto">
         {!favoritesCollection ? (
           <p className="px-4 py-6 text-sm text-gray-500">
             No favorites collection found. Mark workouts as favorites in the
@@ -3021,7 +3966,7 @@ function FavoritesSection({
           </p>
         ) : (
           <ul
-            className="divide-y divide-gray-200 max-h-[60vh] overflow-y-auto"
+            className="divide-y divide-gray-200"
             onDragOver={(e) => {
               e.preventDefault()
               e.dataTransfer.dropEffect = 'move'
@@ -3114,11 +4059,15 @@ function FavoritesSection({
                 data-index={index}
                 onDragOver={handleDragOver}
                 onDrop={handleDrop}
-                className={`pl-1 pr-4 py-3 flex items-center gap-3 border-l-8 hover:bg-gray-100 ${
+                className={`pl-3 pr-4 py-3 flex items-center gap-3 hover:bg-gray-100 ${
                   isDragging ? 'opacity-50' : ''
                 }`}
-                style={{ borderLeftColor: barColor }}
               >
+                <span
+                  className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem]"
+                  style={{ backgroundColor: barColor }}
+                  aria-hidden
+                />
                 <span
                   draggable
                   onDragStart={handleDragStart}
@@ -3128,7 +4077,7 @@ function FavoritesSection({
                   title="Drag to reorder"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  ⋮⋮
+                  <DragReorderGrip />
                 </span>
                 {isSelected && (
                   <span className="shrink-0 text-[#6B21A8]" aria-label="Current workout">
@@ -3173,12 +4122,13 @@ function FavoritesSection({
             )}
           </ul>
         )}
+        </div>
       </div>
 
-      <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
+      <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-gymnext-muted/30 bg-white">
         {selectedWorkout ? (
           <>
-            <div className="px-4 py-3 border-b border-gray-100 flex items-start justify-between gap-2 relative">
+            <div className="relative flex shrink-0 items-start justify-between gap-2 border-b border-gray-100 px-4 py-3">
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-gray-900">
                   {getWorkoutDisplayName(selectedWorkout) || selectedWorkout.workoutId}
@@ -3220,18 +4170,20 @@ function FavoritesSection({
                       >
                         Edit workout
                       </button>
-                      {selectedWorkout.type === 'SingleSegmentWorkout' && (
+                      {onOpenContentShare && (
                         <button
                           type="button"
-                          className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                          className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
                           onClick={() => {
                             setMoreMenuOpen(false)
-                            setEditDetailsWorkout(selectedWorkout)
-                            setEditDetailsValue((selectedWorkout as { workoutDetails?: string | null }).workoutDetails ?? '')
-                            setEditDetailsError(null)
+                            onOpenContentShare({
+                              kind: 'workout',
+                              id: selectedWorkout.id,
+                              title: getWorkoutDisplayName(selectedWorkout) || selectedWorkout.workoutId,
+                            })
                           }}
                         >
-                          Edit workout details
+                          Share workout
                         </button>
                       )}
                       <button
@@ -3249,7 +4201,19 @@ function FavoritesSection({
                           setBookmarkDialogOpen(true)
                         }}
                       >
-                        Update bookmarks
+                        Update collections
+                      </button>
+                      <button
+                        type="button"
+                        className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        onClick={() => {
+                          setMoreMenuOpen(false)
+                          setDuplicateSelectedIds(new Set())
+                          setDuplicateError(null)
+                          setDuplicateDialogOpen(true)
+                        }}
+                      >
+                        Duplicate workout
                       </button>
                       <button
                         type="button"
@@ -3280,7 +4244,7 @@ function FavoritesSection({
                 )}
               </div>
             </div>
-            <div className="max-h-[60vh] overflow-y-auto">
+            <div className="min-h-0 flex-1 overflow-y-auto">
               <FavoritesDetailPanel
                 workout={selectedWorkout}
                 ref={detailPanelRef}
@@ -3293,11 +4257,12 @@ function FavoritesSection({
             </div>
           </>
         ) : (
-          <div className="px-4 py-12 text-center text-sm text-gray-500">
-            Select a workout from the list to view and edit its schedule.
+          <div className="flex flex-1 items-center justify-center px-4 py-12 text-center text-sm text-gray-500">
+            Select a workout to see its details
           </div>
         )}
       </div>
+    </div>
 
       {bookmarkDialogOpen && selectedWorkout && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -3308,7 +4273,7 @@ function FavoritesSection({
           />
           <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg flex flex-col max-h-[80vh]">
             <div className="border-b border-gymnext-muted/30 px-4 py-3 shrink-0">
-              <h3 className="text-sm font-semibold text-gray-800">Update bookmarks</h3>
+              <h3 className="text-sm font-semibold text-gray-800">Update collections</h3>
               <p className="text-xs text-gray-500 mt-0.5">
                 Choose which collections include this workout
               </p>
@@ -3404,6 +4369,99 @@ function FavoritesSection({
         </div>
       )}
 
+      {duplicateDialogOpen && selectedWorkout && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !duplicateBusy && setDuplicateDialogOpen(false)}
+          />
+          <div className="relative flex max-h-[80vh] w-full max-w-sm flex-col rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="shrink-0 border-b border-gymnext-muted/30 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-800">Duplicate workout</h3>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {duplicateError && (
+                <p className="mb-2 px-2 text-xs text-red-600" role="alert">
+                  {duplicateError}
+                </p>
+              )}
+              {allCollections.map((c) => {
+                const isChecked = duplicateSelectedIds.has(c.id)
+                const displayName = c.id === 'favorite' ? 'Favorites' : c.workoutCollectionName
+                const favoritesAtLimitCannotAdd =
+                  c.id === 'favorite' && atFavoritesLimit && !isChecked
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    disabled={favoritesAtLimitCannotAdd}
+                    title={
+                      favoritesAtLimitCannotAdd
+                        ? `Favorites is at its limit (${maxFav}). Upgrade to add more.`
+                        : undefined
+                    }
+                    onClick={() => {
+                      if (favoritesAtLimitCannotAdd) return
+                      setDuplicateSelectedIds((prev) => {
+                        const next = new Set(prev)
+                        if (next.has(c.id)) next.delete(c.id)
+                        else next.add(c.id)
+                        return next
+                      })
+                    }}
+                    className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
+                  >
+                    <span
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border ${
+                        isChecked
+                          ? 'bg-gymnext border-gymnext text-white'
+                          : 'border-gray-300 bg-white'
+                      }`}
+                      style={isChecked ? { backgroundColor: '#6B21A8', borderColor: '#6B21A8' } : undefined}
+                    >
+                      {isChecked ? '✓' : ''}
+                    </span>
+                    <span className="truncate text-sm font-medium text-gray-900">{displayName}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-gymnext-muted/30 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setDuplicateDialogOpen(false)}
+                disabled={duplicateBusy}
+                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={duplicateBusy || duplicateSelectedIds.size === 0}
+                onClick={async () => {
+                  if (!selectedWorkout) return
+                  setDuplicateBusy(true)
+                  setDuplicateError(null)
+                  try {
+                    await onDuplicateWorkout(selectedWorkout.id, [...duplicateSelectedIds])
+                    setDuplicateDialogOpen(false)
+                  } catch (e) {
+                    setDuplicateError(e instanceof Error ? e.message : 'Failed to duplicate workout')
+                  } finally {
+                    setDuplicateBusy(false)
+                  }
+                }}
+                className="rounded px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                style={{ backgroundColor: '#6B21A8' }}
+              >
+                {duplicateBusy ? 'Duplicating…' : 'Duplicate'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {removeConfirmOpen && selectedWorkout && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
@@ -3447,7 +4505,7 @@ function FavoritesSection({
           />
           <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg p-4">
             <p className="text-sm text-gray-800">
-              Delete this workout? It can be recovered from deleted items.
+              Delete this workout?
             </p>
             <div className="flex justify-end gap-2 mt-4">
               <button
@@ -3603,66 +4661,6 @@ function FavoritesSection({
         </div>
       )}
 
-      {editDetailsWorkout && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/50"
-            aria-hidden
-            onClick={() => !editDetailsBusy && setEditDetailsWorkout(null)}
-          />
-          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
-            <div className="border-b border-gymnext-muted/30 px-4 py-3">
-              <h3 className="text-sm font-semibold text-gray-800">Edit workout details</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Rep scheme, weights, movements, etc.</p>
-            </div>
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault()
-                if (!editDetailsWorkout) return
-                setEditDetailsBusy(true)
-                setEditDetailsError(null)
-                try {
-                  await onSave(editDetailsWorkout.id, { workoutDetails: editDetailsValue.trim() || null })
-                  setEditDetailsWorkout(null)
-                } catch (err) {
-                  setEditDetailsError(err instanceof Error ? err.message : 'Failed to save')
-                } finally {
-                  setEditDetailsBusy(false)
-                }
-              }}
-              className="p-4 space-y-4"
-            >
-              <textarea
-                rows={8}
-                value={editDetailsValue}
-                onChange={(e) => setEditDetailsValue(e.target.value)}
-                className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
-              />
-              {editDetailsError && <p className="text-xs text-red-600">{editDetailsError}</p>}
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditDetailsWorkout(null)}
-                  disabled={editDetailsBusy}
-                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={editDetailsBusy}
-                  className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
-                  style={{ backgroundColor: '#6B21A8' }}
-                >
-                  {editDetailsBusy ? 'Saving…' : 'Save'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {createDialogOpen && favoritesCollection && (
         <CreateWorkoutDialog
           onClose={onCloseCreateDialog}
@@ -3673,6 +4671,56 @@ function FavoritesSection({
           timerDefaultRestDirection={timerDefaultRestDirection}
           timerModeOptions={FAVORITE_CREATABLE_TIMER_MODES}
         />
+      )}
+    </>
+  )
+}
+
+function trimWorkoutDetailsForPreview(workout: {
+  type?: string
+  workoutDetails?: string | null
+}): string {
+  if (workout.type === 'MultiSegmentWorkout') return ''
+  return (workout.workoutDetails ?? '').trim()
+}
+
+function WorkoutDetailsPreview({ details }: { details: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const [truncates, setTruncates] = useState(false)
+  const contentRef = useRef<HTMLParagraphElement>(null)
+
+  useEffect(() => {
+    setExpanded(false)
+  }, [details])
+
+  useEffect(() => {
+    if (expanded) return
+    const el = contentRef.current
+    if (!el) return
+    const id = requestAnimationFrame(() => {
+      setTruncates(el.scrollHeight > el.clientHeight + 1)
+    })
+    return () => cancelAnimationFrame(id)
+  }, [details, expanded])
+
+  return (
+    <div className="mb-4 border-b border-gray-200 pb-4">
+      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">Workout details</p>
+      <p
+        ref={contentRef}
+        className={`whitespace-pre-wrap break-words text-sm text-gray-800 ${expanded ? '' : 'line-clamp-3'}`}
+      >
+        {details}
+      </p>
+      {truncates && (
+        <button
+          type="button"
+          className="mt-2 text-xs font-medium hover:underline"
+          style={{ color: '#6B21A8' }}
+          onClick={() => setExpanded((e) => !e)}
+        >
+          {expanded ? 'Show less' : 'Expand…'}
+        </button>
       )}
     </div>
   )
@@ -3705,6 +4753,11 @@ const FavoritesDetailPanel = forwardRef<
 }, ref: React.Ref<{ save: () => Promise<void> }>) {
   const [name, setName] = useState(workout.workoutName ?? '')
   const [description, setDescription] = useState(workout.workoutDescription ?? '')
+  const [workoutDetails, setWorkoutDetails] = useState(() =>
+    workout.type === 'SingleSegmentWorkout'
+      ? ((workout as { workoutDetails?: string | null }).workoutDetails ?? '')
+      : ''
+  )
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isDirty, setIsDirty] = useState(false)
@@ -3752,8 +4805,21 @@ const FavoritesDetailPanel = forwardRef<
   useEffect(() => {
     setName(workout.workoutName ?? '')
     setDescription(workout.workoutDescription ?? '')
+    setWorkoutDetails(
+      workout.type === 'SingleSegmentWorkout'
+        ? ((workout as { workoutDetails?: string | null }).workoutDetails ?? '')
+        : ''
+    )
     setIsDirty(false)
-  }, [workout.id, workout.workoutName, workout.workoutDescription])
+  }, [
+    workout.id,
+    workout.workoutName,
+    workout.workoutDescription,
+    workout.type,
+    workout.type === 'SingleSegmentWorkout'
+      ? (workout as { workoutDetails?: string | null }).workoutDetails
+      : null,
+  ])
 
   useEffect(() => {
     if (parsed) {
@@ -3818,6 +4884,7 @@ const FavoritesDetailPanel = forwardRef<
         }) as { workoutSchedule: string; direction: boolean }
         await onSave(workout.id, {
           ...nameDesc,
+          workoutDetails: workoutDetails.trim() || null,
           timerMode: scheduleMode,
           workoutSchedule: built.workoutSchedule,
           direction: built.direction,
@@ -3840,6 +4907,7 @@ const FavoritesDetailPanel = forwardRef<
     workout,
     name,
     description,
+    workoutDetails,
     isSingle,
     scheduleMode,
     scheduleOptions,
@@ -4016,6 +5084,25 @@ const FavoritesDetailPanel = forwardRef<
             />
           </div>
         </>
+      )}
+
+      {isSingle && (
+        <div>
+          <label htmlFor="fav-workout-details" className="block text-xs font-medium text-gray-700 mb-1">
+            Workout details (optional)
+          </label>
+          <textarea
+            id="fav-workout-details"
+            rows={3}
+            value={workoutDetails}
+            onChange={(e) => {
+              setWorkoutDetails(e.target.value)
+              setIsDirty(true)
+            }}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+            placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
+          />
+        </div>
       )}
 
       {isSingle && (
@@ -4206,7 +5293,7 @@ const FavoritesDetailPanel = forwardRef<
                     value={newSegmentDetails}
                     onChange={(e) => setNewSegmentDetails(e.target.value)}
                     className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                    placeholder="Rep scheme, weights, movements, etc."
+                    placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
                   />
                 </div>
               </div>
@@ -4382,7 +5469,7 @@ const FavoritesDetailPanel = forwardRef<
                     value={editSegmentDetails}
                     onChange={(e) => setEditSegmentDetails(e.target.value)}
                     className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                    placeholder="Rep scheme, weights, movements, etc."
+                    placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
                   />
                 </div>
               </div>
@@ -4475,6 +5562,30 @@ const FavoritesDetailPanel = forwardRef<
   )
 })
 
+/** 2×3 dot grip for reorder rows (matches stripe → grip → icon layout). */
+function DragReorderGrip() {
+  return (
+    <span
+      className="grid grid-cols-2 gap-x-[3px] gap-y-[2px] leading-none select-none"
+      aria-hidden
+    >
+      {Array.from({ length: 6 }, (__, i) => (
+        <span key={i} className="h-[2px] w-[2px] shrink-0 rounded-full bg-gray-300" />
+      ))}
+    </span>
+  )
+}
+
+function CollectionFolderIcon({ className = 'text-amber-800' }: { className?: string }) {
+  return (
+    <span className={`shrink-0 ${className}`} aria-hidden>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5">
+        <path d="M19.5 21a3 3 0 003-3v-4.875a3 3 0 00-.684-1.9l-1.425-1.9a3 3 0 00-2.4-1.2H15.75l-.787-1.05A3 3 0 0012.422 6H4.5a3 3 0 00-3 3v9a3 3 0 003 3h15z" />
+      </svg>
+    </span>
+  )
+}
+
 function CollectionsSection({
   collections,
   collectionDetail,
@@ -4501,6 +5612,10 @@ function CollectionsSection({
   createWorkoutInCollection,
   timerDefaultDirection,
   timerDefaultRestDirection,
+  onDuplicateWorkout,
+  onOpenContentShare,
+  expandWorkoutIdWhenDetailMatches,
+  onConsumedExpandWorkoutRequest,
 }: {
   collections: WorkoutCollection[]
   collectionDetail: { collection: WorkoutCollection; workouts: Workout[] } | null
@@ -4539,6 +5654,11 @@ function CollectionsSection({
   ) => Promise<Workout>
   timerDefaultDirection?: boolean
   timerDefaultRestDirection?: number
+  onDuplicateWorkout: (workoutId: string, collectionIds: string[]) => Promise<Workout>
+  onOpenContentShare?: (target: LibraryShareTarget) => void
+  /** When set and `collectionDetail` contains this workout id, expand that row (e.g. deep-link from feed). */
+  expandWorkoutIdWhenDetailMatches?: string | null
+  onConsumedExpandWorkoutRequest?: () => void
 }) {
   const [createOpen, setCreateOpen] = useState(false)
   const [createName, setCreateName] = useState('')
@@ -4552,21 +5672,26 @@ function CollectionsSection({
   const [editMetaBusy, setEditMetaBusy] = useState(false)
   const [editMetaError, setEditMetaError] = useState<string | null>(null)
 
-  const [editDetailsWorkout, setEditDetailsWorkout] = useState<Workout | null>(null)
-  const [editDetailsValue, setEditDetailsValue] = useState('')
-  const [editDetailsBusy, setEditDetailsBusy] = useState(false)
-  const [editDetailsError, setEditDetailsError] = useState<string | null>(null)
-
   const [collectionMoreMenuOpen, setCollectionMoreMenuOpen] = useState(false)
   const [collectionDeleteConfirmOpen, setCollectionDeleteConfirmOpen] = useState(false)
 
   const [expandedWorkoutId, setExpandedWorkoutId] = useState<string | null>(null)
+
+  useEffect(() => {
+    const raw = expandWorkoutIdWhenDetailMatches?.trim()
+    if (!raw || !collectionDetail?.workouts?.length) return
+    if (!collectionDetail.workouts.some((w) => w.id === raw)) return
+    setExpandedWorkoutId(raw)
+    onConsumedExpandWorkoutRequest?.()
+  }, [collectionDetail, expandWorkoutIdWhenDetailMatches, onConsumedExpandWorkoutRequest])
+
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [unsavedConfirmOpen, setUnsavedConfirmOpen] = useState(false)
   type PendingUnsavedAction =
     | { type: 'expand'; nextExpandedId: string | null }
     | { type: 'createWorkout' }
     | { type: 'updateBookmarks'; workout: Workout }
+    | { type: 'duplicateWorkout'; workout: Workout }
     | { type: 'removeFromCollection'; workout: Workout }
     | { type: 'deleteWorkoutFromCollection'; workout: Workout }
     | { type: 'createCollection' }
@@ -4593,6 +5718,14 @@ function CollectionsSection({
           )
         )
         setCollectionBookmarkDialogOpen(true)
+        break
+      }
+      case 'duplicateWorkout': {
+        const w = pendingUnsavedAction.workout
+        setCollectionDuplicateWorkout(w)
+        setCollectionDuplicateSelectedIds(new Set())
+        setCollectionDuplicateError(null)
+        setCollectionDuplicateDialogOpen(true)
         break
       }
       case 'removeFromCollection':
@@ -4625,6 +5758,12 @@ function CollectionsSection({
   const [collectionBookmarkWorkout, setCollectionBookmarkWorkout] = useState<Workout | null>(null)
   const [collectionBookmarkSelectedIds, setCollectionBookmarkSelectedIds] = useState<Set<string>>(new Set())
   const [collectionBookmarkSaving, setCollectionBookmarkSaving] = useState(false)
+
+  const [collectionDuplicateDialogOpen, setCollectionDuplicateDialogOpen] = useState(false)
+  const [collectionDuplicateWorkout, setCollectionDuplicateWorkout] = useState<Workout | null>(null)
+  const [collectionDuplicateSelectedIds, setCollectionDuplicateSelectedIds] = useState<Set<string>>(new Set())
+  const [collectionDuplicateBusy, setCollectionDuplicateBusy] = useState(false)
+  const [collectionDuplicateError, setCollectionDuplicateError] = useState<string | null>(null)
 
   const [collectionCreateDialogOpen, setCollectionCreateDialogOpen] = useState(false)
 
@@ -4776,10 +5915,11 @@ function CollectionsSection({
     setEditMetaError(null)
     setEditMetaBusy(true)
     try {
-      await onSaveWorkout(editMetaWorkout.id, {
+      const patch: Record<string, unknown> = {
         workoutName: editMetaName.trim() || null,
         workoutDescription: editMetaDescription.trim() || null,
-      })
+      }
+      await onSaveWorkout(editMetaWorkout.id, patch)
       setEditMetaWorkout(null)
       setEditMetaName('')
       setEditMetaDescription('')
@@ -4810,9 +5950,10 @@ function CollectionsSection({
   }, [collectionDetail?.workouts, expandedWorkoutId])
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.8fr)]">
-      <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
-        <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex items-center justify-between gap-2">
+    <>
+    <div className="grid min-h-[28rem] w-full flex-1 gap-6 lg:min-h-0 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.8fr)] lg:grid-rows-[minmax(0,1fr)]">
+      <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-gymnext-muted/30 bg-white">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3">
           <h3 className="text-sm font-medium text-gray-800">
             Collections {collectionsLabel}
           </h3>
@@ -4835,7 +5976,7 @@ function CollectionsSection({
           </button>
         </div>
         {reorderCollectionsError && onDismissReorderCollectionsError && (
-          <div className="px-4 py-2 flex items-center justify-between gap-2 bg-red-50 border-b border-red-200">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-red-200 bg-red-50 px-4 py-2">
             <p className="text-xs text-red-800">{reorderCollectionsError}</p>
             <button
               type="button"
@@ -4846,6 +5987,7 @@ function CollectionsSection({
             </button>
           </div>
         )}
+        <div className="min-h-0 flex-1 overflow-y-auto">
         {collections.length === 0 ? (
           <p className="px-4 py-6 text-sm text-gray-500">
             You do not have any collections yet.
@@ -4923,13 +6065,15 @@ function CollectionsSection({
                     const toIndex = dropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
                     handleCollectionDrop(draggedId, Math.max(0, Math.min(toIndex, currentIds.length)))
                   }}
-                  className={`px-4 py-3 flex items-center gap-3 cursor-pointer border-l-8 bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${
+                  className={`pl-3 pr-4 py-3 flex items-center gap-3 cursor-pointer bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${
                     isSelected ? '' : 'hover:bg-gray-100'
                   } ${draggedCollectionIndex === index ? 'opacity-50' : ''}`}
-                  style={{
-                    borderLeftColor: isSelected ? '#b45309' : '#d1d5db',
-                  }}
                 >
+                  <span
+                    className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem]"
+                    style={{ backgroundColor: '#b45309' }}
+                    aria-hidden
+                  />
                   <span
                     draggable
                     onDragStart={(e) => {
@@ -4947,15 +6091,14 @@ function CollectionsSection({
                     title="Drag to reorder"
                     onClick={(e) => e.stopPropagation()}
                   >
-                    ⋮⋮
+                    <DragReorderGrip />
                   </span>
-                  <span className="w-5 shrink-0 flex items-center justify-center" aria-hidden>
-                    {isSelected && (
-                      <span className="text-amber-700" aria-label="Active collection">
-                        ✓
-                      </span>
-                    )}
-                  </span>
+                  {isSelected && (
+                    <span className="shrink-0 text-amber-800" aria-label="Active collection">
+                      ✓
+                    </span>
+                  )}
+                  <CollectionFolderIcon className={isSelected ? 'text-amber-800' : 'text-amber-700/80'} />
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-gray-900 truncate">
                       {c.workoutCollectionName}
@@ -4989,32 +6132,37 @@ function CollectionsSection({
             )}
           </ul>
         )}
+        </div>
       </div>
 
-      <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
+      <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-gymnext-muted/30 bg-white">
         {collectionLoading && (
-          <p className="px-4 py-6 text-sm text-gray-500">Loading collection…</p>
+          <p className="shrink-0 px-4 py-6 text-sm text-gray-500">Loading collection…</p>
         )}
         {collectionError && (
-          <div className="px-4 py-2 text-xs text-red-700 bg-red-50">
+          <div className="shrink-0 bg-red-50 px-4 py-2 text-xs text-red-700">
             {collectionError}
           </div>
         )}
         {!collectionLoading && !collectionDetail && !collectionError && (
-          <p className="px-4 py-6 text-sm text-gray-500 text-center">
-            Select a collection to see its workouts.
+          <p className="flex flex-1 items-center justify-center px-4 py-6 text-center text-sm text-gray-500">
+            Select a collection to see its details
           </p>
         )}
         {collectionDetail && (
-          <div className="space-y-3 px-4 py-4">
-            <div className="flex items-start justify-between gap-2 relative border-b border-gray-100 pb-3">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="relative flex shrink-0 items-start justify-between gap-2 border-b border-gray-100 px-4 pb-3 pt-4">
               <div>
                 <p className="text-sm font-medium text-gray-900">
                   {collectionDetail.collection.workoutCollectionName}
                 </p>
                 <p className="text-xs text-gray-500">
-                  {collectionDetail.collection.workoutCollectionDescription ||
-                    'No description'}
+                  {getCollectionDisplayDescription({
+                    workoutCollectionDescription:
+                      collectionDetail.collection.workoutCollectionDescription,
+                    workoutIds:
+                      optimisticWorkoutIds ?? collectionDetail.collection.workoutIds,
+                  })}
                 </p>
               </div>
               <div className="shrink-0">
@@ -5050,6 +6198,22 @@ function CollectionsSection({
                       >
                         Edit collection
                       </button>
+                      {onOpenContentShare && (
+                        <button
+                          type="button"
+                          className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
+                          onClick={() => {
+                            setCollectionMoreMenuOpen(false)
+                            onOpenContentShare({
+                              kind: 'collection',
+                              id: collectionDetail.collection.id,
+                              title: collectionDetail.collection.workoutCollectionName,
+                            })
+                          }}
+                        >
+                          Share collection
+                        </button>
+                      )}
                       <div className="my-1 border-t border-gray-200" aria-hidden />
                       <button
                         type="button"
@@ -5066,6 +6230,7 @@ function CollectionsSection({
                 )}
               </div>
             </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 pt-3">
             {collectionDetail.workouts.length === 0 ? (
               <p className="text-sm text-gray-500">
                 This collection has no workouts yet.
@@ -5113,8 +6278,7 @@ function CollectionsSection({
                       </li>
                     )}
                     <li
-                      className={`pl-1 pr-3 py-2 flex items-center gap-3 border-l-8 bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${isDragging ? 'opacity-50' : ''} hover:bg-gymnext-background/50`}
-                      style={{ borderLeftColor: barColor }}
+                      className={`pl-3 pr-3 py-2 flex items-center gap-3 bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${isDragging ? 'opacity-50' : ''} hover:bg-gymnext-background/50`}
                       data-index={index}
                       onDragOver={(e) => {
                         e.preventDefault()
@@ -5140,6 +6304,11 @@ function CollectionsSection({
                       }}
                     >
                       <span
+                        className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem]"
+                        style={{ backgroundColor: barColor }}
+                        aria-hidden
+                      />
+                      <span
                         draggable
                         onDragStart={(e) => {
                           e.dataTransfer.effectAllowed = 'move'
@@ -5156,7 +6325,7 @@ function CollectionsSection({
                         title="Drag to reorder"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        ⋮⋮
+                        <DragReorderGrip />
                       </span>
                       <div
                         className="min-w-0 flex-1 cursor-pointer py-0.5"
@@ -5221,19 +6390,21 @@ function CollectionsSection({
                               >
                                 Edit workout
                               </button>
-                              {w.type === 'SingleSegmentWorkout' && (
+                              {onOpenContentShare && (
                                 <button
                                   type="button"
-                                  className="w-full text-left px-3 py-2 text-sm text-gray-900 hover:bg-gray-100"
+                                  className="w-full px-3 py-2 text-left text-sm text-gray-900 hover:bg-gray-100"
                                   onClick={() => {
                                     setCollectionWorkoutMenuOpenId(null)
                                     setCollectionWorkoutMenuAnchorRect(null)
-                                    setEditDetailsWorkout(w)
-                                    setEditDetailsValue((w as { workoutDetails?: string | null }).workoutDetails ?? '')
-                                    setEditDetailsError(null)
+                                    onOpenContentShare({
+                                      kind: 'workout',
+                                      id: w.id,
+                                      title: getWorkoutDisplayName(w) || w.workoutId,
+                                    })
                                   }}
                                 >
-                                  Edit workout details
+                                  Share workout
                                 </button>
                               )}
                               <button
@@ -5258,7 +6429,26 @@ function CollectionsSection({
                                   }
                                 }}
                               >
-                                Update bookmarks
+                                Update collections
+                              </button>
+                              <button
+                                type="button"
+                                className="w-full text-left px-3 py-2 text-sm text-gray-900 hover:bg-gray-100"
+                                onClick={() => {
+                                  setCollectionWorkoutMenuOpenId(null)
+                                  setCollectionWorkoutMenuAnchorRect(null)
+                                  if (hasUnsavedChanges) {
+                                    setPendingUnsavedAction({ type: 'duplicateWorkout', workout: w })
+                                    setUnsavedConfirmOpen(true)
+                                  } else {
+                                    setCollectionDuplicateWorkout(w)
+                                    setCollectionDuplicateSelectedIds(new Set())
+                                    setCollectionDuplicateError(null)
+                                    setCollectionDuplicateDialogOpen(true)
+                                  }
+                                }}
+                              >
+                                Duplicate workout
                               </button>
                               <button
                                 type="button"
@@ -5304,7 +6494,7 @@ function CollectionsSection({
                     {isExpanded && (
                       <li className="border-t border-gray-200 bg-gray-50/80 list-none">
                         <div className="relative">
-                          <div className="p-4 max-h-[60vh] overflow-y-auto">
+                          <div className="max-h-[min(85dvh,52rem)] overflow-y-auto p-4">
                             <FavoritesDetailPanel
                               workout={w}
                               scheduleOnly
@@ -5345,7 +6535,8 @@ function CollectionsSection({
                 )}
               </ul>
             )}
-            <div className="flex justify-end pt-3">
+            </div>
+            <div className="flex shrink-0 justify-end border-t border-gray-100 px-4 py-3">
               <button
                 type="button"
                 onClick={() => {
@@ -5365,6 +6556,7 @@ function CollectionsSection({
           </div>
         )}
       </div>
+    </div>
 
       {createOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -5434,7 +6626,7 @@ function CollectionsSection({
           />
           <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg p-4">
             <p className="text-sm text-gray-800">
-              Delete this collection? It will be removed from your list. You can create a new collection anytime.
+              Delete this collection?
             </p>
             <div className="flex justify-end gap-2 mt-4">
               <button
@@ -5524,7 +6716,7 @@ function CollectionsSection({
           />
           <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg flex flex-col max-h-[80vh]">
             <div className="border-b border-gymnext-muted/30 px-4 py-3 shrink-0">
-              <h3 className="text-sm font-semibold text-gray-800">Update bookmarks</h3>
+              <h3 className="text-sm font-semibold text-gray-800">Update collections</h3>
               <p className="text-xs text-gray-500 mt-0.5">
                 Choose which collections include this workout
               </p>
@@ -5618,6 +6810,105 @@ function CollectionsSection({
         </div>
       )}
 
+      {collectionDuplicateDialogOpen && collectionDuplicateWorkout && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !collectionDuplicateBusy && setCollectionDuplicateDialogOpen(false)}
+          />
+          <div className="relative flex max-h-[80vh] w-full max-w-sm flex-col rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="shrink-0 border-b border-gymnext-muted/30 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-800">Duplicate workout</h3>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {collectionDuplicateError && (
+                <p className="mb-2 px-2 text-xs text-red-600" role="alert">
+                  {collectionDuplicateError}
+                </p>
+              )}
+              {allCollections.map((c) => {
+                const isChecked = collectionDuplicateSelectedIds.has(c.id)
+                const displayName = c.id === 'favorite' ? 'Favorites' : c.workoutCollectionName
+                const favoritesAtLimitCannotAdd =
+                  c.id === 'favorite' && atFavoritesLimit && !isChecked
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    disabled={favoritesAtLimitCannotAdd}
+                    title={
+                      favoritesAtLimitCannotAdd
+                        ? `Favorites is at its limit (${maxFav}). Upgrade to add more.`
+                        : undefined
+                    }
+                    onClick={() => {
+                      if (favoritesAtLimitCannotAdd) return
+                      setCollectionDuplicateSelectedIds((prev) => {
+                        const next = new Set(prev)
+                        if (next.has(c.id)) next.delete(c.id)
+                        else next.add(c.id)
+                        return next
+                      })
+                    }}
+                    className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
+                  >
+                    <span
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border ${
+                        isChecked
+                          ? 'bg-gymnext border-gymnext text-white'
+                          : 'border-gray-300 bg-white'
+                      }`}
+                      style={isChecked ? { backgroundColor: '#6B21A8', borderColor: '#6B21A8' } : undefined}
+                    >
+                      {isChecked ? '✓' : ''}
+                    </span>
+                    <span className="truncate text-sm font-medium text-gray-900">{displayName}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-gymnext-muted/30 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setCollectionDuplicateDialogOpen(false)}
+                disabled={collectionDuplicateBusy}
+                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={collectionDuplicateBusy || collectionDuplicateSelectedIds.size === 0}
+                onClick={async () => {
+                  if (!collectionDuplicateWorkout) return
+                  setCollectionDuplicateBusy(true)
+                  setCollectionDuplicateError(null)
+                  try {
+                    await onDuplicateWorkout(
+                      collectionDuplicateWorkout.id,
+                      [...collectionDuplicateSelectedIds]
+                    )
+                    setCollectionDuplicateDialogOpen(false)
+                    setCollectionDuplicateWorkout(null)
+                  } catch (e) {
+                    setCollectionDuplicateError(
+                      e instanceof Error ? e.message : 'Failed to duplicate workout'
+                    )
+                  } finally {
+                    setCollectionDuplicateBusy(false)
+                  }
+                }}
+                className="rounded px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                style={{ backgroundColor: '#6B21A8' }}
+              >
+                {collectionDuplicateBusy ? 'Duplicating…' : 'Duplicate'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {collectionCreateDialogOpen && collectionDetail && createWorkoutInCollection && (
         <CreateWorkoutDialog
           title="Create new workout"
@@ -5680,7 +6971,7 @@ function CollectionsSection({
           />
           <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg p-4">
             <p className="text-sm text-gray-800">
-              Delete this workout? It can be recovered from deleted items.
+              Delete this workout?
             </p>
             <div className="flex justify-end gap-2 mt-4">
               <button
@@ -5771,66 +7062,6 @@ function CollectionsSection({
         </div>
       )}
 
-      {editDetailsWorkout && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/50"
-            aria-hidden
-            onClick={() => !editDetailsBusy && setEditDetailsWorkout(null)}
-          />
-          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
-            <div className="border-b border-gymnext-muted/30 px-4 py-3">
-              <h3 className="text-sm font-semibold text-gray-800">Edit workout details</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Rep scheme, weights, movements, etc.</p>
-            </div>
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault()
-                if (!editDetailsWorkout) return
-                setEditDetailsBusy(true)
-                setEditDetailsError(null)
-                try {
-                  await onSaveWorkout(editDetailsWorkout.id, { workoutDetails: editDetailsValue.trim() || null })
-                  setEditDetailsWorkout(null)
-                } catch (err) {
-                  setEditDetailsError(err instanceof Error ? err.message : 'Failed to save')
-                } finally {
-                  setEditDetailsBusy(false)
-                }
-              }}
-              className="p-4 space-y-4"
-            >
-              <textarea
-                rows={8}
-                value={editDetailsValue}
-                onChange={(e) => setEditDetailsValue(e.target.value)}
-                className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
-              />
-              {editDetailsError && <p className="text-xs text-red-600">{editDetailsError}</p>}
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditDetailsWorkout(null)}
-                  disabled={editDetailsBusy}
-                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={editDetailsBusy}
-                  className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
-                  style={{ backgroundColor: '#6B21A8' }}
-                >
-                  {editDetailsBusy ? 'Saving…' : 'Save'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {editOpen && editCollection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
@@ -5889,27 +7120,139 @@ function CollectionsSection({
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }
 
+function planDisplayDescription(plan: WorkoutPlan): string {
+  const raw = plan.workoutPlanDescription?.trim()
+  if (raw) return raw
+  if (plan.isPersonal) return 'A personal plan'
+  return plan.trainingIntent === 1 ? 'A group training plan' : 'A private training plan'
+}
+
+function planTrainingKindLabel(plan: WorkoutPlan): string {
+  if (plan.isPersonal) return 'Personal'
+  return plan.trainingIntent === 1 ? 'Group training' : 'Private training'
+}
+
+/** Header subtitle: "Kind • user description", or the same default copy as the list when description is null. */
+function planSubtitleWithKind(plan: WorkoutPlan): string {
+  const kind = planTrainingKindLabel(plan)
+  const raw = plan.workoutPlanDescription?.trim()
+  if (raw) return `${kind} • ${raw}`
+  return planDisplayDescription(plan)
+}
+
+/** Legacy plans omit `showInSchedule`; treat as on. Only explicit `false` hides from Today. */
+function planShowsInTodayTab(plan: WorkoutPlan): boolean {
+  return plan.showInSchedule !== false
+}
+
+/** True when followed plan is non-personal group training (visibility rules); else privileges copy. */
+function followedPlanIsGroupTraining(row: FollowingPlanRow): boolean {
+  if (row.remotePlanIsPersonal === true) return false
+  return row.remotePlanTrainingIntent === 1
+}
+
+/** Synthetic plan row for Plans / Plan Ahead when viewing a followed (remote) plan. */
+function followingSubscriptionToWorkoutPlan(row: FollowingPlanRow): WorkoutPlan {
+  const desc = row.remotePlanDescription?.trim() || null
+  const isPersonal = row.remotePlanIsPersonal === true
+  const trainingIntent =
+    isPersonal ? undefined : row.remotePlanTrainingIntent === 1 ? 1 : (0 as const)
+  return {
+    id: row.remotePlanId,
+    workoutPlanId: row.remotePlanId,
+    workoutPlanName: row.remotePlanName?.trim() || 'Subscribed plan',
+    workoutPlanDescription: desc,
+    isPersonal,
+    trainingIntent,
+    ordinal: row.ordinal,
+    userId: row.ownerUserId,
+    handle: row.remotePlanHandle,
+  }
+}
+
+/** Matches plan list stripe colors (Tailwind teal-600 / teal-700). */
+function planListStripeColor(isSelected: boolean): string {
+  return isSelected ? '#0f766e' : '#0d9488'
+}
+
+type OwnedPlanListSection = 'personal' | 'privateTraining' | 'groupTraining'
+
+function workoutPlanListSection(p: WorkoutPlan): OwnedPlanListSection {
+  if (p.isPersonal) return 'personal'
+  if (p.trainingIntent === 1) return 'groupTraining'
+  return 'privateTraining'
+}
+
+function sortPlansByOrdinalThenId<T extends { id: string; ordinal: number }>(list: T[]): T[] {
+  return [...list].sort((a, b) => a.ordinal - b.ordinal || a.id.localeCompare(b.id))
+}
+
+function orderPlansInSection<T extends { id: string; ordinal: number }>(
+  sectionPlans: T[],
+  optimisticIds: string[] | null
+): T[] {
+  if (!optimisticIds?.length) return sortPlansByOrdinalThenId(sectionPlans)
+  const orderMap = new Map(optimisticIds.map((id, i) => [id, i]))
+  return [...sectionPlans].sort((a, b) => {
+    const ai = orderMap.get(a.id) ?? 1e9
+    const bi = orderMap.get(b.id) ?? 1e9
+    return ai - bi
+  })
+}
+
+function orderFollowingRows(
+  rows: FollowingPlanRow[],
+  optimisticIds: string[] | null
+): FollowingPlanRow[] {
+  if (!optimisticIds?.length) {
+    return [...rows].sort(
+      (a, b) =>
+        a.ordinal - b.ordinal || a.subscriptionDocumentId.localeCompare(b.subscriptionDocumentId)
+    )
+  }
+  const orderMap = new Map(optimisticIds.map((id, i) => [id, i]))
+  return [...rows].sort((a, b) => {
+    const ai = orderMap.get(a.subscriptionDocumentId) ?? 1e9
+    const bi = orderMap.get(b.subscriptionDocumentId) ?? 1e9
+    return ai - bi
+  })
+}
+
 function PlansSection({
-  viewMode,
+  listSurfaceTitle = 'Plans',
+  rightPanelMode = 'schedule',
+  planAheadColumnCount,
+  setPlanAheadColumnCount,
+  reloadFollowingPlans,
   plans,
+  selectedPlanId,
+  setSelectedPlanId,
+  selectedPlanIdSecondary = null,
+  setSelectedPlanIdSecondary,
+  scheduleSecondPlan = null,
+  scheduleSecondByDay,
   followingPlans,
   followingPlansLoading,
   followingPlansError,
-  selectedPlanId,
-  selectedFollowingPlanId,
-  setSelectedPlanId,
-  setSelectedFollowingPlanId,
+  selectedFollowingSubscriptionId,
+  setSelectedFollowingSubscriptionId,
   weekStart,
   setWeekStart,
   weekEnd,
+  weekStartSecondary,
+  setWeekStartSecondary,
+  weekEndSecondary,
   byDay,
   planViewMode,
   setPlanViewMode,
   planDayCount,
+  planViewModeSecondary,
+  setPlanViewModeSecondary,
+  planDayCountSecondary,
   plansLoading,
   plansError,
   onReorderPlanned,
@@ -5917,16 +7260,16 @@ function PlansSection({
   onDeletePlanned,
   user,
   reloadPlanned,
-  reloadFollowingPlans,
   onPlannedWorkoutMetadataSaved,
   onCreatePlan,
   onUpdatePlan,
-  onUpdatePlanSharing,
+  onSetPlanShowInSchedule,
   onDeletePlan,
   maxPlans,
   plansCount,
   subscriptionTier,
-  onReorderPlans,
+  onReorderPlansInSection,
+  onReorderSubscriptions,
   reorderPlansError,
   onDismissReorderPlansError,
   favoriteWorkouts,
@@ -5934,34 +7277,53 @@ function PlansSection({
   workoutsById,
   timerDefaults,
 }: {
-  viewMode: 'owned' | 'following'
+  /** Shown in the left panel header (e.g. "Plans" vs "Plan Ahead"); UI is otherwise the same for now. */
+  listSurfaceTitle?: string
+  /** Plans tab: details-only right column. Plan Ahead: full schedule calendar. */
+  rightPanelMode?: 'schedule' | 'plan-admin'
+  /** Plan Ahead: one full-width column vs two side-by-side (lifted so nav can reset when leaving Today). */
+  planAheadColumnCount: 1 | 2
+  setPlanAheadColumnCount: (count: 1 | 2) => void
+  /** Refetch following list after unfollow (Plans tab). */
+  reloadFollowingPlans?: () => void | Promise<void>
   plans: WorkoutPlan[]
-  followingPlans: FollowingPlan[]
+  selectedPlanId: string | null
+  setSelectedPlanId: (id: string | null) => void
+  selectedPlanIdSecondary?: string | null
+  setSelectedPlanIdSecondary?: (id: string | null) => void
+  /** Second plan on Plan Ahead (dual schedule); same editing affordances as the first. */
+  scheduleSecondPlan?: WorkoutPlan | null
+  scheduleSecondByDay?: Record<string, PlannedWorkout[]>
+  followingPlans: FollowingPlanRow[]
   followingPlansLoading: boolean
   followingPlansError: string | null
-  selectedPlanId: string | null
-  selectedFollowingPlanId: string | null
-  setSelectedPlanId: (id: string | null) => void
-  setSelectedFollowingPlanId: (id: string | null) => void
+  selectedFollowingSubscriptionId: string | null
+  setSelectedFollowingSubscriptionId: (subscriptionDocumentId: string | null) => void
   weekStart: string
   setWeekStart: (value: string) => void
   weekEnd: string
+  weekStartSecondary: string
+  setWeekStartSecondary: (value: string) => void
+  weekEndSecondary: string
   byDay: Record<string, PlannedWorkout[]>
   planViewMode: 'week' | '3day' | '1day'
   setPlanViewMode: (mode: 'week' | '3day' | '1day') => void
   planDayCount: number
+  planViewModeSecondary: 'week' | '3day' | '1day'
+  setPlanViewModeSecondary: (mode: 'week' | '3day' | '1day') => void
+  planDayCountSecondary: number
   plansLoading: boolean
   plansError: string | null
   onReorderPlanned: (
     dayKey: string,
     index: number,
-    direction: 'up' | 'down'
+    direction: 'up' | 'down',
+    planId?: string | null
   ) => void
-  onPlannedWorkoutDrop: (dayKey: string, fromIndex: number, toIndex: number) => void
+  onPlannedWorkoutDrop: (dayKey: string, fromIndex: number, toIndex: number, planId: string) => void
   onDeletePlanned: (pw: PlannedWorkout) => void
   user: User
   reloadPlanned: () => void
-  reloadFollowingPlans: () => void
   onPlannedWorkoutMetadataSaved: (
     plannedWorkoutId: string,
     patch: { workoutName?: string | null; workoutDescription?: string | null; workoutDetails?: string | null }
@@ -5969,15 +7331,25 @@ function PlansSection({
   onCreatePlan: (
     name: string,
     description: string | null,
-    isPersonal: boolean
+    isPersonal: boolean,
+    trainingIntent?: 0 | 1
   ) => Promise<WorkoutPlan>
-  onUpdatePlan: (planId: string, name: string, description: string | null) => Promise<void>
-  onUpdatePlanSharing: (planId: string, privacy: number, handle: string | null) => Promise<void>
+  onUpdatePlan: (
+    planId: string,
+    name: string,
+    description: string | null,
+    trainingIntent?: 0 | 1
+  ) => Promise<void>
+  onSetPlanShowInSchedule: (planId: string, showInSchedule: boolean) => Promise<void>
   onDeletePlan: (planId: string) => Promise<void>
   maxPlans?: number
   plansCount?: number
   subscriptionTier?: SubscriptionTier
-  onReorderPlans?: (planIds: string[]) => void
+  onReorderPlansInSection?: (
+    planSection: OwnedPlanListSection,
+    planIds: string[]
+  ) => void | Promise<void>
+  onReorderSubscriptions?: (subscriptionDocumentIds: string[]) => void | Promise<void>
   reorderPlansError?: string | null
   onDismissReorderPlansError?: () => void
   favoriteWorkouts?: Workout[]
@@ -5999,7 +7371,10 @@ function PlansSection({
   const [expandedCollectionId, setExpandedCollectionId] = useState<string | null>(null)
   const [selectedWorkoutForPlan, setSelectedWorkoutForPlan] = useState<Workout | null>(null)
   const [createPlanOpen, setCreatePlanOpen] = useState(false)
-  const [createPlanType, setCreatePlanType] = useState<'personal' | 'group'>('group')
+  /** Create flow: personal plan vs coach plan private/group training (maps to API isPersonal + trainingIntent). */
+  const [createPlanKind, setCreatePlanKind] = useState<
+    'personal' | 'privateTraining' | 'groupTraining'
+  >('privateTraining')
 
   const [editPlanOpen, setEditPlanOpen] = useState(false)
   const [editPlan, setEditPlan] = useState<WorkoutPlan | null>(null)
@@ -6007,23 +7382,6 @@ function PlansSection({
   const [editPlanDescription, setEditPlanDescription] = useState('')
   const [editPlanBusy, setEditPlanBusy] = useState(false)
   const [editPlanError, setEditPlanError] = useState<string | null>(null)
-  const [editSharingOpen, setEditSharingOpen] = useState(false)
-  const [editSharingPlan, setEditSharingPlan] = useState<WorkoutPlan | null>(null)
-  const [editSharingPrivacy, setEditSharingPrivacy] = useState<PlanPrivacyKey>('private')
-  const [editSharingHandle, setEditSharingHandle] = useState('')
-  const [editSharingBusy, setEditSharingBusy] = useState(false)
-  const [editSharingError, setEditSharingError] = useState<string | null>(null)
-  const [manageFollowersOpen, setManageFollowersOpen] = useState(false)
-  const [manageFollowersPlan, setManageFollowersPlan] = useState<WorkoutPlan | null>(null)
-  const [followersQuery, setFollowersQuery] = useState('')
-  const [followersActionBusy, setFollowersActionBusy] = useState<string | null>(null)
-  const [followersByStatus, setFollowersByStatus] = useState<
-    Record<FollowerStatus, { items: PlanFollower[]; nextCursor: string | null; loading: boolean; error: string | null }>
-  >({
-    active: { items: [], nextCursor: null, loading: false, error: null },
-    pending: { items: [], nextCursor: null, loading: false, error: null },
-    blocked: { items: [], nextCursor: null, loading: false, error: null },
-  })
 
   const [editPlannedOpen, setEditPlannedOpen] = useState(false)
   const [editPlannedWorkout, setEditPlannedWorkout] = useState<PlannedWorkout | null>(null)
@@ -6031,13 +7389,6 @@ function PlansSection({
   const [editPlannedDescription, setEditPlannedDescription] = useState('')
   const [editPlannedBusy, setEditPlannedBusy] = useState(false)
   const [editPlannedError, setEditPlannedError] = useState<string | null>(null)
-
-  const [editDetailsPlannedWorkout, setEditDetailsPlannedWorkout] = useState<PlannedWorkout | null>(null)
-  const [editDetailsValue, setEditDetailsValue] = useState('')
-  const [editDetailsBusy, setEditDetailsBusy] = useState(false)
-  const [editDetailsError, setEditDetailsError] = useState<string | null>(null)
-
-  const [showDetailsPlannedWorkout, setShowDetailsPlannedWorkout] = useState<PlannedWorkout | null>(null)
 
   const [createPlanName, setCreatePlanName] = useState('')
   const [createPlanDescription, setCreatePlanDescription] = useState('')
@@ -6061,20 +7412,65 @@ function PlansSection({
   const [createPlannedDescription, setCreatePlannedDescription] = useState('')
   const [createPlannedDetails, setCreatePlannedDetails] = useState('')
 
-  const [planMoreMenuOpen, setPlanMoreMenuOpen] = useState(false)
+  const [planAdminMoreOpen, setPlanAdminMoreOpen] = useState(false)
+  const [showInScheduleSaving, setShowInScheduleSaving] = useState(false)
+  const [planShareOpen, setPlanShareOpen] = useState(false)
+  const planShareWasOpenRef = useRef(false)
+  const [planSharesLoading, setPlanSharesLoading] = useState(false)
+  const [planSharesError, setPlanSharesError] = useState<string | null>(null)
+  const [planSharesSnapshot, setPlanSharesSnapshot] = useState<{
+    groups: {
+      groupId: string
+      groupName: string
+      sharedAt: string | null
+      groupFeedItemId: string | null
+      hideFutureWorkouts: boolean
+    }[]
+    users: {
+      peerUserId: string
+      displayName: string
+      handle: string | null
+      sharedAt: string | null
+      recipientFeedItemId: string | null
+      allowEditing: boolean
+      hideFutureWorkouts: boolean
+    }[]
+  }>({ groups: [], users: [] })
+  const [stopPlanShareConfirm, setStopPlanShareConfirm] = useState<
+    | {
+        planId: string
+        kind: 'group'
+        groupId: string
+        label: string
+        groupFeedItemId: string | null
+      }
+    | {
+        planId: string
+        kind: 'user'
+        peerUserId: string
+        label: string
+        recipientFeedItemId: string | null
+      }
+    | null
+  >(null)
+  const [stopPlanShareBusy, setStopPlanShareBusy] = useState(false)
+  const [planShareRowMenuKey, setPlanShareRowMenuKey] = useState<string | null>(null)
+  const [planSharePatchKey, setPlanSharePatchKey] = useState<string | null>(null)
   const [planDeleteConfirmOpen, setPlanDeleteConfirmOpen] = useState(false)
-  const [followingMoreMenuOpen, setFollowingMoreMenuOpen] = useState(false)
+  const [followedCoachProfile, setFollowedCoachProfile] = useState<PublicUserProfileView | null>(null)
+  const [followedCoachProfileLoading, setFollowedCoachProfileLoading] = useState(false)
+  const [followedCoachProfileError, setFollowedCoachProfileError] = useState<string | null>(null)
+  const [planOwnerPublicProfileUserId, setPlanOwnerPublicProfileUserId] = useState<string | null>(null)
+  const [planSharingHubProfileGroupId, setPlanSharingHubProfileGroupId] = useState<string | null>(null)
+  const [planSharingConnectionProfileUserId, setPlanSharingConnectionProfileUserId] = useState<string | null>(null)
   const [stopFollowingConfirmOpen, setStopFollowingConfirmOpen] = useState(false)
   const [stopFollowingBusy, setStopFollowingBusy] = useState(false)
-  const [stopFollowingError, setStopFollowingError] = useState<string | null>(null)
-  const [followSearchOpen, setFollowSearchOpen] = useState(false)
-  const [followSearchQuery, setFollowSearchQuery] = useState('')
-  const [followSearchBusy, setFollowSearchBusy] = useState(false)
-  const [followSearchError, setFollowSearchError] = useState<string | null>(null)
-  const [followSearchResults, setFollowSearchResults] = useState<FollowPlanSearchResult[]>([])
-  const [followActionBusyHandle, setFollowActionBusyHandle] = useState<string | null>(null)
   const [expandedPlannedWorkoutId, setExpandedPlannedWorkoutId] = useState<string | null>(null)
-  const [draggedPlanned, setDraggedPlanned] = useState<{ dateKey: string; index: number } | null>(null)
+  const [draggedPlanned, setDraggedPlanned] = useState<{
+    dateKey: string
+    index: number
+    planId: string
+  } | null>(null)
   const [plannedDropIndicator, setPlannedDropIndicator] = useState<{ dateKey: string; beforeIndex: number } | null>(null)
   const [plannedWorkoutMenuId, setPlannedWorkoutMenuId] = useState<string | null>(null)
   const [plannedWorkoutMenuAnchorRect, setPlannedWorkoutMenuAnchorRect] = useState<DOMRect | null>(null)
@@ -6083,6 +7479,26 @@ function PlansSection({
   const [copyTargetDay, setCopyTargetDay] = useState<string>(() => getLocalYYYYMMDD(new Date()))
   const [copyBusy, setCopyBusy] = useState(false)
   const [copyError, setCopyError] = useState<string | null>(null)
+  const [plannedDayMenuDateKey, setPlannedDayMenuDateKey] = useState<string | null>(null)
+  /** Which plan’s day row opened the ⋯ menu (required when two schedules show the same dates). */
+  const [plannedDayMenuPlanId, setPlannedDayMenuPlanId] = useState<string | null>(null)
+  const [plannedDayMenuAnchorRect, setPlannedDayMenuAnchorRect] = useState<DOMRect | null>(null)
+  const [copyAllSourceDateKey, setCopyAllSourceDateKey] = useState<string | null>(null)
+  const [copyAllSourcePlanId, setCopyAllSourcePlanId] = useState<string | null>(null)
+  const [copyAllTargetPlanId, setCopyAllTargetPlanId] = useState<string>('')
+  const [copyAllTargetDay, setCopyAllTargetDay] = useState<string>(() => getLocalYYYYMMDD(new Date()))
+  const [copyAllBusy, setCopyAllBusy] = useState(false)
+  const [copyAllError, setCopyAllError] = useState<string | null>(null)
+  const [copyAllToDaySourceDateKey, setCopyAllToDaySourceDateKey] = useState<string | null>(null)
+  const [copyAllToDaySourcePlanId, setCopyAllToDaySourcePlanId] = useState<string | null>(null)
+  const [copyAllToDayTargetDay, setCopyAllToDayTargetDay] = useState<string>(() => getLocalYYYYMMDD(new Date()))
+  const [copyAllToDayBusy, setCopyAllToDayBusy] = useState(false)
+  const [copyAllToDayError, setCopyAllToDayError] = useState<string | null>(null)
+  const [moveAllSourceDateKey, setMoveAllSourceDateKey] = useState<string | null>(null)
+  const [moveAllSourcePlanId, setMoveAllSourcePlanId] = useState<string | null>(null)
+  const [moveAllTargetDay, setMoveAllTargetDay] = useState<string>(() => getLocalYYYYMMDD(new Date()))
+  const [moveAllBusy, setMoveAllBusy] = useState(false)
+  const [moveAllError, setMoveAllError] = useState<string | null>(null)
   const [movePlannedWorkout, setMovePlannedWorkout] = useState<PlannedWorkout | null>(null)
   const [moveTargetDay, setMoveTargetDay] = useState<string>('')
   const [moveBusy, setMoveBusy] = useState(false)
@@ -6093,10 +7509,26 @@ function PlansSection({
   const [editScheduleOptions, setEditScheduleOptions] = useState<Record<string, string | number>>({})
   const [editScheduleBusy, setEditScheduleBusy] = useState(false)
   const [editScheduleError, setEditScheduleError] = useState<string | null>(null)
+  const [editScheduleWorkoutDetails, setEditScheduleWorkoutDetails] = useState('')
+  /** Plan that receives “Add workout” / create flow when multiple schedules are open. */
+  const [scheduleAddTargetPlanId, setScheduleAddTargetPlanId] = useState<string | null>(null)
 
-  const [draggedPlanIndex, setDraggedPlanIndex] = useState<number | null>(null)
-  const [dropIndicatorBeforeIndex, setDropIndicatorBeforeIndex] = useState<number | null>(null)
-  const [optimisticOrderedIds, setOptimisticOrderedIds] = useState<string[] | null>(null)
+  const [ownedDrag, setOwnedDrag] = useState<{ section: OwnedPlanListSection; index: number } | null>(
+    null
+  )
+  const [ownedDropBefore, setOwnedDropBefore] = useState<{
+    section: OwnedPlanListSection
+    beforeIndex: number
+  } | null>(null)
+  const [optimisticOwnedOrder, setOptimisticOwnedOrder] = useState<
+    Partial<Record<OwnedPlanListSection, string[]>> | null
+  >(null)
+
+  const [subscriptionDragIndex, setSubscriptionDragIndex] = useState<number | null>(null)
+  const [subscriptionDropBeforeIndex, setSubscriptionDropBeforeIndex] = useState<number | null>(
+    null
+  )
+  const [optimisticSubscriptionIds, setOptimisticSubscriptionIds] = useState<string[] | null>(null)
 
   /** Reorder: toIndex = gap index (0..n). Insert at toIndex when moving up, toIndex-1 when moving down. */
   function reorderIds(ids: string[], fromIndex: number, toIndex: number): string[] {
@@ -6108,144 +7540,554 @@ function PlansSection({
     return list
   }
 
-  const orderedPlans = useMemo(() => {
-    if (!optimisticOrderedIds?.length || !plans.length) return plans
-    const idOrder = new Map(optimisticOrderedIds.map((id, i) => [id, i]))
-    return [...plans].sort((a, b) => {
-      const ai = idOrder.get(a.id) ?? 1e9
-      const bi = idOrder.get(b.id) ?? 1e9
-      return ai - bi
-    })
-  }, [plans, optimisticOrderedIds])
+  const personalPlansBase = useMemo(
+    () => plans.filter((p) => workoutPlanListSection(p) === 'personal'),
+    [plans]
+  )
+  const privateTrainingPlansBase = useMemo(
+    () => plans.filter((p) => workoutPlanListSection(p) === 'privateTraining'),
+    [plans]
+  )
+  const groupTrainingPlansBase = useMemo(
+    () => plans.filter((p) => workoutPlanListSection(p) === 'groupTraining'),
+    [plans]
+  )
+
+  const orderedPersonalPlans = useMemo(
+    () => orderPlansInSection(personalPlansBase, optimisticOwnedOrder?.personal ?? null),
+    [personalPlansBase, optimisticOwnedOrder]
+  )
+  const orderedPrivateTrainingPlans = useMemo(
+    () =>
+      orderPlansInSection(
+        privateTrainingPlansBase,
+        optimisticOwnedOrder?.privateTraining ?? null
+      ),
+    [privateTrainingPlansBase, optimisticOwnedOrder]
+  )
+  const orderedGroupTrainingPlans = useMemo(
+    () =>
+      orderPlansInSection(groupTrainingPlansBase, optimisticOwnedOrder?.groupTraining ?? null),
+    [groupTrainingPlansBase, optimisticOwnedOrder]
+  )
+
+  const orderedOwnedPlansForDropdowns = useMemo(
+    () => [
+      ...orderedPersonalPlans,
+      ...orderedPrivateTrainingPlans,
+      ...orderedGroupTrainingPlans,
+    ],
+    [orderedPersonalPlans, orderedPrivateTrainingPlans, orderedGroupTrainingPlans]
+  )
+
+  const orderedFollowingPlans = useMemo(
+    () => orderFollowingRows(followingPlans, optimisticSubscriptionIds),
+    [followingPlans, optimisticSubscriptionIds]
+  )
 
   useEffect(() => {
-    setOptimisticOrderedIds(null)
+    setPlanShareOpen(false)
+  }, [selectedPlanId, selectedFollowingSubscriptionId, rightPanelMode])
+
+  useEffect(() => {
+    setStopPlanShareConfirm(null)
+    setPlanShareRowMenuKey(null)
+  }, [selectedPlanId, selectedFollowingSubscriptionId, rightPanelMode])
+
+  useEffect(() => {
+    if (!planShareRowMenuKey) return
+    const onPointerDown = (e: PointerEvent) => {
+      const el = e.target as HTMLElement | null
+      if (el?.closest('[data-plan-share-actions-menu]')) return
+      setPlanShareRowMenuKey(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [planShareRowMenuKey])
+
+  useEffect(() => {
+    setPlanAdminMoreOpen(false)
+  }, [selectedPlanId, selectedFollowingSubscriptionId, rightPanelMode])
+
+  useEffect(() => {
+    setOptimisticOwnedOrder(null)
   }, [plans])
   useEffect(() => {
-    if (reorderPlansError) setOptimisticOrderedIds(null)
+    setOptimisticSubscriptionIds(null)
+  }, [followingPlans])
+  useEffect(() => {
+    if (reorderPlansError) {
+      setOptimisticOwnedOrder(null)
+      setOptimisticSubscriptionIds(null)
+    }
   }, [reorderPlansError])
 
-  function handlePlanDrop(draggedId: string, toIndex: number) {
-    if (!onReorderPlans) return
-    const currentIds = optimisticOrderedIds ?? plans.map((p) => p.id)
+  function plansBaseForSection(section: OwnedPlanListSection): WorkoutPlan[] {
+    if (section === 'personal') return personalPlansBase
+    if (section === 'privateTraining') return privateTrainingPlansBase
+    return groupTrainingPlansBase
+  }
+
+  function handlePlanDropOwned(section: OwnedPlanListSection, draggedId: string, toIndex: number) {
+    if (!onReorderPlansInSection) return
+    const sectionPlans = plansBaseForSection(section)
+    const currentIds =
+      optimisticOwnedOrder?.[section] ?? sectionPlans.map((p) => p.id)
     const fromIndex = currentIds.indexOf(draggedId)
     if (fromIndex === -1) return
     const toIndexClamped = Math.max(0, Math.min(toIndex, currentIds.length))
     const newIds = reorderIds(currentIds, fromIndex, toIndexClamped)
-    setOptimisticOrderedIds(newIds)
-    setDraggedPlanIndex(null)
-    setDropIndicatorBeforeIndex(null)
-    onReorderPlans(newIds)
+    setOptimisticOwnedOrder((prev) => ({ ...(prev ?? {}), [section]: newIds }))
+    setOwnedDrag(null)
+    setOwnedDropBefore(null)
+    void onReorderPlansInSection(section, newIds)
   }
 
-  const selectedPlan =
-    selectedPlanId === null
+  function handleSubscriptionDrop(draggedId: string, toIndex: number) {
+    if (!onReorderSubscriptions) return
+    const currentIds =
+      optimisticSubscriptionIds ?? followingPlans.map((r) => r.subscriptionDocumentId)
+    const fromIndex = currentIds.indexOf(draggedId)
+    if (fromIndex === -1) return
+    const toIndexClamped = Math.max(0, Math.min(toIndex, currentIds.length))
+    const newIds = reorderIds(currentIds, fromIndex, toIndexClamped)
+    setOptimisticSubscriptionIds(newIds)
+    setSubscriptionDragIndex(null)
+    setSubscriptionDropBeforeIndex(null)
+    void onReorderSubscriptions(newIds)
+  }
+
+  const selectedFollowingRow =
+    selectedFollowingSubscriptionId === null
+      ? null
+      : followingPlans.find((f) => f.subscriptionDocumentId === selectedFollowingSubscriptionId) ?? null
+
+  const selectedPlan: WorkoutPlan | null = selectedFollowingRow
+    ? followingSubscriptionToWorkoutPlan(selectedFollowingRow)
+    : selectedPlanId === null
       ? null
       : plans.find((p) => p.id === selectedPlanId) ?? null
-  const selectedFollowingPlan =
-    selectedFollowingPlanId === null
-      ? null
-      : followingPlans.find((p) => p.subscriptionDocumentId === selectedFollowingPlanId) ?? null
-  const isFollowingMode = viewMode === 'following'
-  const selectedPlanName = isFollowingMode
-    ? selectedFollowingPlan?.remotePlanName ?? 'Followed plan'
-    : selectedPlan?.workoutPlanName ?? ''
-  const selectedPlanDescription = isFollowingMode
-    ? selectedFollowingPlan?.remotePlanHandle
-      ? `@${selectedFollowingPlan.remotePlanHandle}`
-      : 'Read-only followed plan'
-    : (selectedPlan?.workoutPlanDescription || 'No description')
+
+  const planScheduleReadOnly = selectedFollowingSubscriptionId !== null
 
   useEffect(() => {
-    setFollowingMoreMenuOpen(false)
-    setStopFollowingConfirmOpen(false)
-    setStopFollowingError(null)
-    setStopFollowingBusy(false)
-  }, [selectedFollowingPlanId])
+    if (rightPanelMode === 'schedule' || !setSelectedPlanIdSecondary) return
+    setSelectedPlanIdSecondary(null)
+  }, [rightPanelMode, setSelectedPlanIdSecondary])
 
-  async function handleStopFollowing() {
-    if (!selectedFollowingPlan) return
-    setStopFollowingBusy(true)
-    setStopFollowingError(null)
-    try {
-      const res = await authedFetch(
-        `/api/app/following-plans/${encodeURIComponent(
-          selectedFollowingPlan.subscriptionDocumentId
-        )}`,
-        { method: 'DELETE' }
-      )
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `HTTP ${res.status}`)
-      }
-      setStopFollowingConfirmOpen(false)
-      setSelectedFollowingPlanId(null)
-      reloadFollowingPlans()
-      toast.success('Stopped following')
-    } catch (e) {
-      setStopFollowingError(e instanceof Error ? e.message : 'Failed to stop following')
-    } finally {
-      setStopFollowingBusy(false)
-    }
-  }
+  useEffect(() => {
+    if (!planScheduleReadOnly) return
+    setCreateOpen(false)
+    setScheduleAddTargetPlanId(null)
+    setAddWorkoutSource('choice')
+    setExpandedCollectionId(null)
+    setSelectedWorkoutForPlan(null)
+    setExpandedPlannedWorkoutId(null)
+    setPlannedWorkoutMenuId(null)
+    setPlannedWorkoutMenuAnchorRect(null)
+    setEditPlannedOpen(false)
+    setEditPlannedWorkout(null)
+    setEditPlannedError(null)
+    setCopyPlannedWorkout(null)
+    setPlannedDayMenuDateKey(null)
+    setPlannedDayMenuPlanId(null)
+    setPlannedDayMenuAnchorRect(null)
+    setCopyAllSourceDateKey(null)
+    setCopyAllSourcePlanId(null)
+    setCopyAllToDaySourceDateKey(null)
+    setCopyAllToDaySourcePlanId(null)
+    setMoveAllSourceDateKey(null)
+    setMoveAllSourcePlanId(null)
+    setMovePlannedWorkout(null)
+    setDeletePlannedConfirmWorkout(null)
+    setEditSchedulePlannedWorkout(null)
+    setEditScheduleError(null)
+    setEditScheduleWorkoutDetails('')
+    setCreateError(null)
+  }, [planScheduleReadOnly])
 
-  async function runFollowSearch(q: string) {
-    const query = q.trim()
-    setFollowSearchQuery(q)
-    setFollowSearchError(null)
-    if (query.replace(/^@/, '').length < 2) {
-      setFollowSearchResults([])
-      return
-    }
-    setFollowSearchBusy(true)
-    try {
-      const res = await authedFetch(
-        `/api/app/plans/handle-search?query=${encodeURIComponent(query)}`
-      )
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `HTTP ${res.status}`)
-      }
-      const data = (await res.json()) as { items?: FollowPlanSearchResult[] }
-      setFollowSearchResults(Array.isArray(data.items) ? data.items : [])
-    } catch (e) {
-      setFollowSearchError(e instanceof Error ? e.message : 'Failed to search plans')
-      setFollowSearchResults([])
-    } finally {
-      setFollowSearchBusy(false)
-    }
-  }
+  const selectedPlanName = selectedPlan?.workoutPlanName ?? ''
+  const selectedPlanDescription = selectedPlan ? planSubtitleWithKind(selectedPlan) : ''
 
-  async function handleFollowByHandle(handleKey: string) {
-    const handle = handleKey.trim()
-    if (!handle) return
-    setFollowActionBusyHandle(handle)
+  const planForScheduleCreate = useMemo(() => {
+    if (rightPanelMode === 'schedule') {
+      const tid = scheduleAddTargetPlanId ?? selectedPlanId ?? selectedPlanIdSecondary
+      if (!tid) return null
+      return plans.find((p) => p.id === tid) ?? null
+    }
+    return selectedPlan
+  }, [rightPanelMode, scheduleAddTargetPlanId, selectedPlanId, selectedPlanIdSecondary, plans, selectedPlan])
+
+  async function patchPlanShareHubHideFuture(groupId: string, nextHide: boolean) {
+    if (!selectedPlanId) return
+    const busyKey = `hub:${groupId}`
+    setPlanSharePatchKey(busyKey)
     try {
-      const res = await authedFetch('/api/app/following-plans', {
-        method: 'POST',
+      const res = await authedFetch(`/api/app/plans/${encodeURIComponent(selectedPlanId)}/shares`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ handleKey: handle }),
+        body: JSON.stringify({
+          target: 'group',
+          groupId,
+          hideFutureWorkouts: nextHide,
+        }),
       })
-      const json = (await res.json().catch(() => ({}))) as { error?: string; status?: string }
       if (!res.ok) {
-        throw new Error(json.error || `HTTP ${res.status}`)
+        const j = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(j.error || `HTTP ${res.status}`)
       }
-      const status = json.status === 'pending' ? 'pending' : 'active'
-      setFollowSearchOpen(false)
-      setFollowSearchQuery('')
-      setFollowSearchResults([])
-      await Promise.resolve(reloadFollowingPlans())
-      toast.success(
-        status === 'active'
-          ? 'Now following plan'
-          : 'Follow request sent (pending approval)'
-      )
+      setPlanShareRowMenuKey(null)
+      await loadPlanShares()
+      toast.success('Share updated')
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to follow plan')
+      toast.error(e instanceof Error ? e.message : 'Update failed')
     } finally {
-      setFollowActionBusyHandle(null)
+      setPlanSharePatchKey(null)
     }
   }
+
+  async function patchPlanShareUserPrivateAllowEdit(peerUserId: string, nextAllow: boolean) {
+    if (!selectedPlanId) return
+    const busyKey = `user:${peerUserId}`
+    setPlanSharePatchKey(busyKey)
+    try {
+      const res = await authedFetch(`/api/app/plans/${encodeURIComponent(selectedPlanId)}/shares`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target: 'user',
+          peerUserId,
+          allowEditing: nextAllow,
+        }),
+      })
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(j.error || `HTTP ${res.status}`)
+      }
+      setPlanShareRowMenuKey(null)
+      await loadPlanShares()
+      toast.success('Share updated')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Update failed')
+    } finally {
+      setPlanSharePatchKey(null)
+    }
+  }
+
+  async function patchPlanShareUserGroupHideFuture(peerUserId: string, nextHide: boolean) {
+    if (!selectedPlanId) return
+    const busyKey = `user:${peerUserId}`
+    setPlanSharePatchKey(busyKey)
+    try {
+      const res = await authedFetch(`/api/app/plans/${encodeURIComponent(selectedPlanId)}/shares`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target: 'user',
+          peerUserId,
+          hideFutureWorkouts: nextHide,
+        }),
+      })
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(j.error || `HTTP ${res.status}`)
+      }
+      setPlanShareRowMenuKey(null)
+      await loadPlanShares()
+      toast.success('Share updated')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Update failed')
+    } finally {
+      setPlanSharePatchKey(null)
+    }
+  }
+
+  const planSharesBelowHeader = useMemo(() => {
+    if (rightPanelMode === 'schedule') return null
+    if (planScheduleReadOnly || !selectedPlanId) return null
+    if (selectedPlan?.isPersonal) return null
+    const allowsHubShare = selectedPlan?.trainingIntent === 1
+    const sharingHeading = (
+      <>
+        <h3 className="text-sm font-semibold text-gray-900">Sharing</h3>
+        <p className="mt-1 text-xs text-gray-500">
+          {allowsHubShare
+            ? 'Which hubs and connections this plan is shared with.'
+            : 'Which connections this plan is shared with.'}
+        </p>
+      </>
+    )
+    if (planSharesLoading) {
+      return (
+        <div className="shrink-0 border-b border-gray-100 px-4 py-3">
+          <div className="rounded-lg border border-gray-100 bg-gray-50/80 px-3 py-3">
+            {sharingHeading}
+            <p className="mt-3 text-sm text-gray-500">Loading share list…</p>
+          </div>
+        </div>
+      )
+    }
+    if (planSharesError) {
+      return (
+        <div className="shrink-0 border-b border-gray-100 px-4 py-3">
+          <div className="rounded-lg border border-gray-100 bg-gray-50/80 px-3 py-3">
+            {sharingHeading}
+            <p className="mt-3 text-sm text-red-600">{planSharesError}</p>
+          </div>
+        </div>
+      )
+    }
+    const hubs = planSharesSnapshot.groups
+    const people = planSharesSnapshot.users
+    return (
+      <div className="shrink-0 border-b border-gray-100 px-4 py-3">
+        <div className="rounded-lg border border-gray-100 bg-gray-50/80 px-3 py-3">
+          {sharingHeading}
+          <div className="mt-4 space-y-4">
+          {allowsHubShare && (
+          <div className="rounded-lg border border-gray-100 bg-white p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Hubs</p>
+            {hubs.length === 0 ? (
+              <div className="mt-2 rounded-md border border-gray-100 bg-gray-50 px-3 py-3">
+                <p className="text-sm text-gray-500">Not shared with any hub yet.</p>
+              </div>
+            ) : (
+              <ul className="mt-2 divide-y divide-gray-100 overflow-visible rounded-md border border-gray-100">
+                {hubs.map((h) => {
+                  const hubShareLine = formatSharedOnLine(h.sharedAt)
+                  const hubMenuKey = `hub:${h.groupId}`
+                  const hubPatchKey = hubMenuKey
+                  const hubMenuOpen = planShareRowMenuKey === hubMenuKey
+                  return (
+                    <li
+                      key={`hub-${h.groupId}`}
+                      className={`flex items-start justify-between gap-2 bg-gray-50 px-3 py-2 text-sm ${
+                        hubMenuOpen ? 'relative z-[8000]' : ''
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <button
+                          type="button"
+                          onClick={() => setPlanSharingHubProfileGroupId(h.groupId)}
+                          className="max-w-full truncate text-left text-sm font-medium text-violet-800 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                          aria-label={`View hub profile for ${h.groupName || h.groupId}`}
+                        >
+                          {h.groupName || h.groupId}
+                        </button>
+                        {hubShareLine ? <p className="text-xs text-gray-500">{hubShareLine}</p> : null}
+                        <p className="text-xs text-gray-600">
+                          {h.hideFutureWorkouts
+                            ? 'Cannot view future workouts (sees up to today).'
+                            : 'Can view future workouts (sees beyond today).'}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-start gap-1">
+                        <div className="relative" data-plan-share-actions-menu>
+                          <button
+                            type="button"
+                            aria-label="Edit share settings"
+                            aria-expanded={hubMenuOpen}
+                            aria-haspopup="menu"
+                            disabled={planSharePatchKey === hubPatchKey}
+                            onClick={() =>
+                              setPlanShareRowMenuKey((k) => (k === hubMenuKey ? null : hubMenuKey))
+                            }
+                            className="rounded border border-gray-200 bg-white px-2 py-1.5 text-xs font-medium text-gray-900 shadow-sm hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 disabled:opacity-50"
+                          >
+                            Edit
+                          </button>
+                          {hubMenuOpen ? (
+                            <div
+                              role="menu"
+                              className="absolute right-0 z-[9000] mt-1 min-w-[12rem] rounded-md border border-gray-200 bg-white py-1 shadow-lg"
+                            >
+                              <button
+                                type="button"
+                                role="menuitem"
+                                disabled={planSharePatchKey !== null}
+                                className="block w-full px-3 py-2 text-left text-xs text-gray-800 hover:bg-gray-50 disabled:opacity-50"
+                                onClick={() => void patchPlanShareHubHideFuture(h.groupId, !h.hideFutureWorkouts)}
+                              >
+                                {h.hideFutureWorkouts
+                                  ? 'Show future workouts'
+                                  : 'Hide future workouts'}
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          disabled={planSharePatchKey === hubPatchKey}
+                          onClick={() =>
+                            setStopPlanShareConfirm({
+                              planId: selectedPlanId,
+                              kind: 'group',
+                              groupId: h.groupId,
+                              label: h.groupName || h.groupId,
+                              groupFeedItemId: h.groupFeedItemId,
+                            })
+                          }
+                          className="shrink-0 rounded bg-red-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-1 disabled:opacity-50"
+                        >
+                          Stop Sharing
+                        </button>
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+          )}
+          <div className="rounded-lg border border-gray-100 bg-white p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Connections</p>
+            {people.length === 0 ? (
+              <div className="mt-2 rounded-md border border-gray-100 bg-gray-50 px-3 py-3">
+                <p className="text-sm text-gray-500">Not shared with any connection yet.</p>
+              </div>
+            ) : (
+              <ul className="mt-2 divide-y divide-gray-100 overflow-visible rounded-md border border-gray-100">
+                {people.map((p) => {
+                  const personShareLine = formatSharedOnLine(p.sharedAt)
+                  const personLabel = p.displayName.trim() || p.peerUserId
+                  const userMenuKey = `user:${p.peerUserId}`
+                  const userPatchKey = userMenuKey
+                  const userMenuOpen = planShareRowMenuKey === userMenuKey
+                  return (
+                    <li
+                      key={`user-${p.peerUserId}`}
+                      className={`flex items-start justify-between gap-2 bg-gray-50 px-3 py-2 text-sm ${
+                        userMenuOpen ? 'relative z-[8000]' : ''
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <button
+                          type="button"
+                          onClick={() => setPlanSharingConnectionProfileUserId(p.peerUserId)}
+                          className="max-w-full truncate text-left text-sm font-medium text-violet-800 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 rounded"
+                          aria-label={`View profile for ${personLabel}`}
+                        >
+                          {personLabel}
+                        </button>
+                        {p.handle || personShareLine ? (
+                          <p className="truncate text-xs text-gray-500">
+                            {p.handle ? <>{p.handle}</> : null}
+                            {p.handle && personShareLine ? (
+                              <span aria-hidden> • </span>
+                            ) : null}
+                            {personShareLine ? <>{personShareLine}</> : null}
+                          </p>
+                        ) : null}
+                        {!allowsHubShare ? (
+                          <p className="text-xs text-gray-600">
+                            {p.allowEditing
+                              ? 'Can edit planned workouts (read/write).'
+                              : 'Cannot edit planned workouts (view only).'}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-gray-600">
+                            {p.hideFutureWorkouts
+                              ? 'Cannot view future workouts (sees up to today).'
+                              : 'Can view future workouts (sees beyond today).'}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-start gap-1">
+                        <div className="relative" data-plan-share-actions-menu>
+                          <button
+                            type="button"
+                            aria-label="Edit share settings"
+                            aria-expanded={userMenuOpen}
+                            aria-haspopup="menu"
+                            disabled={planSharePatchKey === userPatchKey}
+                            onClick={() =>
+                              setPlanShareRowMenuKey((k) => (k === userMenuKey ? null : userMenuKey))
+                            }
+                            className="rounded border border-gray-200 bg-white px-2 py-1.5 text-xs font-medium text-gray-900 shadow-sm hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 disabled:opacity-50"
+                          >
+                            Edit
+                          </button>
+                          {userMenuOpen ? (
+                            <div
+                              role="menu"
+                              className="absolute right-0 z-[9000] mt-1 min-w-[12rem] rounded-md border border-gray-200 bg-white py-1 shadow-lg"
+                            >
+                              {!allowsHubShare ? (
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={planSharePatchKey !== null}
+                                  className="block w-full px-3 py-2 text-left text-xs text-gray-800 hover:bg-gray-50 disabled:opacity-50"
+                                  onClick={() =>
+                                    void patchPlanShareUserPrivateAllowEdit(p.peerUserId, !p.allowEditing)
+                                  }
+                                >
+                                  {p.allowEditing ? 'Change to view only' : 'Allow editing'}
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={planSharePatchKey !== null}
+                                  className="block w-full px-3 py-2 text-left text-xs text-gray-800 hover:bg-gray-50 disabled:opacity-50"
+                                  onClick={() =>
+                                    void patchPlanShareUserGroupHideFuture(
+                                      p.peerUserId,
+                                      !p.hideFutureWorkouts
+                                    )
+                                  }
+                                >
+                                  {p.hideFutureWorkouts
+                                    ? 'Show future workouts'
+                                    : 'Hide future workouts'}
+                                </button>
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          disabled={planSharePatchKey === userPatchKey}
+                          onClick={() =>
+                            setStopPlanShareConfirm({
+                              planId: selectedPlanId,
+                              kind: 'user',
+                              peerUserId: p.peerUserId,
+                              label: personLabel,
+                              recipientFeedItemId: p.recipientFeedItemId,
+                            })
+                          }
+                          className="shrink-0 rounded bg-red-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-1 disabled:opacity-50"
+                        >
+                          Stop Sharing
+                        </button>
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+          </div>
+        </div>
+      </div>
+    )
+  }, [
+    rightPanelMode,
+    planScheduleReadOnly,
+    selectedPlanId,
+    planSharesLoading,
+    planSharesError,
+    planSharesSnapshot.groups,
+    planSharesSnapshot.users,
+    selectedPlan?.isPersonal,
+    selectedPlan?.trainingIntent,
+    planShareRowMenuKey,
+    planSharePatchKey,
+    patchPlanShareHubHideFuture,
+    patchPlanShareUserPrivateAllowEdit,
+    patchPlanShareUserGroupHideFuture,
+  ])
 
   const maxP = maxPlans ?? UNLIMITED
   const planCount = plansCount ?? 0
@@ -6256,13 +8098,15 @@ function PlansSection({
   const isPro = tier === 'pro'
   const isPastDate = createDate < todayYmd
   const isFutureDate = createDate > todayYmd
-  const canAddPlannedForSelectedDate =
-    !isPastDate && (createDate === todayYmd || (isFutureDate && isPro))
-  const plannedDateRestrictionMessage = isPastDate
-    ? 'Cannot add workouts to past dates.'
-    : isFutureDate && !isPro
-      ? 'Upgrade to Pro to plan for future dates.'
-      : null
+  const canAddPlannedForSelectedDate = planScheduleReadOnly
+    ? !isPastDate && (createDate === todayYmd || (isFutureDate && isPro))
+    : createDate === todayYmd || isPastDate || (isFutureDate && isPro)
+  const plannedDateRestrictionMessage =
+    planScheduleReadOnly && isPastDate
+      ? 'Cannot add workouts to past dates.'
+      : isFutureDate && !isPro
+        ? 'Upgrade to Pro to plan for future dates.'
+        : null
 
   async function handleCreatePlanSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -6270,15 +8114,24 @@ function PlansSection({
     setCreatePlanError(null)
     setCreatePlanBusy(true)
     try {
+      const isPersonal = createPlanKind === 'personal'
+      const trainingIntent: 0 | 1 | undefined =
+        createPlanKind === 'personal'
+          ? undefined
+          : createPlanKind === 'privateTraining'
+            ? 0
+            : 1
       const created = await onCreatePlan(
         createPlanName.trim(),
         createPlanDescription.trim() || null,
-        createPlanType === 'personal'
+        isPersonal,
+        trainingIntent
       )
       setCreatePlanOpen(false)
       setCreatePlanName('')
       setCreatePlanDescription('')
-      setCreatePlanType('group')
+      setCreatePlanKind('privateTraining')
+      setSelectedFollowingSubscriptionId(null)
       setSelectedPlanId(created.id)
     } catch (e) {
       setCreatePlanError(e instanceof Error ? e.message : 'Failed to create plan')
@@ -6295,108 +8148,18 @@ function PlansSection({
     setEditPlanOpen(true)
   }
 
-  function privacyKeyFromValue(value: number | null | undefined): PlanPrivacyKey {
-    if (value === PLAN_PRIVACY.protected) return 'protected'
-    if (value === PLAN_PRIVACY.public) return 'public'
-    return 'private'
-  }
-
-  function openEditSharing(plan: WorkoutPlan) {
-    if (plan.isPersonal) return
-    setEditSharingPlan(plan)
-    setEditSharingPrivacy(privacyKeyFromValue(plan.privacy))
-    setEditSharingHandle(plan.handle ?? '')
-    setEditSharingError(null)
-    setEditSharingOpen(true)
-  }
-
-  async function loadFollowers(
-    status: FollowerStatus,
-    opts?: { reset?: boolean; planId?: string | null }
-  ) {
-    const planId = opts?.planId ?? manageFollowersPlan?.id ?? null
-    if (!planId) return
-    const reset = opts?.reset === true
-    const cursor = reset ? null : followersByStatus[status].nextCursor
-    setFollowersByStatus((prev) => ({
-      ...prev,
-      [status]: {
-        ...prev[status],
-        loading: true,
-        error: null,
-        ...(reset ? { items: [], nextCursor: null } : {}),
-      },
-    }))
-    try {
-      const params = new URLSearchParams()
-      params.set('status', status)
-      params.set('pageSize', '25')
-      if (cursor) params.set('cursor', cursor)
-      if (followersQuery.trim()) params.set('query', followersQuery.trim())
-      const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(planId)}/followers?${params.toString()}`
-      )
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || 'Failed to load followers')
-      }
-      const data = (await res.json()) as { items?: PlanFollower[]; nextCursor?: string | null }
-      const incoming = Array.isArray(data.items) ? data.items : []
-      setFollowersByStatus((prev) => {
-        const existing = reset ? [] : prev[status].items
-        const merged = [...existing]
-        incoming.forEach((item) => {
-          if (!merged.some((x) => x.subscriptionDocumentId === item.subscriptionDocumentId)) {
-            merged.push(item)
-          }
-        })
-        return {
-          ...prev,
-          [status]: {
-            ...prev[status],
-            items: merged,
-            nextCursor: data.nextCursor ?? null,
-            loading: false,
-            error: null,
-          },
-        }
-      })
-    } catch (e) {
-      setFollowersByStatus((prev) => ({
-        ...prev,
-        [status]: {
-          ...prev[status],
-          loading: false,
-          error: e instanceof Error ? e.message : 'Failed to load followers',
-        },
-      }))
-    }
-  }
-
-  function openManageFollowers(plan: WorkoutPlan) {
-    if (plan.isPersonal) return
-    setManageFollowersPlan(plan)
-    setManageFollowersOpen(true)
-    setFollowersQuery('')
-    setFollowersByStatus({
-      active: { items: [], nextCursor: null, loading: false, error: null },
-      pending: { items: [], nextCursor: null, loading: false, error: null },
-      blocked: { items: [], nextCursor: null, loading: false, error: null },
-    })
-    void Promise.all([
-      loadFollowers('active', { reset: true, planId: plan.id }),
-      loadFollowers('pending', { reset: true, planId: plan.id }),
-      loadFollowers('blocked', { reset: true, planId: plan.id }),
-    ])
-  }
-
   async function handleEditPlanSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!editPlan || !editPlanName.trim()) return
     setEditPlanError(null)
     setEditPlanBusy(true)
     try {
-      await onUpdatePlan(editPlan.id, editPlanName.trim(), editPlanDescription.trim() || null)
+      await onUpdatePlan(
+        editPlan.id,
+        editPlanName.trim(),
+        editPlanDescription.trim() || null,
+        undefined
+      )
       setEditPlanOpen(false)
       setEditPlan(null)
       setEditPlanName('')
@@ -6405,79 +8168,6 @@ function PlansSection({
       setEditPlanError(e instanceof Error ? e.message : 'Failed to update plan')
     } finally {
       setEditPlanBusy(false)
-    }
-  }
-
-  async function handleEditSharingSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!editSharingPlan) return
-    setEditSharingError(null)
-    setEditSharingBusy(true)
-    try {
-      const privacy = PLAN_PRIVACY[editSharingPrivacy]
-      const normalizedHandle = editSharingHandle.trim()
-      if (privacy !== PLAN_PRIVACY.private && !normalizedHandle) {
-        throw new Error('Handle is required for protected/public sharing.')
-      }
-      await onUpdatePlanSharing(
-        editSharingPlan.id,
-        privacy,
-        normalizedHandle ? normalizedHandle : null
-      )
-      setEditSharingOpen(false)
-      setEditSharingPlan(null)
-      setEditSharingHandle('')
-      setEditSharingError(null)
-    } catch (e) {
-      setEditSharingError(
-        e instanceof Error ? e.message : 'Failed to update sharing options'
-      )
-    } finally {
-      setEditSharingBusy(false)
-    }
-  }
-
-  async function handleFollowersSearchSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!manageFollowersPlan) return
-    await Promise.all([
-      loadFollowers('active', { reset: true, planId: manageFollowersPlan.id }),
-      loadFollowers('pending', { reset: true, planId: manageFollowersPlan.id }),
-      loadFollowers('blocked', { reset: true, planId: manageFollowersPlan.id }),
-    ])
-  }
-
-  async function handleFollowerAction(
-    item: PlanFollower,
-    action: 'approve' | 'reject' | 'revoke' | 'block' | 'unblock'
-  ) {
-    if (!manageFollowersPlan) return
-    const busyKey = `${item.subscriptionDocumentId}:${action}`
-    setFollowersActionBusy(busyKey)
-    try {
-      const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(manageFollowersPlan.id)}/followers`,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            subscriberUserId: item.subscriberUserId,
-            subscriptionDocumentId: item.subscriptionDocumentId,
-            action,
-          }),
-        }
-      )
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || 'Failed to update follower')
-      }
-      await Promise.all([
-        loadFollowers('active', { reset: true, planId: manageFollowersPlan.id }),
-        loadFollowers('pending', { reset: true, planId: manageFollowersPlan.id }),
-        loadFollowers('blocked', { reset: true, planId: manageFollowersPlan.id }),
-      ])
-    } finally {
-      setFollowersActionBusy(null)
     }
   }
 
@@ -6495,11 +8185,16 @@ function PlansSection({
     setEditScheduleOptions({ ...parsed.options, direction: parsed.direction ? 1 : 0 })
     setEditScheduleError(null)
     setEditSchedulePlannedWorkout(pw)
+    setEditScheduleWorkoutDetails(
+      pw.workout.type !== 'MultiSegmentWorkout'
+        ? ((pw.workout as { workoutDetails?: string | null }).workoutDetails ?? '')
+        : ''
+    )
   }
 
   async function handleSaveEditSchedule(e: React.FormEvent) {
     e.preventDefault()
-    if (!editSchedulePlannedWorkout || !selectedPlan) return
+    if (!editSchedulePlannedWorkout) return
     if (!hasValidDurationForMode(editScheduleMode, editScheduleOptions, parseDurationInput)) {
       setEditScheduleError('Warmup, Cooldown, and Rest require a duration greater than 0:00.')
       return
@@ -6508,12 +8203,16 @@ function PlansSection({
     setEditScheduleBusy(true)
     try {
       const built = buildWorkoutFromCreateForm(editScheduleMode, editScheduleOptions)
+      const body: Record<string, unknown> = { workout: built }
+      if (editSchedulePlannedWorkout.workout.type !== 'MultiSegmentWorkout') {
+        body.workoutDetails = editScheduleWorkoutDetails.trim() || null
+      }
       const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(selectedPlan.id)}/planned-workouts/${encodeURIComponent(editSchedulePlannedWorkout.id)}`,
+        `/api/app/plans/${encodeURIComponent(editSchedulePlannedWorkout.planId)}/planned-workouts/${encodeURIComponent(editSchedulePlannedWorkout.id)}`,
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workout: built }),
+          body: JSON.stringify(body),
         }
       )
       if (!res.ok) {
@@ -6522,6 +8221,7 @@ function PlansSection({
       }
       reloadPlanned()
       setEditSchedulePlannedWorkout(null)
+      setEditScheduleWorkoutDetails('')
       setExpandedPlannedWorkoutId(null)
       toast.success('Workout schedule saved')
     } catch (e) {
@@ -6533,19 +8233,20 @@ function PlansSection({
 
   async function handleSavePlannedEdit(e: React.FormEvent) {
     e.preventDefault()
-    if (!editPlannedWorkout || !selectedPlan) return
+    if (!editPlannedWorkout) return
     setEditPlannedError(null)
     setEditPlannedBusy(true)
     try {
+      const meta: Record<string, string | null> = {
+        workoutName: editPlannedName.trim() || null,
+        workoutDescription: editPlannedDescription.trim() || null,
+      }
       const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(selectedPlan.id)}/planned-workouts/${encodeURIComponent(editPlannedWorkout.id)}`,
+        `/api/app/plans/${encodeURIComponent(editPlannedWorkout.planId)}/planned-workouts/${encodeURIComponent(editPlannedWorkout.id)}`,
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            workoutName: editPlannedName.trim() || null,
-            workoutDescription: editPlannedDescription.trim() || null,
-          }),
+          body: JSON.stringify(meta),
         }
       )
       if (!res.ok) {
@@ -6558,8 +8259,8 @@ function PlansSection({
       setEditPlannedDescription('')
       setExpandedPlannedWorkoutId(null)
       onPlannedWorkoutMetadataSaved(editPlannedWorkout.id, {
-        workoutName: editPlannedName.trim() || null,
-        workoutDescription: editPlannedDescription.trim() || null,
+        workoutName: meta.workoutName,
+        workoutDescription: meta.workoutDescription,
       })
       toast.success('Planned workout saved')
     } catch (e) {
@@ -6593,12 +8294,249 @@ function PlansSection({
         throw new Error(data.error || 'Failed to copy workout')
       }
       setCopyPlannedWorkout(null)
-      if (copyTargetPlanId === selectedPlanId) reloadPlanned()
+      if (copyTargetPlanId === selectedPlanId || copyTargetPlanId === selectedPlanIdSecondary) reloadPlanned()
       toast.success('Workout copied to plan')
     } catch (e) {
       setCopyError(e instanceof Error ? e.message : 'Failed to copy workout')
     } finally {
       setCopyBusy(false)
+    }
+  }
+
+  async function handleCopyAllToPlan(e: React.FormEvent) {
+    e.preventDefault()
+    if (!copyAllSourceDateKey || !copyAllTargetPlanId || !copyAllTargetDay) return
+    setCopyAllError(null)
+    setCopyAllBusy(true)
+    try {
+      const dayStr = copyAllTargetDay.slice(0, 10)
+      const sourcePid = copyAllSourcePlanId ?? selectedPlanId
+      const sourceByDay =
+        selectedPlanIdSecondary && sourcePid === selectedPlanIdSecondary
+          ? scheduleSecondByDay ?? {}
+          : byDay
+      const sourceItems = [...(sourceByDay[copyAllSourceDateKey] ?? [])].sort((a, b) => a.ordinal - b.ordinal)
+      if (sourceItems.length === 0) {
+        setCopyAllSourceDateKey(null)
+        setCopyAllSourcePlanId(null)
+        return
+      }
+      const countRes = await authedFetch(
+        `/api/app/plans/${encodeURIComponent(copyAllTargetPlanId)}/planned-workouts?from=${encodeURIComponent(dayStr)}&to=${encodeURIComponent(dayStr)}`
+      )
+      if (!countRes.ok) {
+        const data = await countRes.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${countRes.status}`)
+      }
+      const countData = (await countRes.json()) as { plannedWorkouts?: PlannedWorkout[] }
+      const baseOrdinal = (countData.plannedWorkouts ?? []).length
+
+      for (let i = 0; i < sourceItems.length; i++) {
+        const pw = sourceItems[i]!
+        const w = pw.workout as Record<string, unknown>
+        const workout =
+          typeof w.timerMode === 'number'
+            ? w
+            : { ...w, timerMode: (Array.isArray(w.timerModes) ? (w.timerModes as number[])[0] : 1) }
+        const res = await authedFetch(
+          `/api/app/plans/${encodeURIComponent(copyAllTargetPlanId)}/planned-workouts`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              day: dayStr,
+              ordinal: baseOrdinal + i,
+              workout,
+            }),
+          }
+        )
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}))
+          throw new Error(
+            data.error || `Failed to copy workout ${i + 1} of ${sourceItems.length}`
+          )
+        }
+      }
+      setCopyAllSourceDateKey(null)
+      setCopyAllSourcePlanId(null)
+      if (
+        (copyAllTargetPlanId === selectedPlanId || copyAllTargetPlanId === selectedPlanIdSecondary) &&
+        !planScheduleReadOnly
+      ) {
+        reloadPlanned()
+      }
+      toast.success(
+        sourceItems.length === 1
+          ? 'Workout copied to plan'
+          : `${sourceItems.length} workouts copied to plan`
+      )
+    } catch (e) {
+      setCopyAllError(e instanceof Error ? e.message : 'Failed to copy workouts')
+    } finally {
+      setCopyAllBusy(false)
+    }
+  }
+
+  async function handleCopyAllToDay(e: React.FormEvent) {
+    e.preventDefault()
+    if (!copyAllToDaySourceDateKey || !copyAllToDayTargetDay || !selectedPlan) return
+    const dayStr = copyAllToDayTargetDay.slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayStr)) return
+    if (dayStr < todayYmd) {
+      setCopyAllToDayError('Cannot add workouts to past dates.')
+      return
+    }
+    if (dayStr > todayYmd && !isPro) {
+      setCopyAllToDayError('Upgrade to Pro to plan for future dates.')
+      return
+    }
+    if (dayStr === copyAllToDaySourceDateKey) {
+      setCopyAllToDayError('Choose a different date.')
+      return
+    }
+    const targetPlanId = copyAllToDaySourcePlanId ?? selectedPlan.id
+    setCopyAllToDayError(null)
+    setCopyAllToDayBusy(true)
+    try {
+      const sourcePid = targetPlanId
+      const sourceByDay =
+        selectedPlanIdSecondary && sourcePid === selectedPlanIdSecondary
+          ? scheduleSecondByDay ?? {}
+          : byDay
+      const sourceItems = [...(sourceByDay[copyAllToDaySourceDateKey] ?? [])].sort((a, b) => a.ordinal - b.ordinal)
+      if (sourceItems.length === 0) {
+        setCopyAllToDaySourceDateKey(null)
+        setCopyAllToDaySourcePlanId(null)
+        return
+      }
+      const countRes = await authedFetch(
+        `/api/app/plans/${encodeURIComponent(targetPlanId)}/planned-workouts?from=${encodeURIComponent(dayStr)}&to=${encodeURIComponent(dayStr)}`
+      )
+      if (!countRes.ok) {
+        const data = await countRes.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${countRes.status}`)
+      }
+      const countData = (await countRes.json()) as { plannedWorkouts?: PlannedWorkout[] }
+      const baseOrdinal = (countData.plannedWorkouts ?? []).length
+
+      for (let i = 0; i < sourceItems.length; i++) {
+        const pw = sourceItems[i]!
+        const w = pw.workout as Record<string, unknown>
+        const workout =
+          typeof w.timerMode === 'number'
+            ? w
+            : { ...w, timerMode: (Array.isArray(w.timerModes) ? (w.timerModes as number[])[0] : 1) }
+        const res = await authedFetch(
+          `/api/app/plans/${encodeURIComponent(targetPlanId)}/planned-workouts`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              day: dayStr,
+              ordinal: baseOrdinal + i,
+              workout,
+            }),
+          }
+        )
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}))
+          throw new Error(
+            data.error || `Failed to copy workout ${i + 1} of ${sourceItems.length}`
+          )
+        }
+      }
+      setCopyAllToDaySourceDateKey(null)
+      setCopyAllToDaySourcePlanId(null)
+      if (
+        (targetPlanId === selectedPlanId || targetPlanId === selectedPlanIdSecondary) &&
+        !planScheduleReadOnly
+      ) {
+        reloadPlanned()
+      }
+      toast.success(
+        sourceItems.length === 1
+          ? 'Workout copied to date'
+          : `${sourceItems.length} workouts copied to date`
+      )
+    } catch (err) {
+      setCopyAllToDayError(err instanceof Error ? err.message : 'Failed to copy workouts')
+    } finally {
+      setCopyAllToDayBusy(false)
+    }
+  }
+
+  async function handleMoveAllToDay(e: React.FormEvent) {
+    e.preventDefault()
+    if (!moveAllSourceDateKey || !moveAllTargetDay || !selectedPlan) return
+    const dayStr = moveAllTargetDay.slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayStr)) return
+    if (dayStr < todayYmd) {
+      setMoveAllError('Cannot move workouts to past dates.')
+      return
+    }
+    if (dayStr > todayYmd && !isPro) {
+      setMoveAllError('Upgrade to Pro to plan for future dates.')
+      return
+    }
+    if (dayStr === moveAllSourceDateKey) {
+      setMoveAllError('Choose a different date.')
+      return
+    }
+    setMoveAllError(null)
+    setMoveAllBusy(true)
+    try {
+      const sourcePid = moveAllSourcePlanId ?? selectedPlanId
+      const sourceByDay =
+        selectedPlanIdSecondary && sourcePid === selectedPlanIdSecondary
+          ? scheduleSecondByDay ?? {}
+          : byDay
+      const sourceItems = [...(sourceByDay[moveAllSourceDateKey] ?? [])].sort((a, b) => a.ordinal - b.ordinal)
+      if (sourceItems.length === 0) {
+        setMoveAllSourceDateKey(null)
+        setMoveAllSourcePlanId(null)
+        return
+      }
+      const moveTargetPlanId = moveAllSourcePlanId ?? selectedPlan.id
+      const countRes = await authedFetch(
+        `/api/app/plans/${encodeURIComponent(moveTargetPlanId)}/planned-workouts?from=${encodeURIComponent(dayStr)}&to=${encodeURIComponent(dayStr)}`
+      )
+      if (!countRes.ok) {
+        const data = await countRes.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${countRes.status}`)
+      }
+      const countData = (await countRes.json()) as { plannedWorkouts?: PlannedWorkout[] }
+      const baseOrdinal = (countData.plannedWorkouts ?? []).length
+
+      for (let i = 0; i < sourceItems.length; i++) {
+        const pw = sourceItems[i]!
+        const body = { day: dayStr, ordinal: baseOrdinal + i }
+        const res = await authedFetch(
+          `/api/app/plans/${encodeURIComponent(pw.planId)}/planned-workouts/${encodeURIComponent(pw.id)}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }
+        )
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}))
+          throw new Error(
+            data.error || `Failed to move workout ${i + 1} of ${sourceItems.length}`
+          )
+        }
+      }
+      setMoveAllSourceDateKey(null)
+      setMoveAllSourcePlanId(null)
+      reloadPlanned()
+      toast.success(
+        sourceItems.length === 1
+          ? 'Workout moved'
+          : `${sourceItems.length} workouts moved`
+      )
+    } catch (err) {
+      setMoveAllError(err instanceof Error ? err.message : 'Failed to move workouts')
+    } finally {
+      setMoveAllBusy(false)
     }
   }
 
@@ -6641,31 +8579,222 @@ function PlansSection({
     return fetch(input, { ...init, headers })
   }
 
-  /** Build plan-day-entry shaped object from a Workout for the planned-workout API. */
-  function workoutToPlanDayEntry(w: Workout): Record<string, unknown> {
-    const entry: Record<string, unknown> = {
-      timerMode: w.timerMode ?? (Array.isArray(w.timerModes) ? (w.timerModes as number[])[0] : 1),
-      workoutName: w.workoutName ?? null,
-      workoutDescription: w.workoutDescription ?? null,
-      type: w.type,
+  useEffect(() => {
+    setStopFollowingConfirmOpen(false)
+    setPlanOwnerPublicProfileUserId(null)
+  }, [selectedFollowingSubscriptionId])
+
+  useEffect(() => {
+    if (!selectedFollowingRow) {
+      setFollowedCoachProfile(null)
+      setFollowedCoachProfileLoading(false)
+      setFollowedCoachProfileError(null)
+      return
     }
-    if (w.workoutSchedule != null) entry.workoutSchedule = w.workoutSchedule
-    if (w.direction != null) entry.direction = w.direction
-    if (w.type === 'SingleSegmentWorkout' && 'workoutDetails' in w && w.workoutDetails != null) entry.workoutDetails = w.workoutDetails
-    if (w.type === 'MultiSegmentWorkout' && w.segments) entry.segments = w.segments
-    return entry
+    const ownerId = selectedFollowingRow.ownerUserId
+    let cancelled = false
+    setFollowedCoachProfile(null)
+    setFollowedCoachProfileError(null)
+    setFollowedCoachProfileLoading(true)
+    ;(async () => {
+      try {
+        const res = await authedFetch(
+          `/api/app/users/${encodeURIComponent(ownerId)}/public-profile`
+        )
+        if (!res.ok) {
+          const j = (await res.json().catch(() => ({}))) as { error?: string }
+          throw new Error(j.error || `HTTP ${res.status}`)
+        }
+        const data = (await res.json()) as PublicUserProfileView
+        if (!cancelled) setFollowedCoachProfile(data)
+      } catch (e) {
+        if (!cancelled) {
+          setFollowedCoachProfileError(
+            e instanceof Error ? e.message : 'Failed to load profile'
+          )
+        }
+      } finally {
+        if (!cancelled) setFollowedCoachProfileLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- authedFetch uses latest user token
+  }, [selectedFollowingRow?.ownerUserId, selectedFollowingSubscriptionId])
+
+  async function confirmStopFollowing() {
+    if (!selectedFollowingRow) return
+    setStopFollowingBusy(true)
+    try {
+      const res = await authedFetch(
+        `/api/app/following-plans/${encodeURIComponent(selectedFollowingRow.subscriptionDocumentId)}`,
+        { method: 'DELETE' }
+      )
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(j.error || `HTTP ${res.status}`)
+      }
+      setStopFollowingConfirmOpen(false)
+      setPlanAdminMoreOpen(false)
+      setSelectedFollowingSubscriptionId(null)
+      await reloadFollowingPlans?.()
+      toast.success('Your subscription to this plan has ended.')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not unsubscribe')
+    } finally {
+      setStopFollowingBusy(false)
+    }
   }
+
+  async function loadPlanShares() {
+    if (rightPanelMode === 'schedule') {
+      setPlanSharesSnapshot({ groups: [], users: [] })
+      setPlanSharesError(null)
+      setPlanSharesLoading(false)
+      return
+    }
+    if (!selectedPlanId || selectedFollowingSubscriptionId) {
+      setPlanSharesSnapshot({ groups: [], users: [] })
+      setPlanSharesError(null)
+      setPlanSharesLoading(false)
+      return
+    }
+    if (selectedPlan?.isPersonal) {
+      setPlanSharesSnapshot({ groups: [], users: [] })
+      setPlanSharesError(null)
+      setPlanSharesLoading(false)
+      return
+    }
+    setPlanSharesLoading(true)
+    setPlanSharesError(null)
+    try {
+      const res = await authedFetch(`/api/app/plans/${encodeURIComponent(selectedPlanId)}/shares`)
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(j.error || `HTTP ${res.status}`)
+      }
+      const data = (await res.json()) as {
+        groupShares?: {
+          groupId: string
+          groupName?: string
+          sharedAt?: string | null
+          groupFeedItemId?: string | null
+          hideFutureWorkouts?: unknown
+        }[]
+        userShares?: {
+          peerUserId: string
+          displayName?: string
+          handle?: string | null
+          sharedAt?: string | null
+          recipientFeedItemId?: string | null
+          allowEditing?: unknown
+          hideFutureWorkouts?: unknown
+        }[]
+      }
+      setPlanSharesSnapshot({
+        groups: (data.groupShares ?? []).map((g) => ({
+          groupId: g.groupId,
+          groupName: (g.groupName ?? '').trim() || g.groupId,
+          sharedAt: typeof g.sharedAt === 'string' ? g.sharedAt : null,
+          groupFeedItemId:
+            typeof g.groupFeedItemId === 'string' && g.groupFeedItemId.trim()
+              ? g.groupFeedItemId.trim()
+              : null,
+          hideFutureWorkouts: g.hideFutureWorkouts === false ? false : true,
+        })),
+        users: (data.userShares ?? []).map((u) => ({
+          peerUserId: u.peerUserId,
+          displayName: (u.displayName ?? '').trim(),
+          handle: u.handle ?? null,
+          sharedAt: typeof u.sharedAt === 'string' ? u.sharedAt : null,
+          recipientFeedItemId:
+            typeof u.recipientFeedItemId === 'string' && u.recipientFeedItemId.trim()
+              ? u.recipientFeedItemId.trim()
+              : null,
+          allowEditing: u.allowEditing === true,
+          hideFutureWorkouts: u.hideFutureWorkouts === false ? false : true,
+        })),
+      })
+    } catch (e) {
+      setPlanSharesError(e instanceof Error ? e.message : 'Failed to load shares')
+      setPlanSharesSnapshot({ groups: [], users: [] })
+    } finally {
+      setPlanSharesLoading(false)
+    }
+  }
+
+  async function confirmStopPlanShare() {
+    if (!stopPlanShareConfirm || !selectedPlanId) return
+    if (stopPlanShareConfirm.planId !== selectedPlanId) {
+      setStopPlanShareConfirm(null)
+      return
+    }
+    setStopPlanShareBusy(true)
+    try {
+      const pid = stopPlanShareConfirm.planId
+      let url = `/api/app/plans/${encodeURIComponent(pid)}/shares?`
+      if (stopPlanShareConfirm.kind === 'group') {
+        url += `target=group&groupId=${encodeURIComponent(stopPlanShareConfirm.groupId)}`
+        if (stopPlanShareConfirm.groupFeedItemId) {
+          url += `&groupFeedItemId=${encodeURIComponent(stopPlanShareConfirm.groupFeedItemId)}`
+        }
+      } else {
+        url += `target=user&peerUserId=${encodeURIComponent(stopPlanShareConfirm.peerUserId)}`
+        if (stopPlanShareConfirm.recipientFeedItemId) {
+          url += `&recipientFeedItemId=${encodeURIComponent(stopPlanShareConfirm.recipientFeedItemId)}`
+        }
+      }
+      const res = await authedFetch(url, { method: 'DELETE' })
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(j.error || `HTTP ${res.status}`)
+      }
+      setStopPlanShareConfirm(null)
+      await loadPlanShares()
+      toast.success('Stopped sharing this plan.')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not stop sharing')
+    } finally {
+      setStopPlanShareBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadPlanShares()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadPlanShares uses latest selectedPlanId / following id / rightPanelMode / personal from closure
+  }, [selectedPlanId, selectedFollowingSubscriptionId, rightPanelMode, selectedPlan?.isPersonal])
+
+  useEffect(() => {
+    if (
+      rightPanelMode !== 'schedule' &&
+      planShareWasOpenRef.current &&
+      !planShareOpen &&
+      selectedPlanId &&
+      !selectedFollowingSubscriptionId
+    ) {
+      void loadPlanShares()
+    }
+    planShareWasOpenRef.current = planShareOpen
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planShareOpen, selectedPlanId, selectedFollowingSubscriptionId, rightPanelMode])
 
   /** Add from favorite or collection: copy workout into planned workout, set sourceWorkoutId to workout.id, ordinal = end of list for that day. */
   async function addPlannedFromWorkout(workout: Workout) {
-    if (!selectedPlan) return
+    if (planScheduleReadOnly) return
+    const targetPlanId = scheduleAddTargetPlanId ?? selectedPlanId ?? selectedPlanIdSecondary ?? selectedPlan?.id
+    if (!targetPlanId) return
+    const byDayForTarget =
+      selectedPlanIdSecondary && targetPlanId === selectedPlanIdSecondary
+        ? scheduleSecondByDay ?? {}
+        : byDay
     setCreateBusy(true)
     setCreateError(null)
     try {
       const dayKey = createDate.slice(0, 10)
-      const ordinal = (byDay[dayKey] ?? []).length
+      const ordinal = (byDayForTarget[dayKey] ?? []).length
       const res = await authedFetch(
-        `/api/app/plans/${encodeURIComponent(selectedPlan.id)}/planned-workouts`,
+        `/api/app/plans/${encodeURIComponent(targetPlanId)}/planned-workouts`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -6686,6 +8815,7 @@ function PlansSection({
       setAddWorkoutSource('choice')
       setExpandedCollectionId(null)
       setSelectedWorkoutForPlan(null)
+      setScheduleAddTargetPlanId(null)
       reloadPlanned()
     } catch (e) {
       setCreateError(e instanceof Error ? e.message : 'Failed to add to plan')
@@ -6696,7 +8826,13 @@ function PlansSection({
 
   /** Create from scratch: workout from form, sourceWorkoutId null, ordinal = end of list for that day. plannedWorkoutId and plan/day set by API. */
   async function handleCreatePlanned() {
-    if (!selectedPlan) return
+    if (planScheduleReadOnly) return
+    const targetPlanId = scheduleAddTargetPlanId ?? selectedPlanId ?? selectedPlanIdSecondary ?? selectedPlan?.id
+    if (!targetPlanId) return
+    const byDayForTarget =
+      selectedPlanIdSecondary && targetPlanId === selectedPlanIdSecondary
+        ? scheduleSecondByDay ?? {}
+        : byDay
     if (!hasValidDurationForMode(createMode, createOptions, parseDurationInput)) {
       setCreateError('Warmup, Cooldown, and Rest require a duration greater than 0:00.')
       return
@@ -6719,10 +8855,10 @@ function PlansSection({
           : createOptions
       )
       const dayKey = createDate.slice(0, 10)
-      const ordinal = (byDay[dayKey] ?? []).length
+      const ordinal = (byDayForTarget[dayKey] ?? []).length
       const res = await authedFetch(
         `/api/app/plans/${encodeURIComponent(
-          selectedPlan.id
+          targetPlanId
         )}/planned-workouts`,
         {
           method: 'POST',
@@ -6744,7 +8880,7 @@ function PlansSection({
       const hasMeta = createPlannedName.trim() || createPlannedDescription.trim() || createPlannedDetails.trim()
       if (created?.id && hasMeta) {
         const patchRes = await authedFetch(
-          `/api/app/plans/${encodeURIComponent(selectedPlan.id)}/planned-workouts/${encodeURIComponent(created.id)}`,
+          `/api/app/plans/${encodeURIComponent(targetPlanId)}/planned-workouts/${encodeURIComponent(created.id)}`,
           {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -6767,6 +8903,7 @@ function PlansSection({
       setCreatePlannedName('')
       setCreatePlannedDescription('')
       setCreatePlannedDetails('')
+      setScheduleAddTargetPlanId(null)
       reloadPlanned()
     } catch (e) {
       setCreateError(
@@ -6777,46 +8914,118 @@ function PlansSection({
     }
   }
 
+  const scheduleWeekColumns = useMemo(() => {
+    if (rightPanelMode !== 'schedule') {
+      return [] as {
+        slot: 'left' | 'right'
+        planId: string | null
+        excludePlanId: string | null
+        byDayMap: Record<string, PlannedWorkout[]>
+        headerPlan: WorkoutPlan | null
+        columnWeekStart: string
+        setColumnWeekStart: (value: string) => void
+        columnWeekEnd: string
+        columnPlanDayCount: number
+        columnPlanViewMode: 'week' | '3day' | '1day'
+        setColumnPlanViewMode: (mode: 'week' | '3day' | '1day') => void
+      }[]
+    }
+    const followingRowForSchedule =
+      selectedFollowingSubscriptionId === null
+        ? null
+        : followingPlans.find((f) => f.subscriptionDocumentId === selectedFollowingSubscriptionId) ?? null
+    const primaryPlan =
+      followingRowForSchedule != null
+        ? followingSubscriptionToWorkoutPlan(followingRowForSchedule)
+        : selectedPlanId
+          ? plans.find((p) => p.id === selectedPlanId) ?? null
+          : null
+    const secondaryPlan =
+      selectedPlanIdSecondary && selectedPlanIdSecondary !== primaryPlan?.id
+        ? plans.find((p) => p.id === selectedPlanIdSecondary) ?? null
+        : null
+    const both = [
+      {
+        slot: 'left' as const,
+        planId: primaryPlan?.id ?? null,
+        excludePlanId: secondaryPlan?.id ?? null,
+        byDayMap: byDay,
+        headerPlan: primaryPlan,
+        columnWeekStart: weekStart,
+        setColumnWeekStart: setWeekStart,
+        columnWeekEnd: weekEnd,
+        columnPlanDayCount: planDayCount,
+        columnPlanViewMode: planViewMode,
+        setColumnPlanViewMode: setPlanViewMode,
+      },
+      {
+        slot: 'right' as const,
+        planId: secondaryPlan?.id ?? null,
+        excludePlanId: primaryPlan?.id ?? null,
+        byDayMap: secondaryPlan ? (scheduleSecondByDay ?? {}) : {},
+        headerPlan: secondaryPlan,
+        columnWeekStart: weekStartSecondary,
+        setColumnWeekStart: setWeekStartSecondary,
+        columnWeekEnd: weekEndSecondary,
+        columnPlanDayCount: planDayCountSecondary,
+        columnPlanViewMode: planViewModeSecondary,
+        setColumnPlanViewMode: setPlanViewModeSecondary,
+      },
+    ]
+    return planAheadColumnCount === 1 ? both.slice(0, 1) : both
+  }, [
+    rightPanelMode,
+    planAheadColumnCount,
+    plans,
+    selectedPlanId,
+    selectedPlanIdSecondary,
+    byDay,
+    scheduleSecondByDay,
+    weekStart,
+    setWeekStart,
+    weekEnd,
+    planDayCount,
+    planViewMode,
+    setPlanViewMode,
+    weekStartSecondary,
+    setWeekStartSecondary,
+    weekEndSecondary,
+    planDayCountSecondary,
+    planViewModeSecondary,
+    setPlanViewModeSecondary,
+    selectedFollowingSubscriptionId,
+    followingPlans,
+  ])
+
   return (
-    <div className="space-y-4">
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.8fr)]">
-        <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
-          <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex items-center justify-between gap-2">
+    <>
+    <div className="flex min-h-0 w-full flex-1 flex-col gap-4">
+      <div
+        className={
+          rightPanelMode === 'schedule'
+            ? 'grid min-h-[28rem] w-full flex-1 grid-cols-1 min-h-0 lg:min-h-0'
+            : 'grid min-h-[28rem] w-full flex-1 gap-6 lg:min-h-0 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.8fr)] lg:grid-rows-[minmax(0,1fr)]'
+        }
+      >
+        {rightPanelMode !== 'schedule' && (
+        <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-gymnext-muted/30 bg-white">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3">
             <h3 className="text-sm font-medium text-gray-800">
-              {isFollowingMode
-                ? `Following Plans (${followingPlans.length})`
-                : `My Plans ${plansLabel}`}
+              {listSurfaceTitle} {plansLabel}
             </h3>
-            {!isFollowingMode && (
-              <button
-                type="button"
-                onClick={() => setCreatePlanOpen(true)}
-                disabled={atPlansLimit}
-                title={atPlansLimit ? `Your plan allows up to ${maxP} plan${maxP === 1 ? '' : 's'}. Upgrade to add more.` : undefined}
-                className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90 disabled:opacity-50"
-                style={{ backgroundColor: '#6B21A8' }}
-              >
-                Create plan
-              </button>
-            )}
-            {isFollowingMode && (
-              <button
-                type="button"
-                onClick={() => {
-                  setFollowSearchError(null)
-                  setFollowSearchResults([])
-                  setFollowSearchQuery('')
-                  setFollowSearchOpen(true)
-                }}
-                className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90"
-                style={{ backgroundColor: '#6B21A8' }}
-              >
-                + Follow
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setCreatePlanOpen(true)}
+              disabled={atPlansLimit}
+              title={atPlansLimit ? `Your plan allows up to ${maxP} plan${maxP === 1 ? '' : 's'}. Upgrade to add more.` : undefined}
+              className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90 disabled:opacity-50"
+              style={{ backgroundColor: '#6B21A8' }}
+            >
+              Create plan
+            </button>
           </div>
           {reorderPlansError && onDismissReorderPlansError && (
-            <div className="px-4 py-2 flex items-center justify-between gap-2 bg-red-50 border-b border-red-200">
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-red-200 bg-red-50 px-4 py-2">
               <p className="text-xs text-red-800">{reorderPlansError}</p>
               <button
                 type="button"
@@ -6827,349 +9036,619 @@ function PlansSection({
               </button>
             </div>
           )}
-          {isFollowingMode && followingPlansError ? (
-            <p className="px-4 py-3 text-xs text-red-700 bg-red-50">{followingPlansError}</p>
-          ) : isFollowingMode && followingPlansLoading ? (
-            <p className="px-4 py-6 text-sm text-gray-500">Loading followed plans…</p>
-          ) : (isFollowingMode ? followingPlans.length === 0 : plans.length === 0) ? (
-            <p className="px-4 py-6 text-sm text-gray-500">
-              {isFollowingMode
-                ? 'You are not following any plans yet.'
-                : 'You do not have any plans yet. Create one to get started.'}
-            </p>
-          ) : (
-            <ul
-              className=""
-              onDragOver={(e) => {
-                e.preventDefault()
-                e.dataTransfer.dropEffect = 'move'
-              }}
-              onDrop={(e) => {
-                e.preventDefault()
-                e.stopPropagation()
-                const draggedId = e.dataTransfer.getData('text/plain')
-                if (!draggedId || !onReorderPlans) return
-                const currentIds = optimisticOrderedIds ?? plans.map((p) => p.id)
-                const toIndex = dropIndicatorBeforeIndex ?? currentIds.length
-                handlePlanDrop(draggedId, toIndex)
-              }}
-            >
-              {(isFollowingMode ? followingPlans : orderedPlans).map((p, index) => {
-                const isSelected = isFollowingMode
-                  ? selectedFollowingPlan?.subscriptionDocumentId === (p as FollowingPlan).subscriptionDocumentId
-                  : selectedPlan?.id === (p as WorkoutPlan).id
-                return (
-                <Fragment key={isFollowingMode ? (p as FollowingPlan).subscriptionDocumentId : (p as WorkoutPlan).id}>
-                  {dropIndicatorBeforeIndex === index && (
-                    <li
-                      className="flex items-center px-3 py-1 list-none border-t-0"
-                      aria-hidden
-                      onDragOver={(ev) => {
-                        ev.preventDefault()
-                        ev.stopPropagation()
-                        ev.dataTransfer.dropEffect = 'move'
-                      }}
-                      onDrop={(ev) => {
-                        ev.preventDefault()
-                        ev.stopPropagation()
-                        const id = ev.dataTransfer.getData('text/plain')
-                        if (id && onReorderPlans) handlePlanDrop(id, index)
-                      }}
-                    >
-                      <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
-                    </li>
-                  )}
-                  <li
-                    data-index={index}
-                    className={`pl-1 pr-4 py-3 flex items-center gap-3 cursor-pointer border-l-8 bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${
-                      isSelected ? '' : 'hover:bg-gray-100'
-                    } ${draggedPlanIndex === index ? 'opacity-50' : ''}`}
-                    style={{ borderLeftColor: isSelected ? '#6B21A8' : '#d1d5db' }}
-                    onClick={() =>
-                      isFollowingMode
-                        ? setSelectedFollowingPlanId(
-                            isSelected ? null : (p as FollowingPlan).subscriptionDocumentId
-                          )
-                        : setSelectedPlanId(isSelected ? null : (p as WorkoutPlan).id)
-                    }
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {plans.length === 0 ? (
+              <p className="px-4 pt-3 pb-3 text-sm text-gray-500">
+                You do not have any owned plans yet. Create one to get started.
+              </p>
+            ) : (
+            <>
+            {(
+              [
+                {
+                  section: 'personal' as const,
+                  title: 'Personal',
+                  headingId: 'plans-section-personal',
+                  rows: orderedPersonalPlans,
+                },
+                {
+                  section: 'privateTraining' as const,
+                  title: 'Private Training',
+                  headingId: 'plans-section-private-training',
+                  rows: orderedPrivateTrainingPlans,
+                },
+                {
+                  section: 'groupTraining' as const,
+                  title: 'Group Training',
+                  headingId: 'plans-section-group-training',
+                  rows: orderedGroupTrainingPlans,
+                },
+              ] as const
+            )
+              .filter((def) => def.rows.length > 0)
+              .map(({ section, title, headingId, rows }) => (
+              <Fragment key={section}>
+                <p
+                  className="px-4 pt-3 pb-1 text-xs font-semibold uppercase tracking-wide text-gray-500"
+                  id={headingId}
+                >
+                  {title}
+                </p>
+                  <ul
+                    className=""
+                    aria-labelledby={headingId}
                     onDragOver={(e) => {
                       e.preventDefault()
                       e.dataTransfer.dropEffect = 'move'
-                      if (draggedPlanIndex === null || !onReorderPlans) return
-                      const rect = e.currentTarget.getBoundingClientRect()
-                      const midY = rect.top + rect.height / 2
-                      const insertBefore = e.clientY < midY ? index : index + 1
-                      setDropIndicatorBeforeIndex(insertBefore)
                     }}
                     onDrop={(e) => {
                       e.preventDefault()
                       e.stopPropagation()
                       const draggedId = e.dataTransfer.getData('text/plain')
-                      if (!draggedId || !onReorderPlans) return
-                      const currentIds = optimisticOrderedIds ?? plans.map((plan) => plan.id)
-                      const fromIndex = currentIds.indexOf(draggedId)
-                      if (fromIndex === -1) return
-                      const rect = e.currentTarget.getBoundingClientRect()
-                      const midY = rect.top + rect.height / 2
-                      const toIndex = dropIndicatorBeforeIndex ?? (e.clientY < midY ? index : index + 1)
-                      handlePlanDrop(draggedId, Math.max(0, Math.min(toIndex, currentIds.length)))
+                      if (!draggedId || !onReorderPlansInSection || ownedDrag?.section !== section) {
+                        return
+                      }
+                      const len = rows.length
+                      const toIndex =
+                        ownedDropBefore?.section === section ? ownedDropBefore.beforeIndex : len
+                      handlePlanDropOwned(section, draggedId, toIndex)
                     }}
                   >
-                    <span
-                      draggable={!isFollowingMode}
-                      onDragStart={(e) => {
-                        if (isFollowingMode) return
-                        e.dataTransfer.effectAllowed = 'move'
-                        e.dataTransfer.setData('text/plain', (p as WorkoutPlan).id)
-                        setDraggedPlanIndex(index)
-                        setDropIndicatorBeforeIndex(null)
-                      }}
-                      onDragEnd={() => {
-                        setDraggedPlanIndex(null)
-                        setDropIndicatorBeforeIndex(null)
-                      }}
-                      className="w-6 shrink-0 flex items-center justify-center text-gray-400 cursor-grab active:cursor-grabbing touch-none"
-                      aria-hidden
-                      title="Drag to reorder"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      ⋮⋮
-                    </span>
-                    <span className="w-5 shrink-0 flex items-center justify-center" aria-hidden>
-                      {isSelected && (
-                        <span style={{ color: '#6B21A8' }} aria-label="Active plan">
-                          ✓
-                        </span>
-                      )}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-gray-900 truncate">
-                        {isFollowingMode
-                          ? ((p as FollowingPlan).remotePlanName || 'Followed plan')
-                          : (p as WorkoutPlan).workoutPlanName}
-                      </p>
-                      <p className="text-xs text-gray-500 truncate">
-                        {isFollowingMode
-                          ? ((p as FollowingPlan).remotePlanHandle
-                              ? `@${(p as FollowingPlan).remotePlanHandle}`
-                              : 'Read-only followed plan')
-                          : ((p as WorkoutPlan).workoutPlanDescription || 'No description')}
-                      </p>
-                    </div>
-                  </li>
-                </Fragment>
-              )
-              })}
-              {!isFollowingMode && dropIndicatorBeforeIndex === orderedPlans.length && (
-                <li
-                  className="flex items-center px-3 py-1 list-none border-t-0"
-                  aria-hidden
-                  onDragOver={(ev) => {
-                    ev.preventDefault()
-                    ev.stopPropagation()
-                    ev.dataTransfer.dropEffect = 'move'
-                  }}
-                  onDrop={(ev) => {
-                    ev.preventDefault()
-                    ev.stopPropagation()
-                    const id = ev.dataTransfer.getData('text/plain')
-                    if (id && onReorderPlans) handlePlanDrop(id, orderedPlans.length)
-                  }}
-                >
-                  <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
-                </li>
-              )}
-            </ul>
-          )}
-        </div>
-
-        <div className="rounded-lg border border-gymnext-muted/30 bg-white overflow-hidden">
-          {(!isFollowingMode && !selectedPlan) || (isFollowingMode && !selectedFollowingPlan) ? (
-            <p className="px-4 py-8 text-sm text-gray-500 text-center">
-              Select a plan from the list to view its schedule.
-            </p>
-          ) : (
-            <>
-          <div className="px-4 py-3 border-b border-gray-100 flex items-start justify-between gap-2 relative">
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium text-gray-900">
-                {selectedPlanName}
-              </p>
-              <p className="text-xs text-gray-600 mt-1">
-                {selectedPlanDescription}
-              </p>
-            </div>
-            {!isFollowingMode && selectedPlan && (
-            <div className="shrink-0">
-              <button
-                type="button"
-                onClick={() => setPlanMoreMenuOpen((open) => !open)}
-                className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
-                aria-label="More options"
-                aria-expanded={planMoreMenuOpen}
-              >
-                ⋯
-              </button>
-              {planMoreMenuOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-40"
-                    aria-hidden
-                    onClick={() => setPlanMoreMenuOpen(false)}
-                  />
-                  <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
-                    <button
-                      type="button"
-                      className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                      onClick={() => {
-                        setPlanMoreMenuOpen(false)
-                        openEditPlan(selectedPlan)
-                      }}
-                    >
-                      Edit plan
-                    </button>
-                    {!selectedPlan.isPersonal && (
-                      <button
-                        type="button"
-                        className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                        onClick={() => {
-                          setPlanMoreMenuOpen(false)
-                          openEditSharing(selectedPlan)
-                        }}
-                      >
-                        Edit sharing options
-                      </button>
-                    )}
-                    {!selectedPlan.isPersonal && (
-                      <button
-                        type="button"
-                        className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                        onClick={() => {
-                          setPlanMoreMenuOpen(false)
-                          openManageFollowers(selectedPlan)
-                        }}
-                      >
-                        Manage followers
-                      </button>
-                    )}
-                    {selectedPlan.id !== 'personal' && (
-                      <>
-                        <div className="my-1 border-t border-gray-200" aria-hidden />
-                        <button
-                          type="button"
-                          className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
-                          onClick={() => {
-                            setPlanMoreMenuOpen(false)
-                            setPlanDeleteConfirmOpen(true)
+                    {rows.map((p, index) => {
+                      const isSelected =
+                        selectedPlanId === p.id && selectedFollowingSubscriptionId === null
+                      const isDraggingHere =
+                        ownedDrag?.section === section && ownedDrag.index === index
+                      return (
+                        <Fragment key={p.id}>
+                          {ownedDropBefore?.section === section &&
+                            ownedDropBefore.beforeIndex === index && (
+                              <li
+                                className="flex items-center px-3 py-1 list-none border-t-0"
+                                aria-hidden
+                                onDragOver={(ev) => {
+                                  ev.preventDefault()
+                                  ev.stopPropagation()
+                                  ev.dataTransfer.dropEffect = 'move'
+                                }}
+                                onDrop={(ev) => {
+                                  ev.preventDefault()
+                                  ev.stopPropagation()
+                                  const id = ev.dataTransfer.getData('text/plain')
+                                  if (id && onReorderPlansInSection && ownedDrag?.section === section) {
+                                    handlePlanDropOwned(section, id, index)
+                                  }
+                                }}
+                              >
+                                <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
+                              </li>
+                            )}
+                          <li
+                            data-index={index}
+                            className={`pl-3 pr-4 py-3 flex items-center gap-3 cursor-pointer bg-white ${
+                              index > 0 ? 'border-t border-gray-200' : ''
+                            } ${isSelected ? '' : 'hover:bg-gray-100'} ${isDraggingHere ? 'opacity-50' : ''}`}
+                            onClick={() => setSelectedPlanId(isSelected ? null : p.id)}
+                            onDragOver={(e) => {
+                              e.preventDefault()
+                              e.dataTransfer.dropEffect = 'move'
+                              if (!onReorderPlansInSection || ownedDrag === null) return
+                              if (ownedDrag.section !== section) return
+                              const rect = e.currentTarget.getBoundingClientRect()
+                              const midY = rect.top + rect.height / 2
+                              const insertBefore = e.clientY < midY ? index : index + 1
+                              setOwnedDropBefore({ section, beforeIndex: insertBefore })
+                            }}
+                            onDrop={(e) => {
+                              e.preventDefault()
+                              e.stopPropagation()
+                              const draggedId = e.dataTransfer.getData('text/plain')
+                              if (!draggedId || !onReorderPlansInSection || ownedDrag?.section !== section) {
+                                return
+                              }
+                              const currentIds =
+                                optimisticOwnedOrder?.[section] ?? rows.map((plan) => plan.id)
+                              const fromIndex = currentIds.indexOf(draggedId)
+                              if (fromIndex === -1) return
+                              const rect = e.currentTarget.getBoundingClientRect()
+                              const midY = rect.top + rect.height / 2
+                              const toIndex =
+                                ownedDropBefore?.section === section
+                                  ? ownedDropBefore.beforeIndex
+                                  : e.clientY < midY
+                                    ? index
+                                    : index + 1
+                              handlePlanDropOwned(
+                                section,
+                                draggedId,
+                                Math.max(0, Math.min(toIndex, currentIds.length))
+                              )
+                            }}
+                          >
+                            <span
+                              className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem]"
+                              style={{ backgroundColor: planListStripeColor(isSelected) }}
+                              aria-hidden
+                            />
+                            <span
+                              draggable={Boolean(onReorderPlansInSection)}
+                              onDragStart={(e) => {
+                                if (!onReorderPlansInSection) return
+                                e.dataTransfer.effectAllowed = 'move'
+                                e.dataTransfer.setData('text/plain', p.id)
+                                setOwnedDrag({ section, index })
+                                setOwnedDropBefore(null)
+                              }}
+                              onDragEnd={() => {
+                                setOwnedDrag(null)
+                                setOwnedDropBefore(null)
+                              }}
+                              className={`w-6 shrink-0 flex items-center justify-center touch-none ${
+                                onReorderPlansInSection
+                                  ? 'text-gray-400 cursor-grab active:cursor-grabbing'
+                                  : 'text-gray-200 cursor-default'
+                              }`}
+                              aria-hidden
+                              title={onReorderPlansInSection ? 'Drag to reorder' : undefined}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <DragReorderGrip />
+                            </span>
+                            {isSelected && (
+                              <span className="shrink-0 text-teal-700" aria-label="Active plan">
+                                ✓
+                              </span>
+                            )}
+                            <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                              <PlanKindIcon kind={planVisualKindFromPlan(p)} selected={isSelected} />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium text-gray-900 truncate">
+                                  {p.workoutPlanName}
+                                </p>
+                                <p className="text-xs text-gray-500 truncate">
+                                  {planDisplayDescription(p)}
+                                </p>
+                              </div>
+                            </div>
+                          </li>
+                        </Fragment>
+                      )
+                    })}
+                    {ownedDropBefore?.section === section &&
+                      ownedDropBefore.beforeIndex === rows.length && (
+                        <li
+                          className="flex items-center px-3 py-1 list-none border-t-0"
+                          aria-hidden
+                          onDragOver={(ev) => {
+                            ev.preventDefault()
+                            ev.stopPropagation()
+                            ev.dataTransfer.dropEffect = 'move'
+                          }}
+                          onDrop={(ev) => {
+                            ev.preventDefault()
+                            ev.stopPropagation()
+                            const id = ev.dataTransfer.getData('text/plain')
+                            if (id && onReorderPlansInSection && ownedDrag?.section === section) {
+                              handlePlanDropOwned(section, id, rows.length)
+                            }
                           }}
                         >
-                          Delete plan
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
+                          <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
+                        </li>
+                      )}
+                  </ul>
+              </Fragment>
+            ))}
+            </>
             )}
-            {isFollowingMode && selectedFollowingPlan && (
-              <div className="shrink-0 relative">
-                <button
-                  type="button"
-                  onClick={() => setFollowingMoreMenuOpen((open) => !open)}
-                  className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
-                  aria-label="More options"
-                  aria-expanded={followingMoreMenuOpen}
+            {!followingPlansLoading && followingPlans.length > 0 && (
+              <>
+                <div className="mt-2 border-t border-gray-100" aria-hidden />
+                <p
+                  className="px-4 pt-3 pb-1 text-xs font-semibold uppercase tracking-wide text-gray-500"
+                  id="plans-subscriptions-heading"
                 >
-                  ⋯
-                </button>
-                {followingMoreMenuOpen && (
-                  <>
-                    <div
-                      className="fixed inset-0 z-40"
-                      aria-hidden
-                      onClick={() => setFollowingMoreMenuOpen(false)}
-                    />
-                    <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
-                      <button
-                        type="button"
-                        className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50"
-                        onClick={() => {
-                          setFollowingMoreMenuOpen(false)
-                          setStopFollowingError(null)
-                          setStopFollowingConfirmOpen(true)
+                  Following
+                </p>
+              <ul
+                className="pb-2"
+                aria-labelledby="plans-subscriptions-heading"
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  const draggedId = e.dataTransfer.getData('text/plain')
+                  if (!draggedId || !onReorderSubscriptions || subscriptionDragIndex === null) return
+                  const len = orderedFollowingPlans.length
+                  const toIndex =
+                    subscriptionDropBeforeIndex !== null ? subscriptionDropBeforeIndex : len
+                  handleSubscriptionDrop(draggedId, toIndex)
+                }}
+              >
+                {orderedFollowingPlans.map((row, index) => {
+                  const fp = followingSubscriptionToWorkoutPlan(row)
+                  const isSelected = selectedFollowingSubscriptionId === row.subscriptionDocumentId
+                  return (
+                    <Fragment key={row.subscriptionDocumentId}>
+                      {subscriptionDropBeforeIndex === index && (
+                        <li
+                          className="flex items-center px-3 py-1 list-none border-t-0"
+                          aria-hidden
+                          onDragOver={(ev) => {
+                            ev.preventDefault()
+                            ev.stopPropagation()
+                            ev.dataTransfer.dropEffect = 'move'
+                          }}
+                          onDrop={(ev) => {
+                            ev.preventDefault()
+                            ev.stopPropagation()
+                            const id = ev.dataTransfer.getData('text/plain')
+                            if (id && onReorderSubscriptions) {
+                              handleSubscriptionDrop(id, index)
+                            }
+                          }}
+                        >
+                          <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
+                        </li>
+                      )}
+                      <li
+                        className={`pl-3 pr-4 py-3 flex items-center gap-3 cursor-pointer bg-white ${
+                          index > 0 ? 'border-t border-gray-200' : ''
+                        } ${isSelected ? '' : 'hover:bg-gray-100'} ${
+                          subscriptionDragIndex === index ? 'opacity-50' : ''
+                        }`}
+                        onClick={() =>
+                          setSelectedFollowingSubscriptionId(
+                            isSelected ? null : row.subscriptionDocumentId
+                          )
+                        }
+                        onDragOver={(e) => {
+                          e.preventDefault()
+                          e.dataTransfer.dropEffect = 'move'
+                          if (subscriptionDragIndex === null || !onReorderSubscriptions) return
+                          const rect = e.currentTarget.getBoundingClientRect()
+                          const midY = rect.top + rect.height / 2
+                          setSubscriptionDropBeforeIndex(e.clientY < midY ? index : index + 1)
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          const draggedId = e.dataTransfer.getData('text/plain')
+                          if (!draggedId || !onReorderSubscriptions) return
+                          const currentIds =
+                            optimisticSubscriptionIds ??
+                            followingPlans.map((r) => r.subscriptionDocumentId)
+                          const rect = e.currentTarget.getBoundingClientRect()
+                          const midY = rect.top + rect.height / 2
+                          const toIndex =
+                            subscriptionDropBeforeIndex ??
+                            (e.clientY < midY ? index : index + 1)
+                          handleSubscriptionDrop(
+                            draggedId,
+                            Math.max(0, Math.min(toIndex, currentIds.length))
+                          )
                         }}
                       >
-                        Stop following
-                      </button>
-                    </div>
-                  </>
+                        <span
+                          className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem]"
+                          style={{ backgroundColor: planListStripeColor(isSelected) }}
+                          aria-hidden
+                        />
+                        <span
+                          draggable={Boolean(onReorderSubscriptions)}
+                          onDragStart={(e) => {
+                            if (!onReorderSubscriptions) return
+                            e.dataTransfer.effectAllowed = 'move'
+                            e.dataTransfer.setData('text/plain', row.subscriptionDocumentId)
+                            setSubscriptionDragIndex(index)
+                            setSubscriptionDropBeforeIndex(null)
+                          }}
+                          onDragEnd={() => {
+                            setSubscriptionDragIndex(null)
+                            setSubscriptionDropBeforeIndex(null)
+                          }}
+                          className={`w-6 shrink-0 flex items-center justify-center touch-none ${
+                            onReorderSubscriptions
+                              ? 'text-gray-400 cursor-grab active:cursor-grabbing'
+                              : 'text-gray-200 cursor-default'
+                          }`}
+                          aria-hidden
+                          title={onReorderSubscriptions ? 'Drag to reorder' : undefined}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <DragReorderGrip />
+                        </span>
+                        {isSelected && (
+                          <span className="shrink-0 text-teal-700" aria-label="Active plan">
+                            ✓
+                          </span>
+                        )}
+                        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                          <PlanKindIcon kind={planVisualKindFromPlan(fp)} selected={isSelected} />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-medium text-gray-900 truncate">
+                              {fp.workoutPlanName}
+                            </p>
+                            <p className="text-xs text-gray-500 truncate">
+                              {planDisplayDescription(fp)}
+                            </p>
+                          </div>
+                        </div>
+                      </li>
+                    </Fragment>
+                  )
+                })}
+                {subscriptionDropBeforeIndex === orderedFollowingPlans.length && (
+                  <li
+                    className="flex items-center px-3 py-1 list-none border-t-0"
+                    aria-hidden
+                    onDragOver={(ev) => {
+                      ev.preventDefault()
+                      ev.stopPropagation()
+                      ev.dataTransfer.dropEffect = 'move'
+                    }}
+                    onDrop={(ev) => {
+                      ev.preventDefault()
+                      ev.stopPropagation()
+                      const id = ev.dataTransfer.getData('text/plain')
+                      if (id && onReorderSubscriptions) {
+                        handleSubscriptionDrop(id, orderedFollowingPlans.length)
+                      }
+                    }}
+                  >
+                    <div className="h-1 flex-1 rounded-full min-w-0 bg-[#6B21A8]" />
+                  </li>
                 )}
-              </div>
+              </ul>
+              </>
             )}
           </div>
-          <div className="border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex flex-col gap-2">
-            <div className="flex flex-wrap items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={() => setWeekStart(addDays(weekStart, -planDayCount))}
-                className="rounded border border-gymnext-muted/50 bg-white px-2.5 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-background"
+        </div>
+        )}
+
+        <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-gymnext-muted/30 bg-white">
+          {rightPanelMode === 'schedule' ? (
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              {reorderPlansError && onDismissReorderPlansError ? (
+                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-red-200 bg-red-50 px-4 py-2">
+                  <p className="text-xs text-red-800">{reorderPlansError}</p>
+                  <button
+                    type="button"
+                    onClick={onDismissReorderPlansError}
+                    className="shrink-0 text-xs font-medium text-red-600 hover:text-red-800"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              ) : null}
+              {plansLoading ? (
+                <p className="shrink-0 px-4 py-2 text-sm text-gray-500">Loading planned workouts…</p>
+              ) : null}
+              {plansError ? (
+                <div className="shrink-0 bg-red-50 px-4 py-2 text-xs text-red-700">{plansError}</div>
+              ) : null}
+              <div className="flex shrink-0 items-center justify-end border-b border-gymnext-muted/30 bg-gymnext-background px-3 py-2">
+                <div
+                  className="inline-flex max-w-full rounded-lg border border-gymnext-muted/50 bg-white p-0.5"
+                  role="group"
+                  aria-label="Plan schedule layout"
+                >
+                  {(
+                    [
+                      { columns: 1 as const, label: 'Full View' },
+                      { columns: 2 as const, label: 'Split View' },
+                    ] as const
+                  ).map(({ columns, label }) => (
+                    <button
+                      key={columns}
+                      type="button"
+                      onClick={() => setPlanAheadColumnCount(columns)}
+                      className={`whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors sm:px-3 ${
+                        planAheadColumnCount === columns
+                          ? 'text-white'
+                          : 'text-gray-600 hover:bg-gymnext-background'
+                      }`}
+                      style={planAheadColumnCount === columns ? { backgroundColor: '#6B21A8' } : undefined}
+                      aria-pressed={planAheadColumnCount === columns}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div
+                className={`grid min-h-0 min-w-0 flex-1 grid-cols-1 gap-4 overflow-hidden lg:auto-rows-[minmax(0,1fr)] ${
+                  planAheadColumnCount === 2 ? 'lg:grid-cols-2 lg:gap-6' : 'lg:grid-cols-1'
+                }`}
               >
-                ← Prev
-              </button>
-              <span className="text-xs text-gray-600">
-                {planViewMode === '1day'
-                  ? new Date(weekStart + 'T12:00:00').toLocaleDateString(undefined, {
-                      month: 'short',
-                      day: 'numeric',
-                      year: 'numeric',
-                    })
-                  : <>
-                      {new Date(weekStart + 'T12:00:00').toLocaleDateString(
-                        undefined,
-                        { month: 'short', day: 'numeric', year: 'numeric' }
-                      )}{' '}
-                      –{' '}
-                      {new Date(weekEnd + 'T12:00:00').toLocaleDateString(undefined, {
+                {scheduleWeekColumns.map((col) => (
+                  <div
+                    key={col.slot}
+                    className={`flex min-h-0 min-w-0 flex-col overflow-hidden ${
+                      col.slot === 'right'
+                        ? 'border-t border-gray-100 pt-3 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0'
+                        : ''
+                    }`}
+                  >
+                    <div className="flex shrink-0 flex-col gap-1.5 border-b border-gymnext-muted/30 bg-gymnext-background px-2 py-2 sm:px-3">
+                      <label
+                        htmlFor={`plan-ahead-column-${col.slot}`}
+                        className="text-[11px] font-medium uppercase tracking-wide text-gray-600"
+                      >
+                        Plan
+                      </label>
+                      {plans.length === 0 && (col.slot !== 'left' || followingPlans.length === 0) ? (
+                        <p className="text-xs text-gray-500">
+                          No plans yet. Open <span className="font-medium text-gray-700">Plans</span> to create one.
+                        </p>
+                      ) : (
+                        <select
+                          id={`plan-ahead-column-${col.slot}`}
+                          value={
+                            col.slot === 'left' && selectedFollowingSubscriptionId
+                              ? `following:${selectedFollowingSubscriptionId}`
+                              : col.planId ?? ''
+                          }
+                          onChange={(e) => {
+                            const raw = e.target.value
+                            if (col.slot === 'left') {
+                              if (!raw) {
+                                setSelectedFollowingSubscriptionId(null)
+                                setSelectedPlanId(null)
+                                return
+                              }
+                              if (raw.startsWith('following:')) {
+                                const subId = raw.slice('following:'.length)
+                                setSelectedFollowingSubscriptionId(subId)
+                                const row = followingPlans.find(
+                                  (f) => f.subscriptionDocumentId === subId
+                                )
+                                setSelectedPlanId(row?.remotePlanId ?? null)
+                                if (planAheadColumnCount === 2) {
+                                  setSelectedPlanIdSecondary?.(null)
+                                }
+                                return
+                              }
+                              setSelectedFollowingSubscriptionId(null)
+                              setSelectedPlanId(raw)
+                              return
+                            }
+                            if (setSelectedPlanIdSecondary) {
+                              setSelectedPlanIdSecondary(raw || null)
+                            }
+                          }}
+                          className="w-full rounded border border-gray-200 bg-white px-2 py-2 text-sm text-gray-900 focus:border-[#6B21A8] focus:outline-none focus:ring-1 focus:ring-[#6B21A8]"
+                        >
+                          <option value="">Select a plan…</option>
+                          {orderedOwnedPlansForDropdowns
+                            .filter((p) => !col.excludePlanId || p.id !== col.excludePlanId)
+                            .map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.workoutPlanName}
+                              </option>
+                            ))}
+                          {col.slot === 'left' &&
+                            orderedFollowingPlans.map((row) => {
+                              const fp = followingSubscriptionToWorkoutPlan(row)
+                              const label = (fp.workoutPlanName || row.remotePlanName || 'Subscribed plan').trim()
+                              return (
+                                <option
+                                  key={`following-${row.subscriptionDocumentId}`}
+                                  value={`following:${row.subscriptionDocumentId}`}
+                                >
+                                  {label} (View-Only)
+                                </option>
+                              )
+                            })}
+                        </select>
+                      )}
+                    </div>
+                    {!col.headerPlan ? (
+                      <div className="flex flex-1 flex-col items-center justify-center px-4 py-10 text-center text-sm text-gray-500">
+                        Choose a plan to edit its schedule
+                      </div>
+                    ) : (
+                      <>
+            <div className="flex shrink-0 flex-col gap-2 border-b border-gymnext-muted/30 bg-gymnext-background px-2 py-2 sm:px-3">
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    col.setColumnWeekStart(addDays(col.columnWeekStart, -col.columnPlanDayCount))
+                  }
+                  className="rounded border border-gymnext-muted/50 bg-white px-2.5 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-background"
+                >
+                  ← Prev
+                </button>
+                <span className="text-xs text-gray-600">
+                  {col.columnPlanViewMode === '1day'
+                    ? new Date(col.columnWeekStart + 'T12:00:00').toLocaleDateString(undefined, {
                         month: 'short',
                         day: 'numeric',
                         year: 'numeric',
-                      })}
-                    </>}
-              </span>
-              <button
-                type="button"
-                onClick={() => setWeekStart(addDays(weekStart, planDayCount))}
-                className="rounded border border-gymnext-muted/50 bg-white px-2.5 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-background disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
-              >
-                Next →
-              </button>
+                      })
+                    : <>
+                        {new Date(col.columnWeekStart + 'T12:00:00').toLocaleDateString(undefined, {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                        })}{' '}
+                        –{' '}
+                        {new Date(col.columnWeekEnd + 'T12:00:00').toLocaleDateString(undefined, {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                        })}
+                      </>}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    col.setColumnWeekStart(addDays(col.columnWeekStart, col.columnPlanDayCount))
+                  }
+                  className="rounded border border-gymnext-muted/50 bg-white px-2.5 py-1.5 text-xs font-medium text-gymnext-dark hover:bg-gymnext-background disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
+                >
+                  Next →
+                </button>
+              </div>
             </div>
-          </div>
-          {plansLoading && (
-            <p className="px-4 py-6 text-sm text-gray-500">
-              Loading planned workouts…
-            </p>
-          )}
-          {plansError && (
-            <div className="px-4 py-2 text-xs text-red-700 bg-red-50">
-              {plansError}
+            <div className="flex shrink-0 justify-center border-b border-gymnext-muted/30 bg-gymnext-background py-2">
+              <div className="inline-flex rounded border border-gymnext-muted/50 bg-white p-0.5">
+                {(['1day', '3day', 'week'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => col.setColumnPlanViewMode(mode)}
+                    className={`rounded px-2.5 py-1 text-xs font-medium ${
+                      col.columnPlanViewMode === mode
+                        ? 'text-white'
+                        : 'text-gray-600 hover:bg-gymnext-background'
+                    }`}
+                    style={
+                      col.columnPlanViewMode === mode
+                        ? { backgroundColor: '#6B21A8' }
+                        : undefined
+                    }
+                  >
+                    {mode === 'week' ? 'week' : mode === '3day' ? '3 day' : '1 day'}
+                  </button>
+                ))}
+              </div>
             </div>
-          )}
-          {((isFollowingMode ? selectedFollowingPlan : selectedPlan) && !plansLoading) && (
-            <div className="grid grid-cols-1 divide-y divide-gray-200">
-              {Array.from({ length: planDayCount }, (_, i) => {
-                const dateKey = addDays(weekStart, i)
-                const items = byDay[dateKey] ?? []
+            <div
+              className={`min-h-0 flex-1 overscroll-y-contain ${
+                planAheadColumnCount === 1 ? 'overflow-x-auto overflow-y-auto' : 'overflow-y-auto'
+              }`}
+            >
+            <div
+              className={
+                planAheadColumnCount === 1
+                  ? 'flex min-h-0 min-w-full flex-1 divide-x divide-gray-200'
+                  : 'grid min-w-full grid-cols-1 divide-y divide-gray-200'
+              }
+            >
+              {Array.from({ length: col.columnPlanDayCount }, (_, i) => {
+                const dateKey = addDays(col.columnWeekStart, i)
+                const items = col.byDayMap[dateKey] ?? []
                 const dayDate = new Date(dateKey + 'T12:00:00')
                 const dayName = dayDate.toLocaleDateString(undefined, {
                   weekday: 'short',
                 })
                 return (
-                  <div key={dateKey} className="min-h-[140px] flex flex-col">
+                  <div
+                    key={`${col.slot}-${dateKey}`}
+                    className={
+                      planAheadColumnCount === 1
+                        ? 'flex min-h-[160px] min-w-[140px] flex-1 flex-col'
+                        : 'flex min-h-[140px] flex-col'
+                    }
+                  >
                     <div className="px-3 py-2 bg-gymnext-background border-b border-gymnext-muted/30 flex items-center gap-2">
-                      <div className="flex-1 min-w-0" aria-hidden />
-                      <div className="text-center shrink-0">
+                      <div className="min-w-0 flex-1" aria-hidden />
+                      <div className="shrink-0 text-center">
                         <div className="text-[11px] font-medium uppercase text-gray-700">
                           {dayName}
                         </div>
@@ -7180,61 +9659,193 @@ function PlansSection({
                           })}
                         </div>
                       </div>
-                      <div className="flex-1 min-w-0 flex justify-end">
-                        {!isFollowingMode && dateKey >= todayYmd && (
+                      <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
+                        {items.length > 0 && (
+                          <div className="relative shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                const rect = e.currentTarget.getBoundingClientRect()
+                                if (plannedDayMenuDateKey === dateKey && plannedDayMenuPlanId === col.planId) {
+                                  setPlannedDayMenuDateKey(null)
+                                  setPlannedDayMenuPlanId(null)
+                                  setPlannedDayMenuAnchorRect(null)
+                                } else {
+                                  setPlannedWorkoutMenuId(null)
+                                  setPlannedWorkoutMenuAnchorRect(null)
+                                  setPlannedDayMenuDateKey(dateKey)
+                                  setPlannedDayMenuPlanId(col.planId)
+                                  setPlannedDayMenuAnchorRect(rect)
+                                }
+                              }}
+                              className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                              aria-label={`More options for ${dayName}`}
+                              aria-expanded={
+                                plannedDayMenuDateKey === dateKey && plannedDayMenuPlanId === col.planId
+                              }
+                            >
+                              ⋯
+                            </button>
+                            {plannedDayMenuDateKey === dateKey &&
+                              plannedDayMenuPlanId === col.planId &&
+                              plannedDayMenuAnchorRect &&
+                              typeof document !== 'undefined' &&
+                              createPortal(
+                                <>
+                                  <div
+                                    className="fixed inset-0 z-[100]"
+                                    aria-hidden
+                                    onClick={() => {
+                                      setPlannedDayMenuDateKey(null)
+                                      setPlannedDayMenuPlanId(null)
+                                      setPlannedDayMenuAnchorRect(null)
+                                    }}
+                                  />
+                                  <div
+                                    className="fixed z-[101] min-w-[220px] max-w-[280px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+                                    style={{
+                                      top: plannedDayMenuAnchorRect.bottom + 4,
+                                      right:
+                                        typeof window !== 'undefined'
+                                          ? window.innerWidth - plannedDayMenuAnchorRect.right
+                                          : 0,
+                                    }}
+                                  >
+                                    <button
+                                      type="button"
+                                      className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50"
+                                      onClick={() => {
+                                        setPlannedDayMenuDateKey(null)
+                                        setPlannedDayMenuPlanId(null)
+                                        setPlannedDayMenuAnchorRect(null)
+                                        setCopyAllToDaySourceDateKey(null)
+                                        setCopyAllToDaySourcePlanId(null)
+                                        setMoveAllSourceDateKey(null)
+                                        setMoveAllSourcePlanId(null)
+                                        setCopyAllSourceDateKey(dateKey)
+                                        setCopyAllSourcePlanId(col.planId)
+                                        const sourcePid = col.planId
+                                        let defaultTargetPlanId = ''
+                                        if (
+                                          planAheadColumnCount === 2 &&
+                                          sourcePid &&
+                                          selectedPlanId &&
+                                          selectedPlanIdSecondary
+                                        ) {
+                                          if (sourcePid === selectedPlanId) {
+                                            defaultTargetPlanId = selectedPlanIdSecondary
+                                          } else if (sourcePid === selectedPlanIdSecondary) {
+                                            defaultTargetPlanId = selectedPlanId
+                                          }
+                                        }
+                                        if (!defaultTargetPlanId) {
+                                          defaultTargetPlanId =
+                                            plans.find((p) => p.id !== sourcePid)?.id ?? plans[0]?.id ?? ''
+                                        }
+                                        setCopyAllTargetPlanId(defaultTargetPlanId)
+                                        setCopyAllTargetDay(todayYmd)
+                                        setCopyAllError(null)
+                                      }}
+                                    >
+                                      Copy all to another plan
+                                    </button>
+                                    {!planScheduleReadOnly && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50"
+                                          onClick={() => {
+                                            setPlannedDayMenuDateKey(null)
+                                            setPlannedDayMenuPlanId(null)
+                                            setPlannedDayMenuAnchorRect(null)
+                                            setCopyAllSourceDateKey(null)
+                                            setCopyAllSourcePlanId(null)
+                                            setMoveAllSourceDateKey(null)
+                                            setMoveAllSourcePlanId(null)
+                                            setCopyAllToDaySourceDateKey(dateKey)
+                                            setCopyAllToDaySourcePlanId(col.planId)
+                                            setCopyAllToDayTargetDay(todayYmd)
+                                            setCopyAllToDayError(null)
+                                          }}
+                                        >
+                                          Copy all to another day
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50"
+                                          onClick={() => {
+                                            setPlannedDayMenuDateKey(null)
+                                            setPlannedDayMenuPlanId(null)
+                                            setPlannedDayMenuAnchorRect(null)
+                                            setCopyAllSourceDateKey(null)
+                                            setCopyAllSourcePlanId(null)
+                                            setCopyAllToDaySourceDateKey(null)
+                                            setCopyAllToDaySourcePlanId(null)
+                                            setMoveAllSourceDateKey(dateKey)
+                                            setMoveAllSourcePlanId(col.planId)
+                                            setMoveAllTargetDay(todayYmd)
+                                            setMoveAllError(null)
+                                          }}
+                                        >
+                                          Move all to another day
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                </>,
+                                document.body
+                              )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex flex-1 flex-col p-2">
+                      {items.length === 0 && dateKey < todayYmd && planScheduleReadOnly && (
+                        <div className="mx-0.5 my-1 flex min-h-[5.5rem] flex-col items-center justify-center rounded-lg border border-dashed border-gray-200 bg-gray-50/90 px-4 py-5 text-center">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                            Rest day
+                          </p>
+                        </div>
+                      )}
+                      {items.length === 0 && !planScheduleReadOnly && (
+                        <div className="mx-0.5 my-1 flex min-h-[5.5rem] flex-col items-center justify-center rounded-lg border border-dashed border-gray-200 bg-gray-50/90 px-4 py-5 text-center">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                            Rest day
+                          </p>
                           <button
                             type="button"
                             onClick={() => {
+                              setScheduleAddTargetPlanId(col.planId!)
                               setCreateDate(dateKey)
                               setAddWorkoutSource('choice')
                               setExpandedCollectionId(null)
                               setCreateError(null)
                               setCreateOpen(true)
                             }}
-                            className="shrink-0 rounded px-2 py-1 text-[11px] font-medium text-white hover:opacity-90 disabled:opacity-50"
-                            style={{ backgroundColor: '#6B21A8' }}
+                            className="mt-3 text-[11px] font-medium text-[#6B21A8] underline decoration-[#6B21A8]/40 underline-offset-2 hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#6B21A8] focus-visible:ring-offset-2"
                           >
                             Add workout
                           </button>
-                        )}
-                      </div>
-                    </div>
-                    <div className="p-2 flex-1 space-y-0">
-                      {isFollowingMode && dateKey > todayYmd && (
-                        <p className="text-[11px] text-gray-500 px-1 py-2">
-                          Will be available{' '}
-                          {new Date(dateKey + 'T12:00:00').toLocaleDateString(undefined, {
-                            month: 'short',
-                            day: 'numeric',
-                            year: 'numeric',
-                          })}
-                        </p>
+                        </div>
                       )}
-                      {!isFollowingMode && items.length === 0 && dateKey < todayYmd && (
-                        <p className="text-[11px] text-gray-400 italic px-1 py-2">
-                          Rest day
-                        </p>
-                      )}
-                      {!isFollowingMode && items.length === 0 && dateKey >= todayYmd && (
-                        <p className="text-[11px] text-gray-500 px-1 py-2">
-                          No workouts currently. Add a workout using the button above.
-                        </p>
-                      )}
-                      {isFollowingMode && items.length === 0 && dateKey <= todayYmd && (
-                        <p className="text-[11px] text-gray-400 italic px-1 py-2">
-                          Rest day
-                        </p>
+                      {items.length === 0 && dateKey >= todayYmd && planScheduleReadOnly && (
+                        <div className="mx-0.5 my-1 flex min-h-[5.5rem] flex-col items-center justify-center rounded-lg border border-dashed border-gray-200 bg-gray-50/90 px-4 py-5 text-center">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                            Rest day
+                          </p>
+                          <p className="mt-2 max-w-[14rem] text-[11px] leading-snug text-gray-500">
+                            No workouts on this day.
+                          </p>
+                        </div>
                       )}
                       {items.length > 0 && (
                         <ul
                           className=""
                           onDragOver={(e) => {
-                            if (isFollowingMode) return
                             e.preventDefault()
                             e.dataTransfer.dropEffect = 'move'
                           }}
                           onDrop={(e) => {
-                            if (isFollowingMode) return
                             e.preventDefault()
                             e.stopPropagation()
                             const raw = e.dataTransfer.getData('text/plain')
@@ -7242,9 +9853,18 @@ function PlansSection({
                             let dateKeyDrag: string
                             let fromIndex: number
                             try {
-                              const parsed = JSON.parse(raw) as { dateKey: string; index: number }
+                              const parsed = JSON.parse(raw) as {
+                                dateKey: string
+                                index: number
+                                planId?: string
+                              }
                               dateKeyDrag = parsed.dateKey
                               fromIndex = parsed.index
+                              if ((parsed.planId ?? col.planId) !== col.planId) {
+                                setDraggedPlanned(null)
+                                setPlannedDropIndicator(null)
+                                return
+                              }
                             } catch {
                               return
                             }
@@ -7259,16 +9879,20 @@ function PlansSection({
                                 : items.length
                             setDraggedPlanned(null)
                             setPlannedDropIndicator(null)
-                            onPlannedWorkoutDrop(dateKey, fromIndex, toIndex)
+                            onPlannedWorkoutDrop(dateKey, fromIndex, toIndex, col.planId!)
                           }}
                         >
                           {items.map((pw, index) => {
                           const w = pw.workout
+                          const trimmedPlanWorkoutDetails = trimWorkoutDetailsForPreview(pw.workout)
                           const barColor = getWorkoutBarColor(w)
-                          const isPast = dateKey < todayYmd
-                          const isReadOnly = isFollowingMode || isPast
+                          /** Owned plans: past days are still editable (⋯ menu + inline schedule). Subscribed (remote) plans: view-only. */
+                          const isReadOnly = planScheduleReadOnly
+                          const canReorderPlanned = !planScheduleReadOnly
                           const isDragging =
-                            draggedPlanned?.dateKey === dateKey && draggedPlanned?.index === index
+                            draggedPlanned?.dateKey === dateKey &&
+                            draggedPlanned?.index === index &&
+                            draggedPlanned.planId === col.planId
                           return (
                             <Fragment key={pw.id}>
                               {/* Drop zone above this row: overlaps row above so no visible gap when not dragging */}
@@ -7276,11 +9900,15 @@ function PlansSection({
                                 className={`flex items-center list-none border-t-0 -mt-1 pt-1 ${plannedDropIndicator?.dateKey === dateKey && plannedDropIndicator.beforeIndex === index ? 'px-3 pb-1 relative z-10' : 'px-3'}`}
                                 aria-hidden
                                 onDragOver={(ev) => {
-                                  if (isReadOnly) return
+                                  if (!canReorderPlanned) return
                                   ev.preventDefault()
                                   ev.stopPropagation()
                                   ev.dataTransfer.dropEffect = 'move'
-                                  if (draggedPlanned && draggedPlanned.dateKey === dateKey) {
+                                  if (
+                                    draggedPlanned &&
+                                    draggedPlanned.dateKey === dateKey &&
+                                    draggedPlanned.planId === col.planId
+                                  ) {
                                     setPlannedDropIndicator({ dateKey, beforeIndex: index })
                                   }
                                 }}
@@ -7290,12 +9918,17 @@ function PlansSection({
                                   const raw = ev.dataTransfer.getData('text/plain')
                                   if (!raw) return
                                   try {
-                                    const parsed = JSON.parse(raw) as { dateKey: string; index: number }
+                                    const parsed = JSON.parse(raw) as {
+                                      dateKey: string
+                                      index: number
+                                      planId?: string
+                                    }
                                     if (parsed.dateKey !== dateKey) return
+                                    if ((parsed.planId ?? col.planId) !== col.planId) return
                                     const toIndex = index
                                     setDraggedPlanned(null)
                                     setPlannedDropIndicator(null)
-                                    onPlannedWorkoutDrop(dateKey, parsed.index, toIndex)
+                                    onPlannedWorkoutDrop(dateKey, parsed.index, toIndex, col.planId!)
                                   } catch {
                                     setDraggedPlanned(null)
                                     setPlannedDropIndicator(null)
@@ -7305,15 +9938,15 @@ function PlansSection({
                                 <div className={`flex-1 min-w-0 rounded-full ${plannedDropIndicator?.dateKey === dateKey && plannedDropIndicator.beforeIndex === index ? 'h-1 bg-[#6B21A8]' : 'min-h-0 h-0 overflow-hidden'}`} />
                               </li>
                               <li
-                                className={`pl-1 pr-3 py-2 flex items-center gap-3 border-l-8 bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${isDragging ? 'opacity-50' : ''} hover:bg-gymnext-background/50`}
-                                style={{ borderLeftColor: barColor }}
+                                className={`pl-3 pr-3 py-2 flex items-center gap-3 bg-white ${index > 0 ? 'border-t border-gray-200' : ''} ${isDragging ? 'opacity-50' : ''} hover:bg-gymnext-background/50`}
                                 data-index={index}
                                 onDragOver={(e) => {
-                                  if (isReadOnly) return
+                                  if (!canReorderPlanned) return
                                   e.preventDefault()
                                   e.dataTransfer.dropEffect = 'move'
                                   if (draggedPlanned === null) return
-                                  if (draggedPlanned.dateKey !== dateKey) return
+                                  if (draggedPlanned.dateKey !== dateKey || draggedPlanned.planId !== col.planId)
+                                    return
                                   const rect = e.currentTarget.getBoundingClientRect()
                                   const midY = rect.top + rect.height / 2
                                   const insertBefore = e.clientY < midY ? index : index + 1
@@ -7325,8 +9958,17 @@ function PlansSection({
                                   const raw = e.dataTransfer.getData('text/plain')
                                   if (!raw) return
                                   try {
-                                    const parsed = JSON.parse(raw) as { dateKey: string; index: number }
+                                    const parsed = JSON.parse(raw) as {
+                                      dateKey: string
+                                      index: number
+                                      planId?: string
+                                    }
                                     if (parsed.dateKey !== dateKey) {
+                                      setDraggedPlanned(null)
+                                      setPlannedDropIndicator(null)
+                                      return
+                                    }
+                                    if ((parsed.planId ?? col.planId) !== col.planId) {
                                       setDraggedPlanned(null)
                                       setPlannedDropIndicator(null)
                                       return
@@ -7338,23 +9980,28 @@ function PlansSection({
                                       : e.clientY < midY ? index : index + 1
                                     setDraggedPlanned(null)
                                     setPlannedDropIndicator(null)
-                                    onPlannedWorkoutDrop(dateKey, parsed.index, toIndex)
+                                    onPlannedWorkoutDrop(dateKey, parsed.index, toIndex, col.planId!)
                                   } catch {
                                     setDraggedPlanned(null)
                                     setPlannedDropIndicator(null)
                                   }
                                 }}
                               >
-                                {!isReadOnly ? (
+                                <span
+                                  className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem]"
+                                  style={{ backgroundColor: barColor }}
+                                  aria-hidden
+                                />
+                                {canReorderPlanned ? (
                                   <span
                                     draggable
                                     onDragStart={(e) => {
                                       e.dataTransfer.effectAllowed = 'move'
                                       e.dataTransfer.setData(
                                         'text/plain',
-                                        JSON.stringify({ dateKey, index })
+                                        JSON.stringify({ dateKey, index, planId: col.planId! })
                                       )
-                                      setDraggedPlanned({ dateKey, index })
+                                      setDraggedPlanned({ dateKey, index, planId: col.planId! })
                                       setPlannedDropIndicator(null)
                                     }}
                                     onDragEnd={() => {
@@ -7366,24 +10013,24 @@ function PlansSection({
                                     title="Drag to reorder"
                                     onClick={(e) => e.stopPropagation()}
                                   >
-                                    ⋮⋮
+                                    <DragReorderGrip />
                                   </span>
                                 ) : (
                                   <span
-                                    className="w-6 shrink-0 flex items-center justify-center text-gray-400 text-[10px] select-none"
+                                    className="w-6 shrink-0 flex items-center justify-center text-gray-400 select-none"
                                     aria-hidden
                                   >
-                                    ⋮⋮
+                                    <DragReorderGrip />
                                   </span>
                                 )}
                                 <div
                                   className="min-w-0 flex-1 py-0.5 cursor-pointer"
                                   onClick={(e) => {
                                     e.stopPropagation()
-                                    if (isFollowingMode) return
                                     if (expandedPlannedWorkoutId === pw.id) {
                                       setExpandedPlannedWorkoutId(null)
                                       setEditSchedulePlannedWorkout(null)
+                                      setEditScheduleWorkoutDetails('')
                                     } else {
                                       setExpandedPlannedWorkoutId(pw.id)
                                       openEditSchedulePlanned(pw)
@@ -7397,7 +10044,6 @@ function PlansSection({
                                     {getWorkoutDetailDescription(w) || '—'}
                                   </div>
                                 </div>
-                                {!isFollowingMode && (
                                 <div className="shrink-0 relative" onClick={(e) => e.stopPropagation()}>
                                   <button
                                     type="button"
@@ -7407,6 +10053,9 @@ function PlansSection({
                                         setPlannedWorkoutMenuId(null)
                                         setPlannedWorkoutMenuAnchorRect(null)
                                       } else {
+                                        setPlannedDayMenuDateKey(null)
+                                        setPlannedDayMenuPlanId(null)
+                                        setPlannedDayMenuAnchorRect(null)
                                         setPlannedWorkoutMenuId(pw.id)
                                         setPlannedWorkoutMenuAnchorRect(rect)
                                       }
@@ -7434,7 +10083,7 @@ function PlansSection({
                                           right: typeof window !== 'undefined' ? window.innerWidth - plannedWorkoutMenuAnchorRect.right : 0,
                                         }}
                                       >
-                                        {!isPast && (
+                                        {!planScheduleReadOnly && (
                                           <>
                                         <button
                                           type="button"
@@ -7447,35 +10096,7 @@ function PlansSection({
                                         >
                                           Edit workout
                                         </button>
-                                        {pw.workout.type !== 'MultiSegmentWorkout' && (
-                                          <button
-                                            type="button"
-                                            className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                                            onClick={() => {
-                                              setPlannedWorkoutMenuId(null)
-                                              setPlannedWorkoutMenuAnchorRect(null)
-                                              setEditDetailsPlannedWorkout(pw)
-                                              setEditDetailsValue((pw.workout as { workoutDetails?: string | null }).workoutDetails ?? '')
-                                              setEditDetailsError(null)
-                                            }}
-                                          >
-                                            Edit workout details
-                                          </button>
-                                        )}
                                         </>
-                                        )}
-                                        {isPast && pw.workout.type !== 'MultiSegmentWorkout' && (
-                                          <button
-                                            type="button"
-                                            className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                                            onClick={() => {
-                                              setPlannedWorkoutMenuId(null)
-                                              setPlannedWorkoutMenuAnchorRect(null)
-                                              setShowDetailsPlannedWorkout(pw)
-                                            }}
-                                          >
-                                            Show workout details
-                                          </button>
                                         )}
                                         <button
                                           type="button"
@@ -7489,9 +10110,9 @@ function PlansSection({
                                             setCopyError(null)
                                           }}
                                         >
-                                          Copy to another plan
+                                          Copy to plan
                                         </button>
-                                        {!isPast && (
+                                        {!planScheduleReadOnly && (
                                           <>
                                         <button
                                           type="button"
@@ -7525,18 +10146,15 @@ function PlansSection({
                                     document.body
                                   )}
                                 </div>
-                                )}
                               </li>
                               {expandedPlannedWorkoutId === pw.id && (
                                 <li className="border-t border-gray-200 bg-gray-50/80 list-none">
                                   <div className="p-4">
+                                    {isReadOnly && trimmedPlanWorkoutDetails !== '' && (
+                                      <WorkoutDetailsPreview details={trimmedPlanWorkoutDetails} />
+                                    )}
                                     {isReadOnly ? (
                                       <div className="space-y-4">
-                                        <p className="text-xs text-gray-500">
-                                          {isFollowingMode
-                                            ? 'Followed plan workouts are read-only.'
-                                            : 'This workout is in the past and cannot be edited.'}
-                                        </p>
                                         <fieldset disabled className="space-y-4 opacity-90">
                                           <CreateWorkoutOptions
                                             mode={editScheduleMode}
@@ -7552,6 +10170,7 @@ function PlansSection({
                                             onClick={() => {
                                               setExpandedPlannedWorkoutId(null)
                                               setEditSchedulePlannedWorkout(null)
+                                              setEditScheduleWorkoutDetails('')
                                               setEditScheduleError(null)
                                             }}
                                             className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
@@ -7562,6 +10181,24 @@ function PlansSection({
                                       </div>
                                     ) : (
                                       <form onSubmit={handleSaveEditSchedule} className="space-y-4">
+                                        {pw.workout.type !== 'MultiSegmentWorkout' && (
+                                          <div>
+                                            <label
+                                              htmlFor={`planned-inline-details-${pw.id}`}
+                                              className="block text-xs font-medium text-gray-700 mb-1"
+                                            >
+                                              Workout details (optional)
+                                            </label>
+                                            <textarea
+                                              id={`planned-inline-details-${pw.id}`}
+                                              rows={3}
+                                              value={editScheduleWorkoutDetails}
+                                              onChange={(e) => setEditScheduleWorkoutDetails(e.target.value)}
+                                              className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                                              placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
+                                            />
+                                          </div>
+                                        )}
                                         <CreateWorkoutOptions
                                           mode={editScheduleMode}
                                           options={editScheduleOptions}
@@ -7576,6 +10213,7 @@ function PlansSection({
                                             onClick={() => {
                                               setExpandedPlannedWorkoutId(null)
                                               setEditSchedulePlannedWorkout(null)
+                                              setEditScheduleWorkoutDetails('')
                                               setEditScheduleError(null)
                                             }}
                                             disabled={editScheduleBusy}
@@ -7605,27 +10243,37 @@ function PlansSection({
                                 className={`flex items-center list-none border-t-0 -mt-1 pt-1 ${plannedDropIndicator?.dateKey === dateKey && plannedDropIndicator.beforeIndex === items.length ? 'px-3 pb-1 relative z-10' : 'px-3'}`}
                                 aria-hidden
                                 onDragOver={(ev) => {
-                                  if (!isFollowingMode && dateKey >= todayYmd) {
+                                  if (!planScheduleReadOnly) {
                                     ev.preventDefault()
                                     ev.stopPropagation()
                                     ev.dataTransfer.dropEffect = 'move'
-                                    if (draggedPlanned && draggedPlanned.dateKey === dateKey) {
+                                    if (
+                                      draggedPlanned &&
+                                      draggedPlanned.dateKey === dateKey &&
+                                      draggedPlanned.planId === col.planId
+                                    ) {
                                       setPlannedDropIndicator({ dateKey, beforeIndex: items.length })
                                     }
                                   }
                                 }}
                                 onDrop={(ev) => {
+                                  if (planScheduleReadOnly) return
                                   ev.preventDefault()
                                   ev.stopPropagation()
                                   const raw = ev.dataTransfer.getData('text/plain')
                                   if (!raw) return
                                   try {
-                                    const parsed = JSON.parse(raw) as { dateKey: string; index: number }
+                                    const parsed = JSON.parse(raw) as {
+                                      dateKey: string
+                                      index: number
+                                      planId?: string
+                                    }
                                     if (parsed.dateKey !== dateKey) return
+                                    if ((parsed.planId ?? col.planId) !== col.planId) return
                                     const toIndex = items.length
                                     setDraggedPlanned(null)
                                     setPlannedDropIndicator(null)
-                                    onPlannedWorkoutDrop(dateKey, parsed.index, toIndex)
+                                    onPlannedWorkoutDrop(dateKey, parsed.index, toIndex, col.planId!)
                                   } catch {
                                     setDraggedPlanned(null)
                                     setPlannedDropIndicator(null)
@@ -7636,48 +10284,338 @@ function PlansSection({
                               </li>
                         </ul>
                       )}
+                      {!planScheduleReadOnly && items.length > 0 && (
+                        <div className="mt-2 flex shrink-0 justify-center border-t border-gray-100 pt-3 pb-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setScheduleAddTargetPlanId(col.planId!)
+                              setCreateDate(dateKey)
+                              setAddWorkoutSource('choice')
+                              setExpandedCollectionId(null)
+                              setCreateError(null)
+                              setCreateOpen(true)
+                            }}
+                            className="rounded px-3 py-1.5 text-[11px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+                            style={{ backgroundColor: '#6B21A8' }}
+                          >
+                            Add workout
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )
               })}
             </div>
-          )}
-          {((isFollowingMode && selectedFollowingPlan) || (!isFollowingMode && selectedPlan)) && !plansLoading && (
-            <div className="flex justify-center py-3 border-b border-gymnext-muted/30 bg-gymnext-background">
-              <div className="inline-flex rounded border border-gymnext-muted/50 bg-white p-0.5">
-                {(['1day', '3day', 'week'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setPlanViewMode(mode)}
-                    className={`rounded px-2.5 py-1 text-xs font-medium ${
-                      planViewMode === mode
-                        ? 'text-white'
-                        : 'text-gray-600 hover:bg-gymnext-background'
-                    }`}
-                    style={
-                      planViewMode === mode
-                        ? { backgroundColor: '#6B21A8' }
-                        : undefined
-                    }
-                  >
-                    {mode === 'week' ? 'week' : mode === '3day' ? '3 day' : '1 day'}
-                  </button>
+            </div>
+                      </>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>
+          ) : !selectedPlan ? (
+            <p className="flex flex-1 items-center justify-center px-4 py-8 text-center text-sm text-gray-500">
+              Select a plan to see its details
+            </p>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div className="relative flex shrink-0 items-start justify-between gap-2 border-b border-gray-100 px-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-gray-900">{selectedPlanName}</p>
+                  <p className="text-xs text-gray-600 mt-1">{selectedPlanDescription}</p>
+                </div>
+                {selectedPlan && (!planScheduleReadOnly || selectedFollowingRow) ? (
+                  <div className="shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setPlanAdminMoreOpen((o) => !o)}
+                      className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                      aria-label="More options"
+                      aria-expanded={planAdminMoreOpen}
+                    >
+                      ⋯
+                    </button>
+                    {planAdminMoreOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          aria-hidden
+                          onClick={() => setPlanAdminMoreOpen(false)}
+                        />
+                        <div className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                          {planScheduleReadOnly && selectedFollowingRow ? (
+                            <button
+                              type="button"
+                              className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50"
+                              onClick={() => {
+                                setPlanAdminMoreOpen(false)
+                                setStopFollowingConfirmOpen(true)
+                              }}
+                            >
+                              Unsubscribe
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
+                                onClick={() => {
+                                  setPlanAdminMoreOpen(false)
+                                  openEditPlan(selectedPlan)
+                                }}
+                              >
+                                Edit plan
+                              </button>
+                              {!selectedPlan.isPersonal && (
+                                <button
+                                  type="button"
+                                  className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-100"
+                                  onClick={() => {
+                                    setPlanAdminMoreOpen(false)
+                                    setPlanShareOpen(true)
+                                  }}
+                                >
+                                  Share plan
+                                </button>
+                              )}
+                              {selectedPlan.id !== 'personal' && (
+                                <>
+                                  <div className="my-1 border-t border-gray-200" aria-hidden />
+                                  <button
+                                    type="button"
+                                    className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50"
+                                    onClick={() => {
+                                      setPlanAdminMoreOpen(false)
+                                      setPlanDeleteConfirmOpen(true)
+                                    }}
+                                  >
+                                    Delete plan
+                                  </button>
+                                </>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+              {!planScheduleReadOnly && selectedPlan ? (
+                <div className="shrink-0 border-b border-gray-100 px-4 py-3">
+                  <div className="flex items-center justify-between gap-4 rounded-lg border border-gray-100 bg-gray-50/80 px-3 py-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-900">Show in Today&apos;s Plan</p>
+                      <p className="mt-0.5 text-xs text-gray-500">
+                        When on, this plan appears in Today&apos;s Plan. When off, it stays in Plans and Plan Ahead
+                        only.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={planShowsInTodayTab(selectedPlan)}
+                      aria-label="Show in Today's Plan"
+                      disabled={showInScheduleSaving}
+                      onClick={() => {
+                        void (async () => {
+                          const next = !planShowsInTodayTab(selectedPlan)
+                          setShowInScheduleSaving(true)
+                          try {
+                            await onSetPlanShowInSchedule(selectedPlan.id, next)
+                          } catch (e) {
+                            toast.error(e instanceof Error ? e.message : 'Failed to update')
+                          } finally {
+                            setShowInScheduleSaving(false)
+                          }
+                        })()
+                      }}
+                      className={`relative h-7 w-12 shrink-0 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#6B21A8] disabled:opacity-50 ${
+                        planShowsInTodayTab(selectedPlan) ? 'bg-[#6B21A8]' : 'bg-gray-300'
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform ${
+                          planShowsInTodayTab(selectedPlan) ? 'translate-x-5' : 'translate-x-0'
+                        }`}
+                        aria-hidden
+                      />
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {planSharesBelowHeader}
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 space-y-5">
+                {planScheduleReadOnly ? (
+                  selectedFollowingRow ? (
+                    <div className="space-y-3">
+                      <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                        Plan owner
+                      </h4>
+                      <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                      {followedCoachProfileLoading && (
+                        <p className="text-sm text-gray-500">Loading profile…</p>
+                      )}
+                      {!followedCoachProfileLoading && followedCoachProfileError && (
+                        <div className="space-y-2">
+                          <p className="text-sm text-red-700">{followedCoachProfileError}</p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const ownerId = selectedFollowingRow.ownerUserId
+                              setFollowedCoachProfileError(null)
+                              setFollowedCoachProfileLoading(true)
+                              void (async () => {
+                                try {
+                                  const res = await authedFetch(
+                                    `/api/app/users/${encodeURIComponent(ownerId)}/public-profile`
+                                  )
+                                  if (!res.ok) {
+                                    const j = (await res.json().catch(() => ({}))) as { error?: string }
+                                    throw new Error(j.error || `HTTP ${res.status}`)
+                                  }
+                                  const data = (await res.json()) as PublicUserProfileView
+                                  setFollowedCoachProfile(data)
+                                  setFollowedCoachProfileError(null)
+                                } catch (e) {
+                                  setFollowedCoachProfileError(
+                                    e instanceof Error ? e.message : 'Failed to load profile'
+                                  )
+                                } finally {
+                                  setFollowedCoachProfileLoading(false)
+                                }
+                              })()
+                            }}
+                            className="rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+                            style={{ backgroundColor: '#6B21A8' }}
+                          >
+                            Retry
+                          </button>
+                        </div>
+                      )}
+                      {!followedCoachProfileLoading && !followedCoachProfileError && followedCoachProfile && (
+                        <div className="space-y-3">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPlanOwnerPublicProfileUserId(selectedFollowingRow.ownerUserId)
+                            }
+                            className="w-full rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2"
+                          >
+                            <div className="flex gap-4 items-start">
+                              {followedCoachProfile.profilePhotoUrl ? (
+                                <img
+                                  src={followedCoachProfile.profilePhotoUrl}
+                                  alt=""
+                                  className="h-16 w-16 shrink-0 rounded-full border border-gymnext-muted/30 bg-white object-cover"
+                                  width={64}
+                                  height={64}
+                                  loading="lazy"
+                                  referrerPolicy="no-referrer"
+                                />
+                              ) : (
+                                <div
+                                  className="flex h-16 w-16 shrink-0 items-center justify-center rounded-full border border-gymnext-muted/30 bg-white text-xl font-semibold text-gray-600"
+                                  aria-hidden
+                                >
+                                  {(followedCoachProfile.displayName || '?').slice(0, 1).toUpperCase()}
+                                </div>
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <p className="text-base font-semibold text-gray-900 leading-snug">
+                                  {followedCoachProfile.displayName}
+                                </p>
+                                {followedCoachProfile.handle ? (
+                                  <p className="mt-0.5 text-sm text-gray-600">{followedCoachProfile.handle}</p>
+                                ) : null}
+                                {[
+                                  followedCoachProfile.city,
+                                  followedCoachProfile.region,
+                                  followedCoachProfile.country,
+                                ]
+                                  .filter(Boolean)
+                                  .join(', ') ? (
+                                  <p className="mt-2 text-xs text-gray-500">
+                                    {[
+                                      followedCoachProfile.city,
+                                      followedCoachProfile.region,
+                                      followedCoachProfile.country,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(', ')}
+                                  </p>
+                                ) : null}
+                              </div>
+                            </div>
+                          </button>
+                          {selectedFollowingRow.remotePlanHandle ? (
+                            <p className="text-xs text-gray-500">
+                              Plan on FlexTimer:{' '}
+                              <span className="font-medium text-gray-700">
+                                @{selectedFollowingRow.remotePlanHandle}
+                              </span>
+                            </p>
+                          ) : null}
+                        </div>
+                      )}
+                      </div>
+                      <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                        <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
+                          Your access
+                        </h4>
+                        {followedPlanIsGroupTraining(selectedFollowingRow) ? (
+                          <p className="text-sm text-gray-800">
+                            <span className="font-semibold text-gray-900">Visibility.</span>{' '}
+                            {selectedFollowingRow.shareHideFutureWorkouts
+                              ? 'You cannot view future scheduled workouts.'
+                              : 'You can view future scheduled workouts.'}
+                          </p>
+                        ) : (
+                          <p className="text-sm text-gray-800">
+                            <span className="font-semibold text-gray-900">Privileges.</span>{' '}
+                            {selectedFollowingRow.shareAllowEditing
+                              ? 'You can edit this plan and scheduled workouts with the owner.'
+                              : 'Read-only: you cannot edit the plan or workouts.'}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-gray-600">Subscribed plan details are unavailable.</p>
+                  )
+                ) : selectedPlan ? (
+                  <>
+                    {selectedPlan.handle ? (
+                      <dl className="grid grid-cols-[minmax(0,7rem)_1fr] gap-x-3 gap-y-2 text-sm rounded-lg border border-gray-100 bg-gray-50/80 p-3">
+                        <dt className="text-gray-500">Handle</dt>
+                        <dd className="text-gray-900">{selectedPlan.handle}</dd>
+                      </dl>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
+            </div>
           )}
-            </>
-          )}
+
         </div>
       </div>
+    </div>
 
-      {createOpen && selectedPlan && (
+      {createOpen && planForScheduleCreate && !planScheduleReadOnly && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
             className="absolute inset-0 bg-black/50"
             aria-hidden
-            onClick={() => !createBusy && (setCreateOpen(false), setAddWorkoutSource('choice'), setExpandedCollectionId(null), setSelectedWorkoutForPlan(null))}
+            onClick={() =>
+              !createBusy &&
+              (setCreateOpen(false),
+              setScheduleAddTargetPlanId(null),
+              setAddWorkoutSource('choice'),
+              setExpandedCollectionId(null),
+              setSelectedWorkoutForPlan(null))
+            }
           />
           <div className="relative w-full max-w-lg rounded-lg border border-gymnext-muted/30 bg-white shadow-lg max-h-[85vh] flex flex-col">
             <div className="border-b border-gymnext-muted/30 px-4 py-3 shrink-0">
@@ -7709,8 +10647,12 @@ function PlansSection({
                     <button
                       type="button"
                       onClick={() => setAddWorkoutSource('favorites')}
-                      className="w-full rounded border border-gymnext-muted/40 border-l-4 border-l-yellow-400 bg-white px-4 py-3 flex items-center gap-3 text-left text-sm font-medium text-gray-900 hover:bg-gymnext-background"
+                      className="w-full rounded border border-gymnext-muted/40 bg-white px-4 py-3 flex items-center gap-3 text-left text-sm font-medium text-gray-900 hover:bg-gymnext-background"
                     >
+                      <span
+                        className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem] bg-yellow-400"
+                        aria-hidden
+                      />
                       <svg className="h-5 w-5 shrink-0 text-yellow-500" fill="currentColor" viewBox="0 0 20 20" aria-hidden>
                         <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
                       </svg>
@@ -7719,8 +10661,12 @@ function PlansSection({
                     <button
                       type="button"
                       onClick={() => setAddWorkoutSource('collection')}
-                      className="w-full rounded border border-gymnext-muted/40 border-l-4 border-l-amber-800 bg-white px-4 py-3 flex items-center gap-3 text-left text-sm font-medium text-gray-900 hover:bg-gymnext-background"
+                      className="w-full rounded border border-gymnext-muted/40 bg-white px-4 py-3 flex items-center gap-3 text-left text-sm font-medium text-gray-900 hover:bg-gymnext-background"
                     >
+                      <span
+                        className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem] bg-amber-800"
+                        aria-hidden
+                      />
                       <svg className="h-5 w-5 shrink-0 text-amber-800" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                       </svg>
@@ -7747,9 +10693,13 @@ function PlansSection({
                           )
                         )
                       }}
-                      className="w-full rounded border border-gymnext-muted/40 border-l-4 bg-white px-4 py-3 flex items-center gap-3 text-left text-sm font-medium text-gray-900 hover:bg-gymnext-background"
-                      style={{ borderLeftColor: '#6B21A8' }}
+                      className="w-full rounded border border-gymnext-muted/40 bg-white px-4 py-3 flex items-center gap-3 text-left text-sm font-medium text-gray-900 hover:bg-gymnext-background"
                     >
+                      <span
+                        className="w-1 shrink-0 rounded-full self-stretch min-h-[3rem]"
+                        style={{ backgroundColor: '#6B21A8' }}
+                        aria-hidden
+                      />
                       <svg className="h-5 w-5 shrink-0" style={{ color: '#6B21A8' }} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden>
                         <path d="M17.596 12.768a2 2 0 1 0 2.829-2.829l-1.768-1.767a2 2 0 0 0 2.828-2.829l-2.828-2.828a2 2 0 0 0-2.829 2.828l-1.767-1.768a2 2 0 1 0-2.829 2.829z" />
                         <path d="m2.5 21.5 1.4-1.4" />
@@ -7793,27 +10743,33 @@ function PlansSection({
                               type="button"
                               onClick={() => setSelectedWorkoutForPlan(isSelected ? null : w)}
                               disabled={createBusy}
-                              className={`w-full rounded border px-3 py-2 text-left text-sm disabled:opacity-50 ${
+                              className={`w-full rounded border px-3 py-2 text-left text-sm disabled:opacity-50 flex items-center gap-3 ${
                                 isSelected
                                   ? 'border-gymnext bg-purple-50 border-2'
                                   : 'border-gray-200 hover:bg-gray-50'
                               }`}
-                              style={{
-                                ...(isSelected
+                              style={
+                                isSelected
                                   ? {
                                       borderTopColor: '#6B21A8',
                                       borderRightColor: '#6B21A8',
                                       borderBottomColor: '#6B21A8',
+                                      borderLeftColor: '#6B21A8',
                                     }
-                                  : {}),
-                                borderLeftWidth: 4,
-                                borderLeftColor: barColor,
-                              }}
+                                  : undefined
+                              }
                             >
-                              <span className="font-medium text-gray-900">{getWorkoutDisplayName(w) || 'Workout'}</span>
-                              {(getWorkoutDetailDescription(w) || '').trim() && (
-                                <span className="block text-xs text-gray-500 truncate">{getWorkoutDetailDescription(w)}</span>
-                              )}
+                              <span
+                                className="w-1 shrink-0 rounded-full self-stretch min-h-[2.5rem]"
+                                style={{ backgroundColor: barColor }}
+                                aria-hidden
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="font-medium text-gray-900">{getWorkoutDisplayName(w) || 'Workout'}</span>
+                                {(getWorkoutDetailDescription(w) || '').trim() && (
+                                  <span className="block text-xs text-gray-500 truncate">{getWorkoutDetailDescription(w)}</span>
+                                )}
+                              </span>
                             </button>
                           </li>
                         )
@@ -7860,11 +10816,16 @@ function PlansSection({
                             <button
                               type="button"
                               onClick={() => setExpandedCollectionId(isExpanded ? null : c.id)}
-                              className="w-full px-3 py-2 flex items-center justify-between text-left text-sm font-medium text-gray-900 hover:bg-gray-50 border-l-4"
-                              style={{ borderLeftColor: '#795548' }}
+                              className="w-full pl-3 pr-3 py-2 flex items-center gap-3 justify-between text-left text-sm font-medium text-gray-900 hover:bg-gray-50"
                             >
-                              <span>{c.workoutCollectionName || 'Unnamed'}</span>
-                              <span className="text-gray-400">{isExpanded ? '▼' : '▶'}</span>
+                              <span
+                                className="w-1 shrink-0 rounded-full self-stretch min-h-[2.5rem]"
+                                style={{ backgroundColor: '#795548' }}
+                                aria-hidden
+                              />
+                              <CollectionFolderIcon />
+                              <span className="min-w-0 flex-1">{c.workoutCollectionName || 'Unnamed'}</span>
+                              <span className="text-gray-400 shrink-0">{isExpanded ? '▼' : '▶'}</span>
                             </button>
                             {isExpanded && (
                               <ul className="border-t border-gray-100 bg-gray-50/50 p-2 space-y-1">
@@ -7880,27 +10841,33 @@ function PlansSection({
                                           type="button"
                                           onClick={() => setSelectedWorkoutForPlan(isSelected ? null : w)}
                                           disabled={createBusy}
-                                          className={`w-full rounded border px-3 py-2 text-left text-sm disabled:opacity-50 ${
+                                          className={`w-full rounded border px-3 py-2 text-left text-sm disabled:opacity-50 flex items-center gap-3 ${
                                             isSelected
                                               ? 'border-gymnext bg-purple-50 border-2'
                                               : 'border-gray-200 bg-white hover:bg-gray-50'
                                           }`}
-                                          style={{
-                                            ...(isSelected
+                                          style={
+                                            isSelected
                                               ? {
                                                   borderTopColor: '#6B21A8',
                                                   borderRightColor: '#6B21A8',
                                                   borderBottomColor: '#6B21A8',
+                                                  borderLeftColor: '#6B21A8',
                                                 }
-                                              : {}),
-                                            borderLeftWidth: 4,
-                                            borderLeftColor: barColor,
-                                          }}
+                                              : undefined
+                                          }
                                         >
-                                          <span className="font-medium text-gray-900">{getWorkoutDisplayName(w) || 'Workout'}</span>
-                                          {(getWorkoutDetailDescription(w) || '').trim() && (
-                                            <span className="block text-xs text-gray-500 truncate">{getWorkoutDetailDescription(w)}</span>
-                                          )}
+                                          <span
+                                            className="w-1 shrink-0 rounded-full self-stretch min-h-[2.5rem]"
+                                            style={{ backgroundColor: barColor }}
+                                            aria-hidden
+                                          />
+                                          <span className="min-w-0 flex-1">
+                                            <span className="font-medium text-gray-900">{getWorkoutDisplayName(w) || 'Workout'}</span>
+                                            {(getWorkoutDetailDescription(w) || '').trim() && (
+                                              <span className="block text-xs text-gray-500 truncate">{getWorkoutDetailDescription(w)}</span>
+                                            )}
+                                          </span>
                                         </button>
                                       </li>
                                     )
@@ -8037,7 +11004,7 @@ function PlansSection({
                           value={createPlannedDetails}
                           onChange={(e) => setCreatePlannedDetails(e.target.value)}
                           className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                          placeholder="Rep scheme, weights, movements, etc."
+                          placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
                         />
                       </div>
                       <div className="flex justify-end gap-2 pt-1">
@@ -8168,7 +11135,7 @@ function PlansSection({
             onClick={() => {
               if (createPlanBusy) return
               setCreatePlanOpen(false)
-              setCreatePlanType('group')
+              setCreatePlanKind('privateTraining')
             }}
           />
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
@@ -8189,6 +11156,54 @@ function PlansSection({
                 />
               </div>
               <div>
+                <p className="block text-xs font-medium text-gray-700 mb-1">Training type</p>
+                <div className="inline-flex max-w-full flex-wrap rounded border border-gymnext-muted/50 bg-white p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setCreatePlanKind('personal')}
+                    disabled={createPlanBusy}
+                    className={`rounded px-3 py-1.5 text-xs font-medium ${
+                      createPlanKind === 'personal'
+                        ? 'text-white'
+                        : 'text-gray-600 hover:bg-gymnext-background'
+                    } disabled:opacity-50`}
+                    style={createPlanKind === 'personal' ? { backgroundColor: '#6B21A8' } : undefined}
+                  >
+                    Personal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCreatePlanKind('privateTraining')}
+                    disabled={createPlanBusy}
+                    className={`rounded px-3 py-1.5 text-xs font-medium ${
+                      createPlanKind === 'privateTraining'
+                        ? 'text-white'
+                        : 'text-gray-600 hover:bg-gymnext-background'
+                    } disabled:opacity-50`}
+                    style={
+                      createPlanKind === 'privateTraining' ? { backgroundColor: '#6B21A8' } : undefined
+                    }
+                  >
+                    Private Training
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCreatePlanKind('groupTraining')}
+                    disabled={createPlanBusy}
+                    className={`rounded px-3 py-1.5 text-xs font-medium ${
+                      createPlanKind === 'groupTraining'
+                        ? 'text-white'
+                        : 'text-gray-600 hover:bg-gymnext-background'
+                    } disabled:opacity-50`}
+                    style={
+                      createPlanKind === 'groupTraining' ? { backgroundColor: '#6B21A8' } : undefined
+                    }
+                  >
+                    Group Training
+                  </button>
+                </div>
+              </div>
+              <div>
                 <label htmlFor="plan-desc" className="block text-xs font-medium text-gray-700 mb-1">Description (optional)</label>
                 <textarea
                   id="plan-desc"
@@ -8199,44 +11214,13 @@ function PlansSection({
                   placeholder="Optional description"
                 />
               </div>
-              <div>
-                <p className="block text-xs font-medium text-gray-700 mb-1">Plan type</p>
-                <div className="inline-flex rounded border border-gymnext-muted/50 bg-white p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setCreatePlanType('personal')}
-                    disabled={createPlanBusy}
-                    className={`rounded px-3 py-1.5 text-xs font-medium ${
-                      createPlanType === 'personal'
-                        ? 'text-white'
-                        : 'text-gray-600 hover:bg-gymnext-background'
-                    } disabled:opacity-50`}
-                    style={createPlanType === 'personal' ? { backgroundColor: '#6B21A8' } : undefined}
-                  >
-                    Personal
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCreatePlanType('group')}
-                    disabled={createPlanBusy}
-                    className={`rounded px-3 py-1.5 text-xs font-medium ${
-                      createPlanType === 'group'
-                        ? 'text-white'
-                        : 'text-gray-600 hover:bg-gymnext-background'
-                    } disabled:opacity-50`}
-                    style={createPlanType === 'group' ? { backgroundColor: '#6B21A8' } : undefined}
-                  >
-                    Group
-                  </button>
-                </div>
-              </div>
               {createPlanError && <p className="text-xs text-red-600">{createPlanError}</p>}
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => {
                     setCreatePlanOpen(false)
-                    setCreatePlanType('group')
+                    setCreatePlanKind('privateTraining')
                   }}
                   disabled={createPlanBusy}
                   className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
@@ -8257,6 +11241,17 @@ function PlansSection({
         </div>
       )}
 
+      {planShareOpen && rightPanelMode !== 'schedule' && selectedPlan && !selectedPlan.isPersonal && (
+        <PlanShareDialogs
+          user={user}
+          open={planShareOpen}
+          onClose={() => setPlanShareOpen(false)}
+          planId={selectedPlan.id}
+          planName={selectedPlan.workoutPlanName}
+          allowsHubShare={selectedPlan.trainingIntent === 1}
+        />
+      )}
+
       {planDeleteConfirmOpen && selectedPlan && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
@@ -8266,7 +11261,7 @@ function PlansSection({
           />
           <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg p-4">
             <p className="text-sm text-gray-800">
-              Delete this plan? It will be removed from your list.
+              Delete this plan?
             </p>
             <div className="flex justify-end gap-2 mt-4">
               <button
@@ -8291,7 +11286,60 @@ function PlansSection({
         </div>
       )}
 
-      {stopFollowingConfirmOpen && selectedFollowingPlan && (
+      {stopPlanShareConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="stop-plan-share-title"
+        >
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !stopPlanShareBusy && setStopPlanShareConfirm(null)}
+          />
+          <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg p-4">
+            <h3 id="stop-plan-share-title" className="text-sm font-semibold text-gray-900">
+              Stop sharing?
+            </h3>
+            <p className="mt-2 text-sm text-gray-700">
+              {stopPlanShareConfirm.kind === 'group' ? (
+                <>
+                  Remove this plan’s share with{' '}
+                  <span className="font-medium text-gray-900">{stopPlanShareConfirm.label}</span>? The share link and
+                  hub feed entry for this share will be removed.
+                </>
+              ) : (
+                <>
+                  Remove this plan’s share with{' '}
+                  <span className="font-medium text-gray-900">{stopPlanShareConfirm.label}</span>? The share link and
+                  feed items for this share will be removed.
+                </>
+              )}
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setStopPlanShareConfirm(null)}
+                disabled={stopPlanShareBusy}
+                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmStopPlanShare()}
+                disabled={stopPlanShareBusy}
+                className="rounded bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+              >
+                {stopPlanShareBusy ? 'Removing…' : 'Stop sharing'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {stopFollowingConfirmOpen && selectedFollowingRow && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
             className="absolute inset-0 bg-black/50"
@@ -8300,16 +11348,10 @@ function PlansSection({
           />
           <div className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white shadow-lg p-4">
             <p className="text-sm text-gray-800">
-              Stop following{' '}
-              <span className="font-semibold">
-                {selectedFollowingPlan.remotePlanName || 'this plan'}
-              </span>
-              ?
+              Unsubscribe from <span className="font-medium text-gray-900">{selectedPlanName}</span>? You can subscribe
+              to this plan again later if the coach shares it with you.
             </p>
-            {stopFollowingError && (
-              <p className="mt-2 text-xs text-red-600">{stopFollowingError}</p>
-            )}
-            <div className="flex justify-end gap-2 mt-4">
+            <div className="mt-4 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setStopFollowingConfirmOpen(false)}
@@ -8320,98 +11362,35 @@ function PlansSection({
               </button>
               <button
                 type="button"
-                onClick={handleStopFollowing}
+                onClick={() => void confirmStopFollowing()}
                 disabled={stopFollowingBusy}
                 className="rounded bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
               >
-                {stopFollowingBusy ? 'Stopping…' : 'Stop following'}
+                {stopFollowingBusy ? 'Unsubscribing…' : 'Unsubscribe'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {followSearchOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/50"
-            aria-hidden
-            onClick={() => !followSearchBusy && setFollowSearchOpen(false)}
-          />
-          <div className="relative w-full max-w-lg rounded-lg border border-gymnext-muted/30 bg-white shadow-lg max-h-[85vh] flex flex-col">
-            <div className="border-b border-gymnext-muted/30 px-4 py-3 shrink-0 flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <h3 className="text-sm font-semibold text-gray-800">Follow a plan</h3>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  Search by plan handle to follow someone’s plan. Some plans require approval.
-                </p>
-              </div>
-            </div>
-            <div className="p-4 space-y-3 overflow-y-auto min-h-0">
-              <div>
-                <label htmlFor="follow-handle" className="block text-xs font-medium text-gray-700 mb-1">
-                  Plan handle
-                </label>
-                <input
-                  id="follow-handle"
-                  type="text"
-                  value={followSearchQuery}
-                  onChange={(e) => void runFollowSearch(e.target.value)}
-                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                  placeholder="@some-handle"
-                />
-                <p className="text-[11px] text-gray-500 mt-1">
-                  Type at least 2 characters.
-                </p>
-              </div>
-
-              {followSearchError && (
-                <div className="text-xs text-red-700 rounded border border-red-200 bg-red-50 px-3 py-2">
-                  {followSearchError}
-                </div>
-              )}
-
-              {followSearchBusy && (
-                <p className="text-sm text-gray-500">Searching…</p>
-              )}
-
-              {!followSearchBusy && !followSearchError && followSearchResults.length === 0 && followSearchQuery.replace(/^@/, '').trim().length >= 2 && (
-                <p className="text-sm text-gray-500">No plans found.</p>
-              )}
-
-              {followSearchResults.length > 0 && (
-                <ul className="divide-y divide-gray-200 border border-gray-200 rounded-lg overflow-hidden">
-                  {followSearchResults.map((item) => {
-                    const isProtected = item.privacy === 2
-                    const busy = followActionBusyHandle === item.handleKey
-                    return (
-                      <li key={item.handleKey} className="px-3 py-3 flex items-center gap-3">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium text-gray-900 truncate">
-                            {item.workoutPlanName || 'Untitled plan'}
-                          </p>
-                          <p className="text-xs text-gray-500 truncate">
-                            @{item.handleKey}{isProtected ? ' • protected' : ' • public'}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => handleFollowByHandle(item.handleKey)}
-                          disabled={busy}
-                          className="rounded text-white text-xs font-medium px-3 py-1.5 hover:opacity-90 disabled:opacity-50"
-                          style={{ backgroundColor: '#6B21A8' }}
-                        >
-                          {busy ? 'Following…' : (isProtected ? 'Request' : 'Follow')}
-                        </button>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <PublicUserProfileDialog
+        open={planOwnerPublicProfileUserId != null}
+        userId={planOwnerPublicProfileUserId}
+        onClose={() => setPlanOwnerPublicProfileUserId(null)}
+        viewer={user}
+      />
+      <GroupPublicProfileDialog
+        open={planSharingHubProfileGroupId != null}
+        groupId={planSharingHubProfileGroupId}
+        onClose={() => setPlanSharingHubProfileGroupId(null)}
+        viewer={user}
+      />
+      <PublicUserProfileDialog
+        open={planSharingConnectionProfileUserId != null}
+        userId={planSharingConnectionProfileUserId}
+        onClose={() => setPlanSharingConnectionProfileUserId(null)}
+        viewer={user}
+      />
 
       {deletePlannedConfirmWorkout && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -8506,223 +11485,6 @@ function PlansSection({
         </div>
       )}
 
-      {editSharingOpen && editSharingPlan && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/50"
-            aria-hidden
-            onClick={() => !editSharingBusy && setEditSharingOpen(false)}
-          />
-          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
-            <div className="border-b border-gymnext-muted/30 px-4 py-3">
-              <h3 className="text-sm font-semibold text-gray-800">Edit sharing options</h3>
-            </div>
-            <form onSubmit={handleEditSharingSubmit} className="p-4 space-y-4">
-              <div>
-                <label htmlFor="edit-plan-privacy" className="block text-xs font-medium text-gray-700 mb-1">
-                  Sharing
-                </label>
-                <select
-                  id="edit-plan-privacy"
-                  value={editSharingPrivacy}
-                  onChange={(e) => setEditSharingPrivacy(e.target.value as PlanPrivacyKey)}
-                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                  disabled={editSharingBusy}
-                >
-                  <option value="private">Private (not shared)</option>
-                  <option value="protected">Protected (approval required)</option>
-                  <option value="public">Public (no approval required)</option>
-                </select>
-              </div>
-              <div>
-                <label htmlFor="edit-plan-handle" className="block text-xs font-medium text-gray-700 mb-1">
-                  Handle {editSharingPrivacy === 'private' ? '(optional)' : ''}
-                </label>
-                <input
-                  id="edit-plan-handle"
-                  type="text"
-                  value={editSharingHandle}
-                  onChange={(e) => setEditSharingHandle(e.target.value)}
-                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                  placeholder="e.g. my-team-plan"
-                  disabled={editSharingBusy}
-                />
-              </div>
-              {editSharingError && <p className="text-xs text-red-600">{editSharingError}</p>}
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditSharingOpen(false)}
-                  disabled={editSharingBusy}
-                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={editSharingBusy}
-                  className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
-                  style={{ backgroundColor: '#6B21A8' }}
-                >
-                  {editSharingBusy ? 'Saving…' : 'Save'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {manageFollowersOpen && manageFollowersPlan && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/50"
-            aria-hidden
-            onClick={() => setManageFollowersOpen(false)}
-          />
-          <div className="relative w-full max-w-3xl rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
-            <div className="border-b border-gymnext-muted/30 px-4 py-3 flex items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-gray-800">Manage followers</h3>
-              <button
-                type="button"
-                onClick={() => setManageFollowersOpen(false)}
-                className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
-                aria-label="Close"
-              >
-                ×
-              </button>
-            </div>
-            <form onSubmit={handleFollowersSearchSubmit} className="px-4 py-3 border-b border-gymnext-muted/30 flex items-end gap-2">
-              <div className="flex-1">
-                <label htmlFor="followers-search" className="block text-xs font-medium text-gray-700 mb-1">
-                  Search followers
-                </label>
-                <input
-                  id="followers-search"
-                  type="text"
-                  value={followersQuery}
-                  onChange={(e) => setFollowersQuery(e.target.value)}
-                  placeholder="Name, handle, or user id"
-                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                />
-              </div>
-              <button
-                type="submit"
-                className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90"
-                style={{ backgroundColor: '#6B21A8' }}
-              >
-                Search
-              </button>
-            </form>
-            <div className="max-h-[70vh] overflow-y-auto p-4 space-y-4">
-              {(['active', 'pending', 'blocked'] as const).map((status) => {
-                const section = followersByStatus[status]
-                const title = status === 'active' ? 'Active' : status === 'pending' ? 'Pending' : 'Blocked'
-                return (
-                  <section key={status} className="rounded border border-gray-200">
-                    <div className="px-3 py-2 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
-                      <p className="text-sm font-medium text-gray-800">
-                        {title} ({section.items.length})
-                      </p>
-                      {section.loading && <span className="text-xs text-gray-500">Loading…</span>}
-                    </div>
-                    <div className="divide-y divide-gray-100">
-                      {section.error && (
-                        <p className="px-3 py-2 text-xs text-red-600">{section.error}</p>
-                      )}
-                      {!section.error && section.items.length === 0 && !section.loading && (
-                        <p className="px-3 py-3 text-xs text-gray-500">No followers in this group.</p>
-                      )}
-                      {section.items.map((item) => {
-                        const busyPrefix = `${item.subscriptionDocumentId}:`
-                        const isBusy = !!followersActionBusy && followersActionBusy.startsWith(busyPrefix)
-                        return (
-                          <div key={item.subscriptionDocumentId} className="px-3 py-2 flex items-center gap-2">
-                            <div className="min-w-0 flex-1">
-                              <p className="text-sm text-gray-900 truncate">
-                                {item.subscriberFullName || item.subscriberPublicHandle || item.subscriberUserId}
-                              </p>
-                              <p className="text-xs text-gray-500 truncate">
-                                {item.subscriberPublicHandle ? `@${item.subscriberPublicHandle}` : 'No handle'}
-                              </p>
-                            </div>
-                            <div className="shrink-0 flex items-center gap-1">
-                              {status === 'active' && (
-                                <>
-                                  <button
-                                    type="button"
-                                    disabled={isBusy}
-                                    onClick={() => handleFollowerAction(item, 'revoke')}
-                                    className="rounded px-2 py-1 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 disabled:opacity-50"
-                                  >
-                                    Revoke
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={isBusy}
-                                    onClick={() => handleFollowerAction(item, 'block')}
-                                    className="rounded px-2 py-1 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 disabled:opacity-50"
-                                  >
-                                    Block
-                                  </button>
-                                </>
-                              )}
-                              {status === 'pending' && (
-                                <>
-                                  <button
-                                    type="button"
-                                    disabled={isBusy}
-                                    onClick={() => handleFollowerAction(item, 'approve')}
-                                    className="rounded px-2 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
-                                    style={{ backgroundColor: '#6B21A8' }}
-                                  >
-                                    Approve
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={isBusy}
-                                    onClick={() => handleFollowerAction(item, 'reject')}
-                                    className="rounded px-2 py-1 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 disabled:opacity-50"
-                                  >
-                                    Reject
-                                  </button>
-                                </>
-                              )}
-                              {status === 'blocked' && (
-                                <button
-                                  type="button"
-                                  disabled={isBusy}
-                                  onClick={() => handleFollowerAction(item, 'unblock')}
-                                  className="rounded px-2 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
-                                  style={{ backgroundColor: '#6B21A8' }}
-                                >
-                                  Unblock
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                    {section.nextCursor && (
-                      <div className="px-3 py-2 border-t border-gray-100">
-                        <button
-                          type="button"
-                          disabled={section.loading}
-                          onClick={() => loadFollowers(status)}
-                          className="rounded border border-gray-300 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                        >
-                          Load more
-                        </button>
-                      </div>
-                    )}
-                  </section>
-                )
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
       {editPlannedOpen && editPlannedWorkout && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
@@ -8781,116 +11543,17 @@ function PlansSection({
         </div>
       )}
 
-      {editDetailsPlannedWorkout && selectedPlan && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/50"
-            aria-hidden
-            onClick={() => !editDetailsBusy && setEditDetailsPlannedWorkout(null)}
-          />
-          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
-            <div className="border-b border-gymnext-muted/30 px-4 py-3">
-              <h3 className="text-sm font-semibold text-gray-800">Edit workout details</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Rep scheme, weights, movements, etc.</p>
-            </div>
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault()
-                if (!editDetailsPlannedWorkout || !selectedPlan) return
-                setEditDetailsBusy(true)
-                setEditDetailsError(null)
-                try {
-                  const res = await authedFetch(
-                    `/api/app/plans/${encodeURIComponent(selectedPlan.id)}/planned-workouts/${encodeURIComponent(editDetailsPlannedWorkout.id)}`,
-                    {
-                      method: 'PATCH',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ workoutDetails: editDetailsValue.trim() || null }),
-                    }
-                  )
-                  if (!res.ok) {
-                    const data = await res.json().catch(() => ({}))
-                    throw new Error(data.error || `HTTP ${res.status}`)
-                  }
-                  onPlannedWorkoutMetadataSaved(editDetailsPlannedWorkout.id, {
-                    workoutDetails: editDetailsValue.trim() || null,
-                  })
-                  setEditDetailsPlannedWorkout(null)
-                  toast.success('Workout details saved')
-                } catch (err) {
-                  setEditDetailsError(err instanceof Error ? err.message : 'Failed to save')
-                } finally {
-                  setEditDetailsBusy(false)
-                }
-              }}
-              className="p-4 space-y-4"
-            >
-              <textarea
-                rows={8}
-                value={editDetailsValue}
-                onChange={(e) => setEditDetailsValue(e.target.value)}
-                className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
-                placeholder="e.g. 5×5 Back Squat @ 135#, 3×10 RDL, 2×20 KB swings"
-              />
-              {editDetailsError && <p className="text-xs text-red-600">{editDetailsError}</p>}
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditDetailsPlannedWorkout(null)}
-                  disabled={editDetailsBusy}
-                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={editDetailsBusy}
-                  className="rounded text-white text-sm font-medium px-3 py-2 hover:opacity-90 disabled:opacity-50"
-                  style={{ backgroundColor: '#6B21A8' }}
-                >
-                  {editDetailsBusy ? 'Saving…' : 'Save'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {showDetailsPlannedWorkout && showDetailsPlannedWorkout.workout.type !== 'MultiSegmentWorkout' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/50"
-            aria-hidden
-            onClick={() => setShowDetailsPlannedWorkout(null)}
-          />
-          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
-            <div className="border-b border-gymnext-muted/30 px-4 py-3">
-              <h3 className="text-sm font-semibold text-gray-800">Workout details</h3>
-            </div>
-            <div className="p-4">
-              <p className="text-sm text-gray-900 whitespace-pre-wrap">
-                {(showDetailsPlannedWorkout.workout as { workoutDetails?: string | null }).workoutDetails?.trim() || 'No workout details recorded.'}
-              </p>
-            </div>
-            <div className="flex justify-end gap-2 px-4 pb-4">
-              <button
-                type="button"
-                onClick={() => setShowDetailsPlannedWorkout(null)}
-                className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {editSchedulePlannedWorkout && !expandedPlannedWorkoutId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div
             className="absolute inset-0 bg-black/50"
             aria-hidden
-            onClick={() => !editScheduleBusy && setEditSchedulePlannedWorkout(null)}
+            onClick={() => {
+              if (!editScheduleBusy) {
+                setEditSchedulePlannedWorkout(null)
+                setEditScheduleWorkoutDetails('')
+              }
+            }}
           />
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
@@ -8908,7 +11571,10 @@ function PlansSection({
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setEditSchedulePlannedWorkout(null)}
+                  onClick={() => {
+                    setEditSchedulePlannedWorkout(null)
+                    setEditScheduleWorkoutDetails('')
+                  }}
                   disabled={editScheduleBusy}
                   className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
                 >
@@ -8984,7 +11650,7 @@ function PlansSection({
           />
           <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
             <div className="border-b border-gymnext-muted/30 px-4 py-3">
-              <h3 className="text-sm font-semibold text-gray-800">Copy to another plan</h3>
+              <h3 className="text-sm font-semibold text-gray-800">Copy to plan</h3>
               <p className="text-xs text-gray-500 mt-0.5">Choose a plan and date to add this workout.</p>
             </div>
             <form onSubmit={handleCopyToPlan} className="p-4 space-y-4">
@@ -9011,7 +11677,6 @@ function PlansSection({
                   type="date"
                   value={copyTargetDay}
                   onChange={(e) => setCopyTargetDay(e.target.value.slice(0, 10))}
-                  min={todayYmd}
                   className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
                 />
               </div>
@@ -9038,7 +11703,224 @@ function PlansSection({
           </div>
         </div>
       )}
-    </div>
+
+      {copyAllSourceDateKey && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => {
+              if (!copyAllBusy) {
+                setCopyAllSourceDateKey(null)
+                setCopyAllSourcePlanId(null)
+              }
+            }}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-800">Copy all to another plan</h3>
+              <p className="mt-0.5 text-xs text-gray-500">
+                Copy{' '}
+                {((
+                  copyAllSourcePlanId && selectedPlanIdSecondary && copyAllSourcePlanId === selectedPlanIdSecondary
+                    ? scheduleSecondByDay ?? {}
+                    : byDay
+                )[copyAllSourceDateKey] ?? []
+                ).length}{' '}
+                workout
+                {((
+                  copyAllSourcePlanId && selectedPlanIdSecondary && copyAllSourcePlanId === selectedPlanIdSecondary
+                    ? scheduleSecondByDay ?? {}
+                    : byDay
+                )[copyAllSourceDateKey] ?? []
+                ).length === 1
+                  ? ''
+                  : 's'}{' '}
+                from{' '}
+                {new Date(copyAllSourceDateKey + 'T12:00:00').toLocaleDateString(undefined, {
+                  weekday: 'short',
+                  month: 'short',
+                  day: 'numeric',
+                })}
+                . Choose the plan and date to add copies (same order).
+              </p>
+            </div>
+            <form onSubmit={handleCopyAllToPlan} className="space-y-4 p-4">
+              <div>
+                <label htmlFor="copy-all-target-plan" className="mb-1 block text-xs font-medium text-gray-700">
+                  Plan
+                </label>
+                <select
+                  id="copy-all-target-plan"
+                  value={copyAllTargetPlanId}
+                  onChange={(e) => setCopyAllTargetPlanId(e.target.value)}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                >
+                  <option value="">Select a plan</option>
+                  {plans.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.workoutPlanName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="copy-all-target-day" className="mb-1 block text-xs font-medium text-gray-700">
+                  Date
+                </label>
+                <input
+                  id="copy-all-target-day"
+                  type="date"
+                  value={copyAllTargetDay}
+                  onChange={(e) => setCopyAllTargetDay(e.target.value.slice(0, 10))}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                />
+              </div>
+              {copyAllError && <p className="text-xs text-red-600">{copyAllError}</p>}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCopyAllSourceDateKey(null)
+                    setCopyAllSourcePlanId(null)
+                  }}
+                  disabled={copyAllBusy}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={copyAllBusy || !copyAllTargetPlanId || !copyAllTargetDay}
+                  className="rounded px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                  style={{ backgroundColor: '#6B21A8' }}
+                >
+                  {copyAllBusy ? 'Copying…' : 'Copy all'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {copyAllToDaySourceDateKey && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !copyAllToDayBusy && setCopyAllToDaySourceDateKey(null)}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-800">Copy all to another day</h3>
+              <p className="mt-0.5 text-xs text-gray-500">
+                Copy {(byDay[copyAllToDaySourceDateKey] ?? []).length} workout
+                {(byDay[copyAllToDaySourceDateKey] ?? []).length === 1 ? '' : 's'} from{' '}
+                {new Date(copyAllToDaySourceDateKey + 'T12:00:00').toLocaleDateString(undefined, {
+                  weekday: 'short',
+                  month: 'short',
+                  day: 'numeric',
+                })}{' '}
+                onto this plan on the date you pick (same order).
+              </p>
+            </div>
+            <form onSubmit={handleCopyAllToDay} className="space-y-4 p-4">
+              <div>
+                <label htmlFor="copy-all-to-day-target" className="mb-1 block text-xs font-medium text-gray-700">
+                  Date
+                </label>
+                <input
+                  id="copy-all-to-day-target"
+                  type="date"
+                  value={copyAllToDayTargetDay}
+                  onChange={(e) => setCopyAllToDayTargetDay(e.target.value.slice(0, 10))}
+                  min={todayYmd}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                />
+              </div>
+              {copyAllToDayError && <p className="text-xs text-red-600">{copyAllToDayError}</p>}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCopyAllToDaySourceDateKey(null)}
+                  disabled={copyAllToDayBusy}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={copyAllToDayBusy || !copyAllToDayTargetDay}
+                  className="rounded px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                  style={{ backgroundColor: '#6B21A8' }}
+                >
+                  {copyAllToDayBusy ? 'Copying…' : 'Copy all'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {moveAllSourceDateKey && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={() => !moveAllBusy && setMoveAllSourceDateKey(null)}
+          />
+          <div className="relative w-full max-w-md rounded-lg border border-gymnext-muted/30 bg-white shadow-lg">
+            <div className="border-b border-gymnext-muted/30 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-800">Move all to another day</h3>
+              <p className="mt-0.5 text-xs text-gray-500">
+                Move {(byDay[moveAllSourceDateKey] ?? []).length} workout
+                {(byDay[moveAllSourceDateKey] ?? []).length === 1 ? '' : 's'} from{' '}
+                {new Date(moveAllSourceDateKey + 'T12:00:00').toLocaleDateString(undefined, {
+                  weekday: 'short',
+                  month: 'short',
+                  day: 'numeric',
+                })}
+                . They stay on this plan and keep the same order on the new date.
+              </p>
+            </div>
+            <form onSubmit={handleMoveAllToDay} className="space-y-4 p-4">
+              <div>
+                <label htmlFor="move-all-target-day" className="mb-1 block text-xs font-medium text-gray-700">
+                  Date
+                </label>
+                <input
+                  id="move-all-target-day"
+                  type="date"
+                  value={moveAllTargetDay}
+                  onChange={(e) => setMoveAllTargetDay(e.target.value.slice(0, 10))}
+                  min={todayYmd}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-gymnext focus:outline-none focus:ring-1 focus:ring-gymnext"
+                />
+              </div>
+              {moveAllError && <p className="text-xs text-red-600">{moveAllError}</p>}
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMoveAllSourceDateKey(null)}
+                  disabled={moveAllBusy}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={moveAllBusy || !moveAllTargetDay}
+                  className="rounded px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                  style={{ backgroundColor: '#6B21A8' }}
+                >
+                  {moveAllBusy ? 'Moving…' : 'Move all'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 

@@ -44,6 +44,8 @@ const LIMITS_PRO: SubscriptionLimits = {
  */
 const TEST_SUBSCRIPTION_TIER_OVERRIDES: Record<string, SubscriptionTier> = {
   '0Xo9G9bp7QhmUSJm7SAJLuag5H43': 'pro',
+  /** Local testing: full Pro limits (unlimited favorites, collections, plans). */
+  '2A8CVkrOcXO2rQGmdEW4nzBJk8P2': 'pro',
 }
 
 /** When RevenueCat has no subscription, compute Classic from user doc override or effective/expiry (matches admin). */

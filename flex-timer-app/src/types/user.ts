@@ -1,3 +1,5 @@
+import type { UserHubLookupIds, UserHubLookupLabels } from './hub-profile'
+
 /** Firebase Auth user record as returned to admin */
 export interface AdminUserRecord {
   uid: string
@@ -30,6 +32,12 @@ export interface UserDataCounts {
   workoutPlans: number
 }
 
+/**
+ * Firestore `trainingIntent`: numeric **0** or **1** only (0 = private training, 1 = group training).
+ * Omitted when `isPersonal` is true; `isPersonal` takes precedence for display and behavior.
+ */
+export type PlanTrainingIntent = 0 | 1
+
 /** Workout plan document from users/<userId>/workoutPlans */
 export interface WorkoutPlan {
   id: string
@@ -39,12 +47,19 @@ export interface WorkoutPlan {
   workoutPlanDescription: string | null
   workoutPlanId: string
   workoutPlanName: string
+  /** For non-personal plans only: 0 private training, 1 group training. */
+  trainingIntent?: PlanTrainingIntent | null
   /** Sharing privacy level from mobile app (private/protected/public as raw int). */
   privacy?: number | null
   /** Optional public handle used when sharing is enabled. */
   handle?: string | null
   /** Set when plan is soft-deleted; used to filter from list and count */
   deletedAt?: string | null
+  /**
+   * When true (default), this owned plan is included on the Planning → Today's Plan tab.
+   * When false, Today omits it. Synced with mobile as `showInSchedule`.
+   */
+  showInSchedule?: boolean | null
 }
 
 /** One entry in PlanDay.entries[] (stored as map in Firestore). Can be single-segment (flat) or MultiSegmentWorkout (has segments array). */
@@ -195,12 +210,17 @@ export function getSubscriptionPlanLabel(value: number | null | undefined): stri
 }
 
 /** Fields stored on the user document (users/<userId>) in Firestore. Subscription/entitlements come from RevenueCat (Firestore) instead. */
-export interface UserDocumentFields {
+export interface UserDocumentFields extends Partial<UserHubLookupIds> {
   email?: string | null
   firstName?: string | null
   lastName?: string | null
-  publicHandle?: string | null
-  basicBio?: string | null
+  handle?: string | null
+  handleKey?: string | null
+  bio?: string | null
+  profilePhotoUrl?: string | null
+  city?: string | null
+  region?: string | null
+  country?: string | null
 }
 
 /** RevenueCat subscription summary for admin profile (entitlements from Firestore). */
@@ -210,12 +230,17 @@ export interface AdminSubscriptionInfo {
 }
 
 /** Full admin view of a user: Auth record + user document + Firestore counts + workout/plan/collection lists */
-export interface AdminUserProfile extends AdminUserRecord {
+export interface AdminUserProfile extends AdminUserRecord, Partial<UserHubLookupIds> {
   /** From user document users/<userId> */
   firstName?: string | null
   lastName?: string | null
-  publicHandle?: string | null
-  basicBio?: string | null
+  handle?: string | null
+  handleKey?: string | null
+  bio?: string | null
+  profilePhotoUrl?: string | null
+  city?: string | null
+  region?: string | null
+  country?: string | null
   /** From UserDetails/settings: hasConnectedToDisplay -> "Connected User" | "Standalone User" */
   connectedUserDisplay?: string | null
   /** From UserDetails/settings: connectedToDisplayType (noDisplay | singleDisplay | multiDisplay) */
@@ -228,6 +253,8 @@ export interface AdminUserProfile extends AdminUserRecord {
   mergedUserIds?: string[]
   /** UserDetails settings map (key-value pairs from app) */
   settings?: Record<string, unknown>
+  /** Resolved labels for hub lookup ids (admin display). */
+  hubLookupLabels?: UserHubLookupLabels
   dataCounts: UserDataCounts
   workouts: Workout[]
   /** Workouts with deletedAt set (for Deleted data section) */
