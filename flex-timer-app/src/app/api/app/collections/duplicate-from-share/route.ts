@@ -3,7 +3,7 @@ import { requireUserAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
 import { cloneSharedCollectionToUserLibrary, getUserWorkoutCollections } from '@/lib/firestore'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
-import { viewerCanAccessSharedLibraryItem } from '@/lib/shared-resource-access'
+import { viewerCanAccessSharedLibraryItemViaAnyMirror } from '@/lib/shared-resource-access'
 
 /**
  * POST /api/app/collections/duplicate-from-share
@@ -39,12 +39,12 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  const allowed = await viewerCanAccessSharedLibraryItem(
+  const allowed = await viewerCanAccessSharedLibraryItemViaAnyMirror(
     uid,
     ownerUserId,
     'collection',
     sourceCollectionId,
-    groupId
+    groupId,
   )
   if (!allowed) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })

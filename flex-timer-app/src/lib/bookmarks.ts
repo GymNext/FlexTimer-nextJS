@@ -3,11 +3,13 @@ import { adminDb } from '@/lib/firebase-admin'
 
 export type SharedWorkoutBookmarkRow = {
   subscriptionDocumentId: string
+  subscriberUserId: string
   ownerUserId: string
   remoteWorkoutId: string
-  mirrorGroupId: string | null
   workoutNameSnapshot: string | null
   workoutDescriptionSnapshot: string | null
+  subscriberFullName: string | null
+  subscriberHandle: string | null
   /** Subscriber-owned marker; true when mirror is missing/inaccessible (may be stale). */
   isUnavailable: boolean
   updatedAt: string | null
@@ -15,13 +17,15 @@ export type SharedWorkoutBookmarkRow = {
 
 export type SharedCollectionBookmarkRow = {
   subscriptionDocumentId: string
+  subscriberUserId: string
   ownerUserId: string
   remoteCollectionId: string
-  mirrorGroupId: string | null
   collectionNameSnapshot: string | null
   collectionDescriptionSnapshot: string | null
   /** Non-empty `workoutIds` on the owner's collection when the bookmark was saved (null if absent / legacy). */
   collectionWorkoutCountSnapshot: number | null
+  subscriberFullName: string | null
+  subscriberHandle: string | null
   /** Subscriber-owned marker; true when mirror is missing/inaccessible (may be stale). */
   isUnavailable: boolean
   updatedAt: string | null
@@ -67,6 +71,20 @@ export function collectionBookmarkDocumentId(ownerUserId: string, remoteCollecti
   return `${ownerUserId.trim()}_${remoteCollectionId.trim()}`
 }
 
+const stripLegacyWorkoutBookmarkFields = {
+  mirrorGroupId: FieldValue.delete(),
+  followSource: FieldValue.delete(),
+  followContextGroupId: FieldValue.delete(),
+  ordinal: FieldValue.delete(),
+}
+
+const stripLegacyCollectionBookmarkFields = {
+  mirrorGroupId: FieldValue.delete(),
+  followSource: FieldValue.delete(),
+  followContextGroupId: FieldValue.delete(),
+  ordinal: FieldValue.delete(),
+}
+
 /**
  * Creates or updates an active shared-workout bookmark on `users/{viewerUid}/workoutSubscriptions`.
  * Uses Admin SDK (server); doc id is composite per client rules.
@@ -75,9 +93,10 @@ export async function upsertActiveSharedWorkoutBookmark(params: {
   viewerUid: string
   ownerUserId: string
   remoteWorkoutId: string
-  mirrorGroupId: string | null
   workoutNameSnapshot: string | null
   workoutDescriptionSnapshot: string | null
+  subscriberFullName: string | null
+  subscriberHandle: string | null
 }): Promise<{ subscriptionDocumentId: string }> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const viewerUid = params.viewerUid.trim()
@@ -85,7 +104,6 @@ export async function upsertActiveSharedWorkoutBookmark(params: {
   const remoteWorkoutId = params.remoteWorkoutId.trim()
   if (!viewerUid || !ownerUserId || !remoteWorkoutId) throw new Error('Invalid ids')
   const subId = workoutBookmarkDocumentId(ownerUserId, remoteWorkoutId)
-  const gid = params.mirrorGroupId?.trim() ?? ''
   await adminDb
     .collection('users')
     .doc(viewerUid)
@@ -97,11 +115,14 @@ export async function upsertActiveSharedWorkoutBookmark(params: {
         ownerUserId,
         remoteWorkoutId,
         status: 'active',
-        mirrorGroupId: gid ? gid : null,
         workoutNameSnapshot: params.workoutNameSnapshot,
         workoutDescriptionSnapshot: params.workoutDescriptionSnapshot,
+        subscriberFullName: params.subscriberFullName,
+        subscriberHandle: params.subscriberHandle,
+        subscriberPublicHandle: FieldValue.delete(),
         isUnavailable: false,
         updatedAt: FieldValue.serverTimestamp(),
+        ...stripLegacyWorkoutBookmarkFields,
       },
       { merge: true },
     )
@@ -115,10 +136,11 @@ export async function upsertActiveSharedCollectionBookmark(params: {
   viewerUid: string
   ownerUserId: string
   remoteCollectionId: string
-  mirrorGroupId: string | null
   collectionNameSnapshot: string | null
   collectionDescriptionSnapshot: string | null
   collectionWorkoutCountSnapshot: number
+  subscriberFullName: string | null
+  subscriberHandle: string | null
 }): Promise<{ subscriptionDocumentId: string }> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const viewerUid = params.viewerUid.trim()
@@ -126,7 +148,6 @@ export async function upsertActiveSharedCollectionBookmark(params: {
   const remoteCollectionId = params.remoteCollectionId.trim()
   if (!viewerUid || !ownerUserId || !remoteCollectionId) throw new Error('Invalid ids')
   const subId = collectionBookmarkDocumentId(ownerUserId, remoteCollectionId)
-  const gid = params.mirrorGroupId?.trim() ?? ''
   await adminDb
     .collection('users')
     .doc(viewerUid)
@@ -138,12 +159,15 @@ export async function upsertActiveSharedCollectionBookmark(params: {
         ownerUserId,
         remoteCollectionId,
         status: 'active',
-        mirrorGroupId: gid ? gid : null,
         collectionNameSnapshot: params.collectionNameSnapshot,
         collectionDescriptionSnapshot: params.collectionDescriptionSnapshot,
         collectionWorkoutCountSnapshot: Math.max(0, Math.floor(params.collectionWorkoutCountSnapshot)),
+        subscriberFullName: params.subscriberFullName,
+        subscriberHandle: params.subscriberHandle,
+        subscriberPublicHandle: FieldValue.delete(),
         isUnavailable: false,
         updatedAt: FieldValue.serverTimestamp(),
+        ...stripLegacyCollectionBookmarkFields,
       },
       { merge: true },
     )
@@ -154,7 +178,7 @@ export async function upsertActiveSharedCollectionBookmark(params: {
 export async function deleteSharedWorkoutBookmark(
   viewerUid: string,
   ownerUserId: string,
-  remoteWorkoutId: string
+  remoteWorkoutId: string,
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const v = viewerUid.trim()
@@ -175,7 +199,7 @@ export async function deleteSharedWorkoutBookmark(
 export async function deleteSharedCollectionBookmark(
   viewerUid: string,
   ownerUserId: string,
-  remoteCollectionId: string
+  remoteCollectionId: string,
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const v = viewerUid.trim()
@@ -195,9 +219,7 @@ export async function deleteSharedCollectionBookmark(
 }
 
 /** Active shared workout subscriptions for Bookmarks (subscriber-owned docs). */
-export async function listActiveSharedWorkoutBookmarksForUser(
-  uid: string
-): Promise<SharedWorkoutBookmarkRow[]> {
+export async function listActiveSharedWorkoutBookmarksForUser(uid: string): Promise<SharedWorkoutBookmarkRow[]> {
   if (!adminDb) return []
   const u = uid.trim()
   if (!u) return []
@@ -212,15 +234,17 @@ export async function listActiveSharedWorkoutBookmarksForUser(
     const d = doc.data() as Record<string, unknown>
     const ownerUserId = str(d, 'ownerUserId').trim()
     const remoteWorkoutId = str(d, 'remoteWorkoutId').trim()
+    const subscriberUserId = str(d, 'subscriberUserId').trim() || u
     if (!ownerUserId || !remoteWorkoutId) continue
-    const gid = str(d, 'mirrorGroupId').trim()
     out.push({
       subscriptionDocumentId: doc.id,
+      subscriberUserId,
       ownerUserId,
       remoteWorkoutId,
-      mirrorGroupId: gid ? gid : null,
       workoutNameSnapshot: str(d, 'workoutNameSnapshot').trim() || null,
       workoutDescriptionSnapshot: str(d, 'workoutDescriptionSnapshot').trim() || null,
+      subscriberFullName: str(d, 'subscriberFullName').trim() || null,
+      subscriberHandle: str(d, 'subscriberHandle').trim() || null,
       isUnavailable: bool(d, 'isUnavailable') === true,
       updatedAt: tsToIso(d.updatedAt),
     })
@@ -231,7 +255,7 @@ export async function listActiveSharedWorkoutBookmarksForUser(
 
 /** Active shared collection subscriptions for Bookmarks (subscriber-owned docs). */
 export async function listActiveSharedCollectionBookmarksForUser(
-  uid: string
+  uid: string,
 ): Promise<SharedCollectionBookmarkRow[]> {
   if (!adminDb) return []
   const u = uid.trim()
@@ -247,16 +271,18 @@ export async function listActiveSharedCollectionBookmarksForUser(
     const d = doc.data() as Record<string, unknown>
     const ownerUserId = str(d, 'ownerUserId').trim()
     const remoteCollectionId = str(d, 'remoteCollectionId').trim()
+    const subscriberUserId = str(d, 'subscriberUserId').trim() || u
     if (!ownerUserId || !remoteCollectionId) continue
-    const gid = str(d, 'mirrorGroupId').trim()
     out.push({
       subscriptionDocumentId: doc.id,
+      subscriberUserId,
       ownerUserId,
       remoteCollectionId,
-      mirrorGroupId: gid ? gid : null,
       collectionNameSnapshot: str(d, 'collectionNameSnapshot').trim() || null,
       collectionDescriptionSnapshot: str(d, 'collectionDescriptionSnapshot').trim() || null,
       collectionWorkoutCountSnapshot: intNonNegOrNull(d, 'collectionWorkoutCountSnapshot'),
+      subscriberFullName: str(d, 'subscriberFullName').trim() || null,
+      subscriberHandle: str(d, 'subscriberHandle').trim() || null,
       isUnavailable: bool(d, 'isUnavailable') === true,
       updatedAt: tsToIso(d.updatedAt),
     })
@@ -264,4 +290,3 @@ export async function listActiveSharedCollectionBookmarksForUser(
   out.sort((a, b) => (Date.parse(b.updatedAt ?? '') || 0) - (Date.parse(a.updatedAt ?? '') || 0))
   return out
 }
-

@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireUserAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
 import { deleteSharedWorkoutBookmark, upsertActiveSharedWorkoutBookmark } from '@/lib/bookmarks'
-import { getWorkoutById } from '@/lib/firestore'
+import { getUserDocument, getWorkoutById } from '@/lib/firestore'
 import { getWorkoutDisplayDescription, getWorkoutDisplayName } from '@/lib/json-workout-format'
-import { viewerCanAccessSharedLibraryItem } from '@/lib/shared-resource-access'
+import { resolveSharedMirrorReadContextForViewer } from '@/lib/shared-resource-access'
 
 /**
  * POST /api/app/bookmarks/workouts
@@ -40,8 +40,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Cannot bookmark your own workout' }, { status: 400 })
   }
 
-  const allowed = await viewerCanAccessSharedLibraryItem(uid, ownerUserId, 'workout', remoteWorkoutId, groupId)
-  if (!allowed) {
+  const readCtx = await resolveSharedMirrorReadContextForViewer(
+    uid,
+    ownerUserId,
+    'workout',
+    remoteWorkoutId,
+    groupId,
+  )
+  if (!readCtx) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
@@ -50,15 +56,26 @@ export async function POST(request: NextRequest) {
     if (!w || w.deletedAt) {
       return NextResponse.json({ error: 'Workout not found' }, { status: 404 })
     }
+    const userDoc = await getUserDocument(uid)
+    const firstName = typeof userDoc?.firstName === 'string' ? userDoc.firstName.trim() : ''
+    const lastName = typeof userDoc?.lastName === 'string' ? userDoc.lastName.trim() : ''
+    const subscriberFullName = `${firstName} ${lastName}`.trim() || null
+    const subscriberHandle =
+      typeof userDoc?.handleKey === 'string' && userDoc.handleKey.trim() !== ''
+        ? userDoc.handleKey.trim().toLowerCase()
+        : typeof userDoc?.handle === 'string' && userDoc.handle.trim() !== ''
+          ? userDoc.handle.trim().replace(/^@/, '').toLowerCase()
+          : null
     const workoutNameSnapshot = getWorkoutDisplayName(w).trim() || null
     const workoutDescriptionSnapshot = getWorkoutDisplayDescription(w).trim() || null
     const { subscriptionDocumentId } = await upsertActiveSharedWorkoutBookmark({
       viewerUid: uid,
       ownerUserId,
       remoteWorkoutId,
-      mirrorGroupId: groupId,
       workoutNameSnapshot,
       workoutDescriptionSnapshot,
+      subscriberFullName,
+      subscriberHandle,
     })
     return NextResponse.json({ subscriptionDocumentId })
   } catch (err) {

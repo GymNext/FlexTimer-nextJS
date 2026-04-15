@@ -6,6 +6,7 @@ import { FieldValue, type DocumentReference } from 'firebase-admin/firestore'
 import { adminDb } from '@/lib/firebase-admin'
 import { getPlanById } from '@/lib/firestore'
 import { sanitizeTrainingIntentOnPlanPayloadForFirestoreWrite } from '@/lib/plan-training-intent'
+import { resolveSharedMirrorReadContextForViewer } from '@/lib/shared-resource-access'
 import { userConnectionDocumentId, assertUsersAreConnected } from '@/lib/user-connections'
 import {
   SHARED_PLANS_SUB,
@@ -43,114 +44,44 @@ export type ResolvedPlanFollowAccess = {
   shareHideFutureWorkouts: boolean
 }
 
-async function readPlanUserShareFlagsForPeer(
-  ownerUserId: string,
-  planId: string,
-  peerUserId: string
-): Promise<{ allowEditing: boolean; hideFutureWorkouts: boolean } | null> {
-  if (!adminDb) return null
-  const o = ownerUserId.trim()
-  const pid = planId.trim()
-  const peer = peerUserId.trim()
-  if (!o || !pid || !peer) return null
-  const snap = await adminDb
-    .collection('users')
-    .doc(o)
-    .collection(PLAN_USER_SHARES_ROOT)
-    .doc(pid)
-    .collection(SHARE_ITEMS_SUB)
-    .doc(peer)
-    .get()
-  if (!snap.exists) return null
-  const d = snap.data() as Record<string, unknown>
-  return {
-    allowEditing: readAllowEditingFromShareDoc(d),
-    hideFutureWorkouts: readHideFutureWorkoutsFromShareDoc(d),
-  }
-}
-
 /**
- * How the subscriber experiences a followed plan: reads live flags from `planGroupShares` (when the
- * subscription is tied to a hub) or `planUserShares` (connection direct share), then group-feed heuristics.
- * Does not trust `workoutPlanSubscriptions.shareAllowEditing` / `shareHideFutureWorkouts` — those are often
- * stale defaults written at subscribe time.
+ * Resolved from the subscriber’s readable plan mirror (`users/{sub}/sharedPlans` or `groups/{id}/sharedPlans`),
+ * matching mobile: subscription docs do not store share flags or hub routing.
  */
 export async function resolvePlanFollowAccessForSubscriber(
   subscriberUserId: string,
   ownerUserId: string,
   remotePlanId: string,
-  stored?: {
-    followSource?: string | null
-    followContextGroupId?: string | null
-    /** Ignored for resolution; use share subcollections as source of truth. */
-    shareAllowEditing?: boolean
-    shareHideFutureWorkouts?: boolean
-  }
+  opts?: { hubGroupIds?: string[] },
 ): Promise<ResolvedPlanFollowAccess> {
   const o = ownerUserId.trim()
   const pid = remotePlanId.trim()
   const sub = subscriberUserId.trim()
-  if (!o || !pid || !sub) {
+  if (!o || !pid || !sub || !adminDb) {
     return { shareAllowEditing: false, shareHideFutureWorkouts: false }
   }
 
-  let access: ResolvedPlanFollowAccess
+  const ctx = await resolveSharedMirrorReadContextForViewer(sub, o, 'plan', pid, null, opts)
+  if (!ctx) {
+    return { shareAllowEditing: false, shareHideFutureWorkouts: false }
+  }
 
-  const gid = stored?.followContextGroupId?.trim()
-  if (gid && adminDb) {
-    const snap = await adminDb
-      .collection('users')
-      .doc(o)
-      .collection(PLAN_GROUP_SHARES_ROOT)
-      .doc(pid)
-      .collection(SHARE_ITEMS_SUB)
-      .doc(gid)
-      .get()
-    if (snap.exists) {
-      const d = snap.data() as Record<string, unknown>
-      const hfRaw = d[PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]
-      const hideFuture = typeof hfRaw === 'boolean' ? hfRaw : true
-      access = { shareAllowEditing: false, shareHideFutureWorkouts: hideFuture }
-    } else {
-      const conn = await readPlanUserShareFlagsForPeer(o, pid, sub)
-      if (conn) {
-        access = {
-          shareAllowEditing: conn.allowEditing,
-          shareHideFutureWorkouts: conn.hideFutureWorkouts,
-        }
-      } else if (stored?.followSource === 'groupFeed') {
-        const rows = await listPlanGroupShares(o, pid)
-        if (rows.length === 1) {
-          access = { shareAllowEditing: false, shareHideFutureWorkouts: rows[0].hideFutureWorkouts }
-        } else {
-          access = { shareAllowEditing: false, shareHideFutureWorkouts: true }
-        }
-      } else {
-        access = { shareAllowEditing: false, shareHideFutureWorkouts: false }
-      }
-    }
-  } else {
-    const conn = await readPlanUserShareFlagsForPeer(o, pid, sub)
-    if (conn) {
-      access = {
-        shareAllowEditing: conn.allowEditing,
-        shareHideFutureWorkouts: conn.hideFutureWorkouts,
-      }
-    } else if (stored?.followSource === 'groupFeed') {
-      const rows = await listPlanGroupShares(o, pid)
-      if (rows.length === 1) {
-        access = { shareAllowEditing: false, shareHideFutureWorkouts: rows[0].hideFutureWorkouts }
-      } else {
-        access = { shareAllowEditing: false, shareHideFutureWorkouts: true }
-      }
-    } else {
-      access = { shareAllowEditing: false, shareHideFutureWorkouts: false }
-    }
+  const planDocId = groupShareMirrorDocumentId(o, pid)
+  const mirrorRef = ctx.readViaGroupId
+    ? adminDb.collection(GROUPS_COLLECTION).doc(ctx.readViaGroupId).collection(SHARED_PLANS_SUB).doc(planDocId)
+    : adminDb.collection('users').doc(sub).collection(SHARED_PLANS_SUB).doc(planDocId)
+
+  const snap = await mirrorRef.get()
+  if (!snap.exists) {
+    return { shareAllowEditing: false, shareHideFutureWorkouts: false }
+  }
+  const d = snap.data() as Record<string, unknown>
+  const access: ResolvedPlanFollowAccess = {
+    shareAllowEditing: readAllowEditingFromShareDoc(d),
+    shareHideFutureWorkouts: readHideFutureWorkoutsFromShareDoc(d),
   }
 
   const plan = await getPlanById(o, pid)
-  // Private / personal training: future visibility is always on for followers (hub hide-future applies only to group-training plans).
-  // Also fixes legacy `planUserShares` items missing `hideFutureWorkouts`, which `readHideFutureWorkoutsFromShareDoc` treated as hidden.
   if (plan && !plan.deletedAt && plan.trainingIntent !== 1) {
     return { ...access, shareHideFutureWorkouts: false }
   }

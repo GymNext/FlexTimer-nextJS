@@ -115,7 +115,8 @@ type FollowingPlanRow = {
   remotePlanHandle: string | null
   /** Coach plan description (live or subscription snapshot). */
   remotePlanDescription?: string | null
-  ordinal: number
+  /** From Firestore `updatedAt` (list ordering; not a persisted client ordinal). */
+  updatedAt?: string | null
   subscriberFullName: string | null
   subscriberHandle: string | null
   /** Resolved for UI: owner allowed editing on the connection share (otherwise read-only). */
@@ -128,6 +129,8 @@ type FollowingPlanRow = {
   remotePlanTrainingIntent?: 0 | 1
   /** True when the owner’s plan doc is missing or soft-deleted (follow entry is stale). */
   remotePlanUnavailable?: boolean
+  /** True when no matching `sharedPlans` mirror for this viewer (share removed or out of sync). */
+  sharedPlanMirrorMissing?: boolean
 }
 
 function normalizeFollowingPlanRows(raw: FollowingPlanRow[] | undefined): FollowingPlanRow[] {
@@ -136,6 +139,7 @@ function normalizeFollowingPlanRows(raw: FollowingPlanRow[] | undefined): Follow
     shareAllowEditing: Boolean(r.shareAllowEditing),
     shareHideFutureWorkouts: r.shareHideFutureWorkouts !== false,
     remotePlanUnavailable: Boolean(r.remotePlanUnavailable),
+    sharedPlanMirrorMissing: Boolean(r.sharedPlanMirrorMissing),
   }))
 }
 
@@ -1923,18 +1927,14 @@ function UserAppLayout({
   }
 
   async function handleReorderSubscriptions(subscriptionDocumentIds: string[]) {
-    try {
-      await authedFetch('/api/app/following-plans', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subscriptionDocumentIds }),
-      })
-      await refetchFollowingPlansQuiet()
-    } catch (e) {
-      console.error('[subscriptions reorder]', e)
-      setReorderPlansError(e instanceof Error ? e.message : 'Failed to save subscription order')
-      await refetchFollowingPlansQuiet()
-    }
+    setFollowingPlans((prev) => {
+      const byId = new Map(prev.map((r) => [r.subscriptionDocumentId, r]))
+      const ordered = subscriptionDocumentIds
+        .map((id) => byId.get(id))
+        .filter((r): r is FollowingPlanRow => r != null)
+      const extra = prev.filter((r) => !subscriptionDocumentIds.includes(r.subscriptionDocumentId))
+      return [...ordered, ...extra]
+    })
   }
 
   async function handleDeletePlan(planId: string) {
@@ -1964,6 +1964,17 @@ function UserAppLayout({
       setPlansError(null)
       setPlansLoading(false)
       return
+    }
+    if (followingSubId) {
+      const row = followingPlans.find((f) => f.subscriptionDocumentId === followingSubId) ?? null
+      if (row && followingSubscriptionRowUnavailable(row)) {
+        setPlannedWorkouts([])
+        setPlannedWorkoutsSecondary([])
+        setOptimisticPlannedWorkouts(null)
+        setPlansError(null)
+        setPlansLoading(false)
+        return
+      }
     }
     setPlansLoading(true)
     setPlansError(null)
@@ -2044,6 +2055,7 @@ function UserAppLayout({
     weekEndSecondary,
     mainNav,
     planningTab,
+    followingPlans,
   ])
 
   function updatePlannedWorkoutMetadataInPlace(
@@ -2236,6 +2248,25 @@ function UserAppLayout({
         if (!cancelled) setPlansLoading(false)
         return
       }
+      if (
+        mainNav === 'planning' &&
+        planningTab === 'plan-ahead' &&
+        selectedFollowingSubscriptionId
+      ) {
+        const followingRow =
+          followingPlans.find((f) => f.subscriptionDocumentId === selectedFollowingSubscriptionId) ??
+          null
+        if (followingRow && followingSubscriptionRowUnavailable(followingRow)) {
+          if (!cancelled) {
+            setPlannedWorkouts([])
+            setPlannedWorkoutsSecondary([])
+            setOptimisticPlannedWorkouts(null)
+            setPlansError(null)
+            setPlansLoading(false)
+          }
+          return
+        }
+      }
       setPlansLoading(true)
       setPlansError(null)
       try {
@@ -2348,6 +2379,7 @@ function UserAppLayout({
     weekEndSecondary,
     mainNav,
     planningTab,
+    followingPlans,
   ])
 
   const refetchFollowingPlansQuiet = useCallback(async () => {
@@ -2402,10 +2434,12 @@ function UserAppLayout({
 
   const planningTodayFollowedEntries = useMemo(
     () =>
-      followingPlans.map((row) => ({
-        subscriptionDocumentId: row.subscriptionDocumentId,
-        plan: followingSubscriptionToWorkoutPlan(row),
-      })),
+      followingPlans
+        .filter((row) => !followingSubscriptionRowUnavailable(row))
+        .map((row) => ({
+          subscriptionDocumentId: row.subscriptionDocumentId,
+          plan: followingSubscriptionToWorkoutPlan(row),
+        })),
     [followingPlans]
   )
 
@@ -7227,6 +7261,11 @@ function followedPlanIsGroupTraining(row: FollowingPlanRow): boolean {
   return row.remotePlanTrainingIntent === 1
 }
 
+/** Left list + Plan Ahead: treat like dead bookmarks when the coach plan is gone or the share mirror is missing. */
+function followingSubscriptionRowUnavailable(row: FollowingPlanRow): boolean {
+  return Boolean(row.remotePlanUnavailable || row.sharedPlanMirrorMissing)
+}
+
 /** Synthetic plan row for Plans / Plan Ahead when viewing a followed (remote) plan. */
 function followingSubscriptionToWorkoutPlan(row: FollowingPlanRow): WorkoutPlan {
   const desc = row.remotePlanDescription?.trim() || null
@@ -7240,7 +7279,7 @@ function followingSubscriptionToWorkoutPlan(row: FollowingPlanRow): WorkoutPlan 
     workoutPlanDescription: desc,
     isPersonal,
     trainingIntent,
-    ordinal: row.ordinal,
+    ordinal: 0,
     userId: row.ownerUserId,
     handle: row.remotePlanHandle,
   }
@@ -7286,7 +7325,10 @@ function orderFollowingRows(
     return [...rows].sort((a, b) => {
       const tier = groupRank(a) - groupRank(b)
       if (tier !== 0) return tier
-      return a.ordinal - b.ordinal || a.subscriptionDocumentId.localeCompare(b.subscriptionDocumentId)
+      const ta = a.updatedAt ? Date.parse(a.updatedAt) : 0
+      const tb = b.updatedAt ? Date.parse(b.updatedAt) : 0
+      if (tb !== ta) return tb - ta
+      return a.subscriptionDocumentId.localeCompare(b.subscriptionDocumentId)
     })
   }
   const orderMap = new Map(optimisticIds.map((id, i) => [id, i]))
@@ -8749,11 +8791,8 @@ function PlansSection({
     setBookmarkCollectionWorkouts([])
     ;(async () => {
       try {
-        const qs = new URLSearchParams()
-        if (row.mirrorGroupId?.trim()) qs.set('groupId', row.mirrorGroupId.trim())
-        const q = qs.toString()
         const res = await authedFetch(
-          `/api/app/shared-content/${encodeURIComponent(row.ownerUserId)}/collection/${encodeURIComponent(row.remoteCollectionId)}${q ? `?${q}` : ''}`,
+          `/api/app/shared-content/${encodeURIComponent(row.ownerUserId)}/collection/${encodeURIComponent(row.remoteCollectionId)}`,
         )
         const json = (await res.json().catch(() => ({}))) as {
           error?: string
@@ -9640,7 +9679,7 @@ function PlansSection({
                 {orderedFollowingPlans.map((row, index) => {
                   const fp = followingSubscriptionToWorkoutPlan(row)
                   const isSelected = selectedFollowingSubscriptionId === row.subscriptionDocumentId
-                  const isDead = row.remotePlanUnavailable === true
+                  const isDead = followingSubscriptionRowUnavailable(row)
                   return (
                     <Fragment key={row.subscriptionDocumentId}>
                       {subscriptionDropBeforeIndex === index && (
@@ -9837,26 +9876,6 @@ function PlansSection({
               {plansError ? (
                 <div className="shrink-0 bg-red-50 px-4 py-2 text-xs text-red-700">{plansError}</div>
               ) : null}
-              {selectedFollowingRow?.remotePlanUnavailable ? (
-                <div className="shrink-0 border-b border-amber-100 bg-amber-50/90 px-4 py-2 text-xs text-amber-950">
-                  <p className="font-semibold">Followed plan unavailable</p>
-                  <p className="mt-1 text-amber-900/90">
-                    This plan was removed or is no longer on the coach&apos;s account. The schedule may be empty.
-                  </p>
-                  <button
-                    type="button"
-                    className="mt-2 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={followingRemoveBusyId === selectedFollowingRow.subscriptionDocumentId}
-                    onClick={() =>
-                      void removeFollowingSubscriptionWithConfirm(
-                        selectedFollowingRow.subscriptionDocumentId,
-                      )
-                    }
-                  >
-                    Remove from Following…
-                  </button>
-                </div>
-              ) : null}
               <div className="flex shrink-0 items-center justify-end border-b border-gymnext-muted/30 bg-gymnext-background px-3 py-2">
                 <div
                   className="inline-flex max-w-full rounded-lg border border-gymnext-muted/50 bg-white p-0.5"
@@ -9961,7 +9980,9 @@ function PlansSection({
                             orderedFollowingPlans.map((row) => {
                               const fp = followingSubscriptionToWorkoutPlan(row)
                               const label = (fp.workoutPlanName || row.remotePlanName || 'Subscribed plan').trim()
-                              const labelFinal = row.remotePlanUnavailable ? `${label} (unavailable)` : label
+                              const labelFinal = followingSubscriptionRowUnavailable(row)
+                                ? `${label} (unavailable)`
+                                : label
                               return (
                                 <option
                                   key={`following-${row.subscriptionDocumentId}`}
@@ -9977,6 +9998,50 @@ function PlansSection({
                     {!col.headerPlan ? (
                       <div className="flex flex-1 flex-col items-center justify-center px-4 py-10 text-center text-sm text-gray-500">
                         Choose a plan to edit its schedule
+                      </div>
+                    ) : col.subscriptionScheduleRow &&
+                      followingSubscriptionRowUnavailable(col.subscriptionScheduleRow) ? (
+                      <div className="flex min-h-[14rem] flex-1 flex-col justify-center px-4 py-6">
+                        {(() => {
+                          const sr = col.subscriptionScheduleRow!
+                          return sr.remotePlanUnavailable ? (
+                          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-950">
+                            <p className="font-semibold">Followed plan unavailable</p>
+                            <p className="mt-1 text-amber-900/90">
+                              This plan was removed or is no longer on the coach&apos;s account. The schedule may be
+                              empty.
+                            </p>
+                            <button
+                              type="button"
+                              className="mt-3 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={followingRemoveBusyId === sr.subscriptionDocumentId}
+                              onClick={() =>
+                                void removeFollowingSubscriptionWithConfirm(sr.subscriptionDocumentId)
+                              }
+                            >
+                              Unfollow
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="rounded-md border border-amber-100 bg-amber-50/90 px-3 py-3 text-xs text-amber-950">
+                            <div className="text-sm font-semibold text-amber-950">Link unavailable</div>
+                            <div className="mt-1 text-amber-900/90">Forbidden</div>
+                            <div className="mt-2 text-amber-900/85">
+                              The shared plan may have been removed or is no longer shared with you.
+                            </div>
+                            <button
+                              type="button"
+                              className="mt-3 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={followingRemoveBusyId === sr.subscriptionDocumentId}
+                              onClick={() =>
+                                void removeFollowingSubscriptionWithConfirm(sr.subscriptionDocumentId)
+                              }
+                            >
+                              Unfollow
+                            </button>
+                          </div>
+                        )
+                        })()}
                       </div>
                     ) : (
                       <>
@@ -10874,6 +10939,29 @@ function PlansSection({
                   </div>
                 ) : null}
               </div>
+              {selectedFollowingSubscriptionId &&
+              selectedFollowingRow?.sharedPlanMirrorMissing &&
+              !selectedFollowingRow.remotePlanUnavailable ? (
+                <div className="shrink-0 border-b border-amber-100 bg-amber-50/90 px-4 py-3 text-xs text-amber-950">
+                  <div className="text-sm font-semibold text-amber-950">Link unavailable</div>
+                  <div className="mt-1 text-amber-900/90">Forbidden</div>
+                  <div className="mt-2 text-amber-900/85">
+                    The shared plan may have been removed or is no longer shared with you.
+                  </div>
+                  <button
+                    type="button"
+                    className="mt-2 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={followingRemoveBusyId === selectedFollowingRow.subscriptionDocumentId}
+                    onClick={() =>
+                      void removeFollowingSubscriptionWithConfirm(
+                        selectedFollowingRow.subscriptionDocumentId,
+                      )
+                    }
+                  >
+                    Unfollow
+                  </button>
+                </div>
+              ) : null}
               {!selectedFollowingSubscriptionId && selectedPlan ? (
                 <div className="shrink-0 border-b border-gray-100 px-4 py-3">
                   <div className="flex items-center justify-between gap-4 rounded-lg border border-gray-100 bg-gray-50/80 px-3 py-3">
@@ -10941,10 +11029,13 @@ function PlansSection({
                               )
                             }
                           >
-                            Remove from Following…
+                            Unfollow
                           </button>
                         </div>
                       ) : null}
+                      {(!selectedFollowingRow.sharedPlanMirrorMissing ||
+                        selectedFollowingRow.remotePlanUnavailable) && (
+                        <>
                       <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                         Plan owner
                       </h4>
@@ -11053,7 +11144,7 @@ function PlansSection({
                             </p>
                           ) : null}
                         </div>
-                      )}
+                        )}
                       </div>
                       <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
                         <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
@@ -11063,8 +11154,8 @@ function PlansSection({
                           <p className="text-sm text-gray-800">
                             <span className="font-semibold text-gray-900">Visibility.</span>{' '}
                             {!selectedFollowingRow.shareHideFutureWorkouts
-                              ? 'You can view future scheduled workouts.'
-                              : 'Future scheduled workouts are hidden (your calendar stops at today).'}
+                              ? 'You can view all scheduled workouts.'
+                              : 'Future workouts are hidden—your calendar currently shows up to today only.'}
                           </p>
                         ) : (
                           <p className="text-sm text-gray-800">
@@ -11075,6 +11166,8 @@ function PlansSection({
                           </p>
                         )}
                       </div>
+                        </>
+                      )}
                     </div>
                   ) : (
                     <p className="text-sm text-gray-600">Subscribed plan details are unavailable.</p>
@@ -11720,11 +11813,8 @@ function PlansSection({
                                   setCreateError(null)
                                   try {
                                     const br = selectedBookmarkWorkoutRow
-                                    const qs = new URLSearchParams()
-                                    if (br.mirrorGroupId?.trim()) qs.set('groupId', br.mirrorGroupId.trim())
-                                    const q = qs.toString()
                                     const res = await authedFetch(
-                                      `/api/app/shared-content/${encodeURIComponent(br.ownerUserId)}/workout/${encodeURIComponent(br.remoteWorkoutId)}${q ? `?${q}` : ''}`,
+                                      `/api/app/shared-content/${encodeURIComponent(br.ownerUserId)}/workout/${encodeURIComponent(br.remoteWorkoutId)}`,
                                     )
                                     const json = (await res.json().catch(() => ({}))) as {
                                       error?: string

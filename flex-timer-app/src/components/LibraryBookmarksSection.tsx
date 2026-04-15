@@ -165,9 +165,9 @@ function BookmarkDetailOverflowMenu({
 
 function stableKeyFor(row: SelectedTarget): string {
   if (row.kind === 'collection') {
-    return `collection\u001e${row.row.ownerUserId}\u001e${row.row.remoteCollectionId}\u001e${row.row.mirrorGroupId ?? ''}`
+    return `collection\u001e${row.row.ownerUserId}\u001e${row.row.remoteCollectionId}`
   }
-  return `workout\u001e${row.row.ownerUserId}\u001e${row.row.remoteWorkoutId}\u001e${row.row.mirrorGroupId ?? ''}`
+  return `workout\u001e${row.row.ownerUserId}\u001e${row.row.remoteWorkoutId}`
 }
 
 function titleFromWorkoutBookmark(row: SharedWorkoutBookmarkRow): string {
@@ -452,11 +452,8 @@ export function LibraryBookmarksSection({ user }: { user: User }) {
           chunk.map(async (row) => {
             const key = stableKeyFor({ kind: 'workout', row })
             try {
-              const qs = new URLSearchParams()
-              if (row.mirrorGroupId) qs.set('groupId', row.mirrorGroupId)
-              const q = qs.toString()
               const res = await fetch(
-                `/api/app/shared-content/${encodeURIComponent(row.ownerUserId)}/workout/${encodeURIComponent(row.remoteWorkoutId)}${q ? `?${q}` : ''}`,
+                `/api/app/shared-content/${encodeURIComponent(row.ownerUserId)}/workout/${encodeURIComponent(row.remoteWorkoutId)}`,
                 { method: 'GET', headers: { authorization: `Bearer ${token}` } },
               )
               if (!res.ok) {
@@ -593,14 +590,10 @@ export function LibraryBookmarksSection({ user }: { user: User }) {
       try {
         const token = await user.getIdToken()
         const ownerUserId = selected.row.ownerUserId
-        const groupId = selected.row.mirrorGroupId
         const resourceId =
           selected.kind === 'collection' ? selected.row.remoteCollectionId : selected.row.remoteWorkoutId
-        const qs = new URLSearchParams()
-        if (groupId) qs.set('groupId', groupId)
-        const q = qs.toString()
         const res = await fetch(
-          `/api/app/shared-content/${ownerUserId}/${selected.kind}/${resourceId}${q ? `?${q}` : ''}`,
+          `/api/app/shared-content/${ownerUserId}/${selected.kind}/${resourceId}`,
           {
             method: 'GET',
             headers: { authorization: `Bearer ${token}` },
@@ -662,8 +655,7 @@ export function LibraryBookmarksSection({ user }: { user: User }) {
                     const isSelected =
                       selected?.kind === 'collection' &&
                       selected.row.ownerUserId === row.ownerUserId &&
-                      selected.row.remoteCollectionId === row.remoteCollectionId &&
-                      (selected.row.mirrorGroupId ?? '') === (row.mirrorGroupId ?? '')
+                      selected.row.remoteCollectionId === row.remoteCollectionId
                     const isDead = bookmarkRowDead(key, 'collection', row)
                     return (
                       <li key={key} className={isDead ? 'bg-gray-50/90' : ''}>
@@ -744,8 +736,7 @@ export function LibraryBookmarksSection({ user }: { user: User }) {
                     const isSelected =
                       selected?.kind === 'workout' &&
                       selected.row.ownerUserId === row.ownerUserId &&
-                      selected.row.remoteWorkoutId === row.remoteWorkoutId &&
-                      (selected.row.mirrorGroupId ?? '') === (row.mirrorGroupId ?? '')
+                      selected.row.remoteWorkoutId === row.remoteWorkoutId
                     const isDead = bookmarkRowDead(key, 'workout', row)
                     const barColor = isDead
                       ? '#9ca3af'
@@ -866,9 +857,16 @@ export function LibraryBookmarksSection({ user }: { user: User }) {
                     <div className="text-sm font-semibold text-amber-950">Link unavailable</div>
                     <div className="mt-1 text-amber-900/90">{detailError}</div>
                     <div className="mt-2 text-amber-900/85">
-                      The shared workout or collection may have been removed or is no longer shared with you. Use the
-                      actions menu above to remove this bookmark, or keep it if access might return.
+                      The shared workout or collection may have been removed or is no longer shared with you.
                     </div>
+                    <button
+                      type="button"
+                      className="mt-2 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={removingKey === stableKeyFor(selected)}
+                      onClick={() => void removeBookmarkRow(selected)}
+                    >
+                      Remove bookmark
+                    </button>
                   </div>
                 )}
 

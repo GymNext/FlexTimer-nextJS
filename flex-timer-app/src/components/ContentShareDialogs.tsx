@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Loader2 } from 'lucide-react'
 import type { User } from 'firebase/auth'
 import type { HubTreeNode } from '@/types/hub-tree'
 import { mergeOwnedAndMemberShareHubTrees, type MembershipRowForSharePicker } from '@/lib/share-with-hub-picker'
@@ -61,6 +62,34 @@ function sharesBasePath(kind: LibraryShareKind, resourceId: string): string {
   return kind === 'workout' ? `/api/app/workouts/${id}/shares` : `/api/app/collections/${id}/shares`
 }
 
+/** Stable JSON for comparing server share payloads (avoid pointless table updates). */
+function stableSharesSnapshot(p: SharesPayload): string {
+  const groups = [...p.groupShares]
+    .map((r) => ({
+      groupId: r.groupId,
+      groupName: r.groupName,
+      sharedAt: r.sharedAt,
+      groupFeedItemId: r.groupFeedItemId,
+    }))
+    .sort((a, b) => a.groupId.localeCompare(b.groupId))
+  const users = [...p.userShares]
+    .map((r) => ({
+      peerUserId: r.peerUserId,
+      displayName: r.displayName,
+      handle: r.handle,
+      sharedAt: r.sharedAt,
+      recipientFeedItemId: r.recipientFeedItemId,
+      sharerFeedItemId: r.sharerFeedItemId,
+    }))
+    .sort((a, b) => a.peerUserId.localeCompare(b.peerUserId))
+  return JSON.stringify({
+    destinationCount: p.destinationCount,
+    maxDestinations: p.maxDestinations,
+    groups,
+    users,
+  })
+}
+
 export function ContentShareDialogs({
   user,
   open,
@@ -108,54 +137,74 @@ export function ContentShareDialogs({
     [user]
   )
 
+  const fetchSharesPayload = useCallback(async (): Promise<SharesPayload> => {
+    const base = sharesBasePath(kind, resourceId)
+    const shRes = await authedFetch(base)
+    if (!shRes.ok) {
+      const j = await shRes.json().catch(() => ({}))
+      throw new Error(j.error || `Failed to load shares (${shRes.status})`)
+    }
+    const sh = (await shRes.json()) as SharesPayload
+    return {
+      groupShares: Array.isArray(sh.groupShares) ? sh.groupShares : [],
+      userShares: Array.isArray(sh.userShares) ? sh.userShares : [],
+      destinationCount: typeof sh.destinationCount === 'number' ? sh.destinationCount : 0,
+      maxDestinations: typeof sh.maxDestinations === 'number' ? sh.maxDestinations : 10,
+    }
+  }, [authedFetch, kind, resourceId])
+
+  const refreshHubsAndConnections = useCallback(async () => {
+    const [hubRes, memRes, connRes] = await Promise.all([
+      authedFetch('/api/app/owned-groups'),
+      authedFetch('/api/app/memberships'),
+      authedFetch('/api/app/connections'),
+    ])
+    const owned = hubRes.ok ? (((await hubRes.json()) as { hubs?: HubTreeNode[] }).hubs ?? []) : []
+    const ownedArr = Array.isArray(owned) ? owned : []
+    let merged = ownedArr
+    if (memRes.ok) {
+      const mj = (await memRes.json()) as { memberships?: MembershipRowForSharePicker[] }
+      const rows = Array.isArray(mj.memberships) ? mj.memberships : []
+      merged = mergeOwnedAndMemberShareHubTrees(ownedArr, rows)
+    }
+    setHubs(merged)
+
+    if (connRes.ok) {
+      const cj = (await connRes.json()) as { connections?: ConnectionRow[] }
+      setConnections(Array.isArray(cj.connections) ? cj.connections : [])
+    } else {
+      setConnections([])
+    }
+  }, [authedFetch])
+
+  /** GET shares only; no loading spinner. Updates `data` only when the payload differs from the UI. */
+  const silentReconcileShares = useCallback(async (): Promise<boolean> => {
+    try {
+      const next = await fetchSharesPayload()
+      setData((prev) => {
+        if (prev && stableSharesSnapshot(prev) === stableSharesSnapshot(next)) return prev
+        return next
+      })
+      return true
+    } catch {
+      return false
+    }
+  }, [fetchSharesPayload])
+
   const reloadShares = useCallback(async () => {
     setLoading(true)
     setError(null)
-    const base = sharesBasePath(kind, resourceId)
     try {
-      const [shRes, hubRes, memRes, connRes] = await Promise.all([
-        authedFetch(base),
-        authedFetch('/api/app/owned-groups'),
-        authedFetch('/api/app/memberships'),
-        authedFetch('/api/app/connections'),
-      ])
-      if (!shRes.ok) {
-        const j = await shRes.json().catch(() => ({}))
-        throw new Error(j.error || `Failed to load shares (${shRes.status})`)
-      }
-      const sh = (await shRes.json()) as SharesPayload
-      setData({
-        groupShares: Array.isArray(sh.groupShares) ? sh.groupShares : [],
-        userShares: Array.isArray(sh.userShares) ? sh.userShares : [],
-        destinationCount: typeof sh.destinationCount === 'number' ? sh.destinationCount : 0,
-        maxDestinations: typeof sh.maxDestinations === 'number' ? sh.maxDestinations : 10,
-      })
-
-      const owned = hubRes.ok
-        ? (((await hubRes.json()) as { hubs?: HubTreeNode[] }).hubs ?? [])
-        : []
-      const ownedArr = Array.isArray(owned) ? owned : []
-      let merged = ownedArr
-      if (memRes.ok) {
-        const mj = (await memRes.json()) as { memberships?: MembershipRowForSharePicker[] }
-        const rows = Array.isArray(mj.memberships) ? mj.memberships : []
-        merged = mergeOwnedAndMemberShareHubTrees(ownedArr, rows)
-      }
-      setHubs(merged)
-
-      if (connRes.ok) {
-        const cj = (await connRes.json()) as { connections?: ConnectionRow[] }
-        setConnections(Array.isArray(cj.connections) ? cj.connections : [])
-      } else {
-        setConnections([])
-      }
+      const sh = await fetchSharesPayload()
+      setData(sh)
+      await refreshHubsAndConnections()
     } catch (e) {
       setData(null)
       setError(e instanceof Error ? e.message : 'Failed to load')
     } finally {
       setLoading(false)
     }
-  }, [authedFetch, kind, resourceId])
+  }, [fetchSharesPayload, refreshHubsAndConnections])
 
   useEffect(() => {
     if (!open) return
@@ -266,7 +315,8 @@ export function ContentShareDialogs({
         }
       }
       setPhase('manage')
-      await reloadShares()
+      const reconciled = await silentReconcileShares()
+      if (!reconciled) await reloadShares()
     } catch (e) {
       setShareError(e instanceof Error ? e.message : 'Share failed')
     } finally {
@@ -287,12 +337,13 @@ export function ContentShareDialogs({
 
   async function confirmStopShare() {
     if (!stopShareConfirm) return
+    const confirm = stopShareConfirm
     const base = sharesBasePath(kind, resourceId)
     setStopShareBusy(true)
     setStopShareError(null)
     try {
-      if (stopShareConfirm.type === 'group') {
-        const row = stopShareConfirm.row
+      if (confirm.type === 'group') {
+        const row = confirm.row
         const qs = new URLSearchParams({
           target: 'group',
           groupId: row.groupId,
@@ -304,7 +355,7 @@ export function ContentShareDialogs({
           throw new Error(j.error || `Stop sharing failed (${res.status})`)
         }
       } else {
-        const row = stopShareConfirm.row
+        const row = confirm.row
         const qs = new URLSearchParams({
           target: 'user',
           peerUserId: row.peerUserId,
@@ -317,7 +368,25 @@ export function ContentShareDialogs({
         }
       }
       setStopShareConfirm(null)
-      await reloadShares()
+      setData((prev) => {
+        if (!prev) return prev
+        if (confirm.type === 'group') {
+          const gid = confirm.row.groupId
+          return {
+            ...prev,
+            groupShares: prev.groupShares.filter((r) => r.groupId !== gid),
+            destinationCount: Math.max(0, prev.destinationCount - 1),
+          }
+        }
+        const pid = confirm.row.peerUserId
+        return {
+          ...prev,
+          userShares: prev.userShares.filter((r) => r.peerUserId !== pid),
+          destinationCount: Math.max(0, prev.destinationCount - 1),
+        }
+      })
+      const reconciled = await silentReconcileShares()
+      if (!reconciled) await reloadShares()
     } catch (e) {
       setStopShareError(e instanceof Error ? e.message : 'Failed to stop sharing')
     } finally {
@@ -713,10 +782,18 @@ export function ContentShareDialogs({
                 }
                 title={atCap ? `You already have ${data?.maxDestinations ?? 10} share destinations.` : undefined}
                 onClick={() => void submitShare()}
-                className="rounded px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+                aria-busy={shareBusy}
+                className="inline-flex min-w-[6.5rem] items-center justify-center gap-2 rounded px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
                 style={{ backgroundColor: '#6B21A8' }}
               >
-                {shareBusy ? 'Sharing…' : 'Share'}
+                {shareBusy ? (
+                  <>
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                    Sharing…
+                  </>
+                ) : (
+                  'Share'
+                )}
               </button>
             </div>
           </div>

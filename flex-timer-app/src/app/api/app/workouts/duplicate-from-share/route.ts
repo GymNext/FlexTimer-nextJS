@@ -8,7 +8,7 @@ import {
   getWorkoutsByIds,
 } from '@/lib/firestore'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
-import { viewerCanAccessSharedLibraryItem } from '@/lib/shared-resource-access'
+import { viewerCanAccessSharedLibraryItemViaAnyMirror } from '@/lib/shared-resource-access'
 
 /**
  * POST /api/app/workouts/duplicate-from-share
@@ -48,12 +48,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'collectionIds required (non-empty array)' }, { status: 400 })
   }
 
-  const allowed = await viewerCanAccessSharedLibraryItem(
+  const allowed = await viewerCanAccessSharedLibraryItemViaAnyMirror(
     uid,
     ownerUserId,
     'workout',
     sourceWorkoutId,
-    groupId
+    groupId,
   )
   if (!allowed) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })

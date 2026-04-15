@@ -12,6 +12,7 @@ import {
   isValidIanaTimeZone,
 } from '@/lib/planned-workout-day-timestamp'
 import { resolvePlanFollowAccessForSubscriber } from '@/lib/plan-share'
+import { listViewerHubGroupIdsForSharedMirrorReads } from '@/lib/shared-resource-access'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
 
 type RouteParams = Promise<{ subscriptionDocumentId: string }>
@@ -55,14 +56,12 @@ export async function GET(
       return NextResponse.json({ plannedWorkouts: [] })
     }
 
+    const hubGroupIds = await listViewerHubGroupIdsForSharedMirrorReads(uid)
     const access = await resolvePlanFollowAccessForSubscriber(
       uid,
       subscription.ownerUserId,
       subscription.remotePlanId,
-      {
-        followSource: subscription.followSource ?? null,
-        followContextGroupId: subscription.followContextGroupId ?? null,
-      }
+      { hubGroupIds },
     )
 
     const planDayTzRaw = searchParams.get('planDayTimeZone')
@@ -128,14 +127,12 @@ export async function POST(
       return NextResponse.json({ error: 'Plan subscription not found' }, { status: 404 })
     }
 
+    const hubGroupIds = await listViewerHubGroupIdsForSharedMirrorReads(uid)
     const access = await resolvePlanFollowAccessForSubscriber(
       uid,
       subscription.ownerUserId,
       subscription.remotePlanId,
-      {
-        followSource: subscription.followSource ?? null,
-        followContextGroupId: subscription.followContextGroupId ?? null,
-      }
+      { hubGroupIds },
     )
     if (!access.shareAllowEditing) {
       return NextResponse.json({ error: 'You do not have permission to modify this plan' }, { status: 403 })

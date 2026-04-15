@@ -11,6 +11,7 @@ import {
 } from '@/lib/firestore'
 import { isValidIanaTimeZone } from '@/lib/planned-workout-day-timestamp'
 import { resolvePlanFollowAccessForSubscriber } from '@/lib/plan-share'
+import { listViewerHubGroupIdsForSharedMirrorReads } from '@/lib/shared-resource-access'
 
 type RouteParams = Promise<{ subscriptionDocumentId: string; plannedWorkoutId: string }>
 
@@ -25,14 +26,12 @@ async function requireActiveSubscriptionEditor(
   if (!subscription) {
     return { ok: false, status: 404, error: 'Plan subscription not found' }
   }
+  const hubGroupIds = await listViewerHubGroupIdsForSharedMirrorReads(subscriberUid)
   const access = await resolvePlanFollowAccessForSubscriber(
     subscriberUid,
     subscription.ownerUserId,
     subscription.remotePlanId,
-    {
-      followSource: subscription.followSource ?? null,
-      followContextGroupId: subscription.followContextGroupId ?? null,
-    }
+    { hubGroupIds },
   )
   if (!access.shareAllowEditing) {
     return { ok: false, status: 403, error: 'You do not have permission to modify this plan' }

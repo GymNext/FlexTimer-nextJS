@@ -10,7 +10,7 @@ import {
   mapWorkoutFromFirestore,
 } from '@/lib/firestore'
 import { getSharedMirrorPayloadForViewer } from '@/lib/shared-content-mirror'
-import { viewerCanAccessSharedLibraryItem } from '@/lib/shared-resource-access'
+import { resolveSharedMirrorReadContextForViewer } from '@/lib/shared-resource-access'
 import { bareWorkoutIdForGroupSharedMirror } from '@/lib/user-connection-mirrors'
 import type { Workout } from '@/types/user'
 
@@ -30,6 +30,7 @@ function parseKind(raw: string): Kind | null {
  * Read-only fetch via share mirrors only: `users/{viewer}/shared*` (connection shares) or
  * `groups/{groupId}/shared*` (hub shares). Does not read another user's library documents directly.
  * When viewer is the owner, reads from their own library as usual.
+ * Optional `groupId` is a hint only; access is granted when any eligible mirror exists (user or any owned / active-member hub).
  */
 export async function GET(
   request: NextRequest,
@@ -54,10 +55,11 @@ export async function GET(
     return NextResponse.json({ error: 'Invalid path' }, { status: 400 })
   }
 
-  const allowed = await viewerCanAccessSharedLibraryItem(uid, owner, kind, rid, groupId)
-  if (!allowed) {
+  const readCtx = await resolveSharedMirrorReadContextForViewer(uid, owner, kind, rid, groupId)
+  if (uid !== owner && !readCtx) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
+  const mirrorGroupId = uid === owner ? null : readCtx!.readViaGroupId
 
   try {
     if (uid === owner) {
@@ -104,7 +106,7 @@ export async function GET(
         ownerUid: owner,
         kind: 'workout',
         resourceId: rid,
-        groupId,
+        groupId: mirrorGroupId,
       })
       if (!payload) {
         return NextResponse.json({ error: 'Not found' }, { status: 404 })
@@ -126,7 +128,7 @@ export async function GET(
         ownerUid: owner,
         kind: 'plan',
         resourceId: rid,
-        groupId,
+        groupId: mirrorGroupId,
       })
       if (!payload) {
         return NextResponse.json({ error: 'Not found' }, { status: 404 })
@@ -143,7 +145,7 @@ export async function GET(
       ownerUid: owner,
       kind: 'collection',
       resourceId: rid,
-      groupId,
+      groupId: mirrorGroupId,
     })
     if (!colPayload) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 })
@@ -163,7 +165,7 @@ export async function GET(
         ownerUid: owner,
         kind: 'workout',
         resourceId: entry,
-        groupId,
+        groupId: mirrorGroupId,
       })
       if (!wp) continue
       const wid =

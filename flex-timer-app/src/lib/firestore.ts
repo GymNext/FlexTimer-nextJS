@@ -50,17 +50,11 @@ export interface WorkoutPlanSubscriptionRecord {
   remotePlanHandle: string | null
   /** From planDescriptionSnapshot or other denormalized copy when live plan is unavailable. */
   remotePlanDescription: string | null
-  ordinal: number
   subscriberFullName: string | null
   /** Denormalized subscriber display handle (Firestore: subscriberHandle, legacy subscriberPublicHandle). */
   subscriberHandle: string | null
-  /** e.g. `groupFeed` when following from hub activity (iOS parity). */
-  followSource?: string | null
-  /** Hub id the subscriber followed from, when `followSource` is group feed. */
-  followContextGroupId?: string | null
-  /** Denormalized from share at follow time or owner connection share doc. */
-  shareAllowEditing?: boolean
-  shareHideFutureWorkouts?: boolean
+  /** Firestore `updatedAt` (ISO); used for list ordering — not stored as a separate ordinal on mobile. */
+  updatedAt: string | null
 }
 
 function mapSegmentFromEntry(seg: Record<string, unknown>, index: number, fallbackWorkoutId: string): WorkoutSegment {
@@ -142,15 +136,11 @@ function mapWorkoutPlanSubscriptionDoc(
   const remotePlanId = typeof d.remotePlanId === 'string' ? d.remotePlanId : ''
   const subscriberUserId = typeof d.subscriberUserId === 'string' ? d.subscriberUserId : ''
   if (!ownerUserId || !remotePlanId || !subscriberUserId) return null
-  const followSource =
-    typeof d.followSource === 'string' && d.followSource.trim() !== '' ? d.followSource.trim() : null
-  const followContextGroupId =
-    typeof d.followContextGroupId === 'string' && d.followContextGroupId.trim() !== ''
-      ? d.followContextGroupId.trim()
+  const updatedAtRaw = d.updatedAt
+  const updatedAt =
+    updatedAtRaw != null && String(parseTimestamp(updatedAtRaw)).trim() !== ''
+      ? parseTimestamp(updatedAtRaw)
       : null
-  const shareAllowEditing = typeof d.shareAllowEditing === 'boolean' ? d.shareAllowEditing : undefined
-  const shareHideFutureWorkouts =
-    typeof d.shareHideFutureWorkouts === 'boolean' ? d.shareHideFutureWorkouts : undefined
 
   return {
     subscriptionDocumentId: doc.id,
@@ -171,7 +161,6 @@ function mapWorkoutPlanSubscriptionDoc(
         : typeof d.remotePlanDescription === 'string' && d.remotePlanDescription.trim() !== ''
           ? d.remotePlanDescription.trim()
           : null,
-    ordinal: typeof d.ordinal === 'number' ? d.ordinal : 0,
     subscriberFullName: typeof d.subscriberFullName === 'string' ? d.subscriberFullName : null,
     subscriberHandle:
       typeof d.subscriberHandle === 'string'
@@ -179,10 +168,7 @@ function mapWorkoutPlanSubscriptionDoc(
         : typeof d.subscriberPublicHandle === 'string'
           ? d.subscriberPublicHandle
           : null,
-    followSource,
-    followContextGroupId,
-    shareAllowEditing,
-    shareHideFutureWorkouts,
+    updatedAt,
   }
 }
 
@@ -686,7 +672,12 @@ export async function getActiveWorkoutPlanSubscriptionsForUser(
   const items = snapshot.docs
     .map((doc) => mapWorkoutPlanSubscriptionDoc(doc))
     .filter((item): item is WorkoutPlanSubscriptionRecord => item !== null)
-  items.sort((a, b) => a.ordinal - b.ordinal)
+  items.sort((a, b) => {
+    const ta = a.updatedAt ? Date.parse(a.updatedAt) : 0
+    const tb = b.updatedAt ? Date.parse(b.updatedAt) : 0
+    if (tb !== ta) return tb - ta
+    return a.subscriptionDocumentId.localeCompare(b.subscriptionDocumentId)
+  })
   return items
 }
 
@@ -1597,35 +1588,6 @@ export async function updatePlanOrdinalsForSection(
   const batch = adminDb.batch()
   planIdsInOrder.forEach((planId, index) => {
     batch.update(colRef.doc(planId), { ordinal: index })
-  })
-  await batch.commit()
-}
-
-/**
- * Set ordinals 0..n-1 for active workout plan subscriptions for the subscriber.
- * `subscriptionDocumentIdsInOrder` must list every active subscription doc id exactly once.
- */
-export async function updateWorkoutPlanSubscriptionOrdinals(
-  subscriberUserId: string,
-  subscriptionDocumentIdsInOrder: string[]
-): Promise<void> {
-  if (!adminDb) throw new Error('Firebase Admin not configured')
-  const subs = await getActiveWorkoutPlanSubscriptionsForUser(subscriberUserId)
-  const expected = new Set(subs.map((s) => s.subscriptionDocumentId))
-  const received = new Set(subscriptionDocumentIdsInOrder)
-  if (
-    expected.size !== subscriptionDocumentIdsInOrder.length ||
-    ![...expected].every((id) => received.has(id))
-  ) {
-    throw new Error('subscriptionDocumentIds must list every active subscription exactly once')
-  }
-  const base = adminDb
-    .collection('users')
-    .doc(subscriberUserId)
-    .collection('workoutPlanSubscriptions')
-  const batch = adminDb.batch()
-  subscriptionDocumentIdsInOrder.forEach((id, index) => {
-    batch.update(base.doc(id), { ordinal: index, updatedAt: FieldValue.serverTimestamp() })
   })
   await batch.commit()
 }

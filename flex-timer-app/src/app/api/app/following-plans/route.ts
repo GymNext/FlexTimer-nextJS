@@ -5,9 +5,13 @@ import {
   getActiveWorkoutPlanSubscriptionsForUser,
   getPlanById,
   getUserDocument,
-  updateWorkoutPlanSubscriptionOrdinals,
+  type WorkoutPlanSubscriptionRecord,
 } from '@/lib/firestore'
-import { viewerCanAccessSharedLibraryItem } from '@/lib/shared-resource-access'
+import {
+  listViewerHubGroupIdsForSharedMirrorReads,
+  resolveSharedMirrorReadContextForViewer,
+  viewerCanAccessSharedLibraryItemViaAnyMirror,
+} from '@/lib/shared-resource-access'
 import type { WorkoutPlan } from '@/types/user'
 import { FieldValue } from 'firebase-admin/firestore'
 import { resolvePlanFollowAccessForSubscriber } from '@/lib/plan-share'
@@ -22,6 +26,34 @@ function remotePlanKindFromLivePlan(plan: WorkoutPlan | null | undefined): {
     remotePlanIsPersonal: false,
     remotePlanTrainingIntent: plan.trainingIntent === 1 ? 1 : 0,
   }
+}
+
+/** True when no `sharedPlans` mirror exists for this viewer on any connection or eligible hub path. */
+async function computeSharedPlanMirrorMissing(
+  viewerUid: string,
+  sub: Pick<WorkoutPlanSubscriptionRecord, 'ownerUserId' | 'remotePlanId'>,
+  hubGroupIds: string[],
+): Promise<boolean> {
+  if (!adminDb) return false
+  const ctx = await resolveSharedMirrorReadContextForViewer(
+    viewerUid,
+    sub.ownerUserId,
+    'plan',
+    sub.remotePlanId,
+    null,
+    { hubGroupIds },
+  )
+  return ctx === null
+}
+
+const stripLegacyPlanSubscriptionFields = {
+  followSource: FieldValue.delete(),
+  followContextGroupId: FieldValue.delete(),
+  ordinal: FieldValue.delete(),
+  shareAllowEditing: FieldValue.delete(),
+  shareHideFutureWorkouts: FieldValue.delete(),
+  remotePlanName: FieldValue.delete(),
+  remotePlanDescription: FieldValue.delete(),
 }
 
 async function persistPlanFollow(
@@ -59,22 +91,20 @@ async function persistPlanFollow(
       ownerUserId,
       remotePlanId,
       status,
-      remotePlanName: plan.workoutPlanName || null,
+      planNameSnapshot: plan.workoutPlanName || null,
       remotePlanHandle: plan.handle ?? remotePlanHandle ?? null,
       ...(desc ? { planDescriptionSnapshot: desc } : { planDescriptionSnapshot: FieldValue.delete() }),
-      ordinal: Date.now(),
       subscriberFullName,
       subscriberHandle,
       subscriberPublicHandle: FieldValue.delete(),
-      shareAllowEditing: false,
-      shareHideFutureWorkouts: false,
       updatedAt: FieldValue.serverTimestamp(),
+      ...stripLegacyPlanSubscriptionFields,
     },
     { merge: true }
   )
 }
 
-/** Matches iOS `followWorkoutPlanFromGroupShare`: always active, `followSource: groupFeed`, optional snapshots. */
+/** Active follow after verifying mirror access; mobile-aligned fields only (no hub routing on the subscription). */
 async function persistGroupFeedPlanFollow(
   uid: string,
   ownerUserId: string,
@@ -83,14 +113,10 @@ async function persistGroupFeedPlanFollow(
     displayName: string | null
     description: string | null
     remotePlanHandle: string | null
-    followContextGroupId?: string | null
-  }
+  },
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const subscriptionDocumentId = `${ownerUserId}_${remotePlanId}`
-  const owner = ownerUserId.trim()
-  const pid = remotePlanId.trim()
-  const gid = opts.followContextGroupId?.trim() ?? ''
 
   const userDoc = await getUserDocument(uid)
   const firstName = typeof userDoc?.firstName === 'string' ? userDoc.firstName.trim() : ''
@@ -109,48 +135,27 @@ async function persistGroupFeedPlanFollow(
     .collection('workoutPlanSubscriptions')
     .doc(subscriptionDocumentId)
 
-  let shareHideFutureWorkouts = true
-  if (gid) {
-    const itemSnap = await adminDb
-      .collection('users')
-      .doc(owner)
-      .collection('planGroupShares')
-      .doc(pid)
-      .collection('items')
-      .doc(gid)
-      .get()
-    if (itemSnap.exists) {
-      const raw = (itemSnap.data() as Record<string, unknown>)?.hideFutureWorkouts
-      shareHideFutureWorkouts = typeof raw === 'boolean' ? raw : true
-    }
-  }
-
   const data: Record<string, unknown> = {
     subscriberUserId: uid,
     ownerUserId,
     remotePlanId,
     status: 'active',
-    followSource: 'groupFeed',
-    ordinal: Date.now(),
     subscriberFullName,
     subscriberHandle,
     subscriberPublicHandle: FieldValue.delete(),
-    shareAllowEditing: false,
-    shareHideFutureWorkouts,
     updatedAt: FieldValue.serverTimestamp(),
-  }
-  if (gid) {
-    data.followContextGroupId = gid
+    ...stripLegacyPlanSubscriptionFields,
   }
 
   const name = opts.displayName?.trim() || null
   if (name) {
-    data.remotePlanName = name
     data.planNameSnapshot = name
   }
   const desc = opts.description?.trim() || null
   if (desc) {
     data.planDescriptionSnapshot = desc
+  } else {
+    data.planDescriptionSnapshot = FieldValue.delete()
   }
   const handle = opts.remotePlanHandle?.trim() || null
   if (handle) {
@@ -162,7 +167,8 @@ async function persistGroupFeedPlanFollow(
 
 /**
  * PATCH /api/app/following-plans
- * Reorder active subscriptions. Body: { subscriptionDocumentIds: string[] } (every active subscription id, in order).
+ * Validates `subscriptionDocumentIds` lists every active subscription once; returns rows in that order.
+ * Order is not written to Firestore (mobile-aligned subscriptions have no ordinal field).
  */
 export async function PATCH(request: NextRequest) {
   const authResult = await requireUserAuth(request.headers.get('authorization'))
@@ -191,23 +197,33 @@ export async function PATCH(request: NextRequest) {
   const ids = raw.filter((id): id is string => typeof id === 'string' && id.trim() !== '')
 
   try {
-    await updateWorkoutPlanSubscriptionOrdinals(uid, ids)
     const subs = await getActiveWorkoutPlanSubscriptionsForUser(uid)
+    const expected = new Set(subs.map((s) => s.subscriptionDocumentId))
+    const received = new Set(ids)
+    if (expected.size !== ids.length || ![...expected].every((id) => received.has(id))) {
+      return NextResponse.json(
+        { error: 'subscriptionDocumentIds must list every active subscription exactly once' },
+        { status: 400 }
+      )
+    }
+    const hubGroupIds = await listViewerHubGroupIdsForSharedMirrorReads(uid)
+    const ordered = ids.map((id) => subs.find((s) => s.subscriptionDocumentId === id)).filter(Boolean) as typeof subs
     const followingPlans = await Promise.all(
-      subs.map(async (sub) => {
+      ordered.map(async (sub) => {
         const plan = await getPlanById(sub.ownerUserId, sub.remotePlanId)
         const remotePlanUnavailable = !plan || Boolean(plan.deletedAt)
         const live =
           plan && !plan.deletedAt ? (plan.workoutPlanDescription ?? '').trim() || null : null
         const remotePlanDescription = live ?? sub.remotePlanDescription ?? null
         const access = await resolvePlanFollowAccessForSubscriber(uid, sub.ownerUserId, sub.remotePlanId, {
-          followSource: sub.followSource ?? null,
-          followContextGroupId: sub.followContextGroupId ?? null,
+          hubGroupIds,
         })
+        const sharedPlanMirrorMissing = await computeSharedPlanMirrorMissing(uid, sub, hubGroupIds)
         return {
           ...sub,
           remotePlanDescription,
           remotePlanUnavailable,
+          sharedPlanMirrorMissing,
           ...remotePlanKindFromLivePlan(plan),
           ...access,
         }
@@ -227,13 +243,14 @@ export async function GET(request: NextRequest) {
   if ('status' in authResult) {
     return NextResponse.json({ error: authResult.error }, { status: authResult.status })
   }
-  if (!adminAuth) {
+  if (!adminAuth || !adminDb) {
     return NextResponse.json({ error: 'Firebase Admin not configured' }, { status: 503 })
   }
 
   try {
     const { uid } = authResult
     const subs = await getActiveWorkoutPlanSubscriptionsForUser(uid)
+    const hubGroupIds = await listViewerHubGroupIdsForSharedMirrorReads(uid)
     const followingPlans = await Promise.all(
       subs.map(async (sub) => {
         const plan = await getPlanById(sub.ownerUserId, sub.remotePlanId)
@@ -242,13 +259,14 @@ export async function GET(request: NextRequest) {
           plan && !plan.deletedAt ? (plan.workoutPlanDescription ?? '').trim() || null : null
         const remotePlanDescription = live ?? sub.remotePlanDescription ?? null
         const access = await resolvePlanFollowAccessForSubscriber(uid, sub.ownerUserId, sub.remotePlanId, {
-          followSource: sub.followSource ?? null,
-          followContextGroupId: sub.followContextGroupId ?? null,
+          hubGroupIds,
         })
+        const sharedPlanMirrorMissing = await computeSharedPlanMirrorMissing(uid, sub, hubGroupIds)
         return {
           ...sub,
           remotePlanDescription,
           remotePlanUnavailable,
+          sharedPlanMirrorMissing,
           ...remotePlanKindFromLivePlan(plan),
           ...access,
         }
@@ -302,7 +320,7 @@ export async function POST(request: NextRequest) {
 
   try {
     if (ownerFromBody && remotePlanFromBody) {
-      const allowed = await viewerCanAccessSharedLibraryItem(
+      const allowed = await viewerCanAccessSharedLibraryItemViaAnyMirror(
         uid,
         ownerFromBody,
         'plan',
@@ -329,7 +347,6 @@ export async function POST(request: NextRequest) {
         displayName,
         description,
         remotePlanHandle: plan?.handle?.trim() || null,
-        followContextGroupId: contextGroupId,
       })
       return NextResponse.json({ ok: true, status: 'active' })
     }

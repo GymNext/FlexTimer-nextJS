@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Loader2 } from 'lucide-react'
 import type { User } from 'firebase/auth'
 import type { HubTreeNode } from '@/types/hub-tree'
 import { mergeOwnedAndMemberShareHubTrees, type MembershipRowForSharePicker } from '@/lib/share-with-hub-picker'
@@ -581,10 +582,18 @@ export function PlanShareDialogs({
                   : undefined
               }
               onClick={() => void submitShare()}
-              className="rounded px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+              aria-busy={shareBusy}
+              className="inline-flex min-w-[7.5rem] items-center justify-center gap-2 rounded px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
               style={{ backgroundColor: '#6B21A8' }}
             >
-              {shareBusy ? 'Sharing…' : 'Share plan'}
+              {shareBusy ? (
+                <>
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                  Sharing…
+                </>
+              ) : (
+                'Share plan'
+              )}
             </button>
           </div>
         )}
