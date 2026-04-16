@@ -22,20 +22,19 @@ export function HomeGlossaryCards() {
           Planning
         </h3>
         <p className="mt-2 text-xs text-gray-500 leading-relaxed">
-          Build and view your training calendar—today, your full plan list, and week-by-week plan ahead.
+          Build and view your training calendar—today&apos;s schedule, your full list of plans, and a week-by-week
+          view ahead.
         </p>
         <div className="mt-4 space-y-3">
           <Term label="Plan">
-            A training calendar you own (or follow from someone else). It holds scheduled sessions, time zones,
-            and how workouts appear on your schedule.
+            A training calendar you create or follow. It holds workouts scheduled on specific days.
           </Term>
           <Term label="Workout">
-            The timed routine you build in Library (segments, rounds, etc.). Planning does not replace that
-            definition—it is where you decide which days those routines run.
+            A timed routine (segments, rounds, rest periods, etc.) that you can run using the timer.
           </Term>
-          <Term label="Planned workout">
-            A workout placed on a specific day inside a plan. It is usually created from a workout in your
-            library or from something shared with you.
+          <Term label="Planned Workout">
+            A workout scheduled on a specific day within a plan. It can be selected from your library or created on
+            the spot.
           </Term>
         </div>
       </section>
@@ -46,23 +45,19 @@ export function HomeGlossaryCards() {
           Library
         </h3>
         <p className="mt-2 text-xs text-gray-500 leading-relaxed">
-          Your workouts and how you organize them—plus links to other people’s shared content.
+          Your collection of workouts and how you organize them, along with access to content shared by others.
         </p>
         <div className="mt-4 space-y-3">
-          <Term label="Workout">
-            A timed routine (segments, rounds, rests, etc.) that you can run in the timer. Workouts live in your
-            library until you delete them.
-          </Term>
           <Term label="Favorite">
-            A shortcut list of workouts you use often. Favorites are stored in your special Favorites collection.
+            A quick-access list of workouts you use often, stored in your dedicated Favorites collection.
           </Term>
           <Term label="Collection">
-            A folder that groups your own workouts—like “Leg day” or “Travel”—so you can browse and add them to
-            plans more easily.
+            A folder for organizing your workouts (e.g., &ldquo;Leg Day&rdquo; or &ldquo;Travel&rdquo;), making them
+            easier to browse and add to plans.
           </Term>
           <Term label="Bookmark">
-            A saved reference to someone else’s shared workout or collection. Bookmarks stay in your library so
-            you can reopen them while you still have access.
+            A saved link to someone else&apos;s shared workout or collection. Bookmarks stay synced, so updates from
+            the original creator are reflected automatically.
           </Term>
         </div>
       </section>
@@ -73,20 +68,18 @@ export function HomeGlossaryCards() {
           Connect
         </h3>
         <p className="mt-2 text-xs text-gray-500 leading-relaxed">
-          People, groups, and shared activity—how you discover content and stay in sync with others.
+          People, groups, and shared activity—how you discover content and stay connected with others.
         </p>
         <div className="mt-4 space-y-3">
           <Term label="Hub">
-            A group space (sometimes called a gym or community hub) with its own feed and shared library. You
-            might own a hub or join one as a member.
+            A shared group space with its own activity feed and library. You can create a hub or join as a member.
           </Term>
           <Term label="Connection">
-            A one-to-one link with another FlexTimer user so you can share workouts, plans, and feed items
-            directly, outside of a hub.
+            A direct, one-to-one link with another user, allowing you to share workouts, plans, and updates
+            privately.
           </Term>
           <Term label="Membership">
-            Your relationship to a hub: as a member you can see that hub’s activity and shared content according
-            to the hub’s settings and your role.
+            Your role within a hub. As a member, you can access its shared content and activity.
           </Term>
         </div>
       </section>
