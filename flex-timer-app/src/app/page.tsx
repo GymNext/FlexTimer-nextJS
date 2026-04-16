@@ -64,6 +64,7 @@ import { MyHubsSection } from '@/components/MyHubsSection'
 import { PlanningTodaySection, type PlanAheadLookTarget } from '@/components/PlanningTodaySection'
 import { PlanShareDialogs } from '@/components/PlanShareDialogs'
 import { ContentShareDialogs } from '@/components/ContentShareDialogs'
+import { HomeGlossaryCards } from '@/components/HomeGlossaryCards'
 import { RecoverDeletedItemsSection } from '@/components/RecoverDeletedItemsSection'
 import { UserSettingsScreen } from '@/components/UserSettingsScreen'
 import { GroupPublicProfileDialog } from '@/components/GroupPublicProfileDialog'
@@ -2477,23 +2478,31 @@ function UserAppLayout({
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col gap-6">
       {mainNav === 'home' && (
-        <div className="max-w-2xl rounded-lg border border-gymnext-muted/30 bg-white p-6 shadow-sm">
-          <h2 className="text-sm font-semibold text-gray-900">Welcome to Flex Timer!</h2>
-          <div className="mt-3 space-y-3 text-sm text-gray-600 leading-relaxed">
-            <p>
-              You’re now using the web app—your hub for managing everything with more space, speed, and control.
-              While the mobile app is perfect for workouts on the go, the desktop experience makes it easier to view,
-              edit, and organize your data all in one place.
-            </p>
-            <p>
-              From here, you can quickly update workouts and collections, manage workout plans, and manage your
-              connections and memberships. Everything is fully connected, so any updates you make here are instantly
-              reflected in your mobile app.
-            </p>
-            <p>
-              Whether you’re fine-tuning details or managing your entire setup, Flex Timer on the web gives you the
-              flexibility to do it all—seamlessly.
-            </p>
+        <div className="w-full min-w-0 space-y-6">
+          <div className="w-full rounded-lg border border-gymnext-muted/30 bg-white p-6 shadow-sm">
+            <h2 className="text-sm font-semibold text-gray-900">Welcome to Flex Timer!</h2>
+            <div className="mt-3 space-y-3 text-sm text-gray-600 leading-relaxed">
+              <p>
+                You’re now using the web app—your hub for managing everything with more space, speed, and control.
+                While the mobile app is perfect for workouts on the go, the desktop experience makes it easier to view,
+                edit, and organize your data all in one place.
+              </p>
+              <p>
+                From here, you can quickly update workouts and collections, manage workout plans, and manage your
+                connections and memberships. Everything is fully connected, so any updates you make here are instantly
+                reflected in your mobile app.
+              </p>
+              <p>
+                Whether you’re fine-tuning details or managing your entire setup, Flex Timer on the web gives you the
+                flexibility to do it all—seamlessly.
+              </p>
+            </div>
+          </div>
+          <div className="w-full min-w-0">
+            <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
+              What you can do here
+            </h2>
+            <HomeGlossaryCards />
           </div>
         </div>
       )}
@@ -7615,6 +7624,8 @@ function PlansSection({
   const [stopFollowingConfirmOpen, setStopFollowingConfirmOpen] = useState(false)
   const [stopFollowingBusy, setStopFollowingBusy] = useState(false)
   const [followingRemoveBusyId, setFollowingRemoveBusyId] = useState<string | null>(null)
+  /** Web dialog for removing a follow when the plan or share link is unavailable (replaces `window.confirm`). */
+  const [unavailableFollowRemoveDialogSubId, setUnavailableFollowRemoveDialogSubId] = useState<string | null>(null)
   const [expandedPlannedWorkoutId, setExpandedPlannedWorkoutId] = useState<string | null>(null)
   const [draggedPlanned, setDraggedPlanned] = useState<{
     dateKey: string
@@ -8891,14 +8902,13 @@ function PlansSection({
     }
   }
 
-  async function removeFollowingSubscriptionWithConfirm(subscriptionDocumentId: string) {
-    if (
-      !window.confirm(
-        'Remove this follow? The coach’s plan is no longer available at this link. You can follow again later if it returns.',
-      )
-    ) {
-      return
-    }
+  function openUnavailableFollowRemoveDialog(subscriptionDocumentId: string) {
+    setUnavailableFollowRemoveDialogSubId(subscriptionDocumentId)
+  }
+
+  async function confirmUnavailableFollowRemove() {
+    const subscriptionDocumentId = unavailableFollowRemoveDialogSubId
+    if (!subscriptionDocumentId) return
     setFollowingRemoveBusyId(subscriptionDocumentId)
     try {
       const res = await authedFetch(
@@ -8909,6 +8919,7 @@ function PlansSection({
         const j = (await res.json().catch(() => ({}))) as { error?: string }
         throw new Error(j.error || `HTTP ${res.status}`)
       }
+      setUnavailableFollowRemoveDialogSubId(null)
       setPlanAdminMoreOpen(false)
       setStopFollowingConfirmOpen(false)
       if (selectedFollowingSubscriptionId === subscriptionDocumentId) {
@@ -8917,7 +8928,7 @@ function PlansSection({
       await reloadFollowingPlans?.()
       toast.success('Removed from Following.')
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Could not remove follow')
+      toast.error(e instanceof Error ? e.message : 'Could not unfollow')
     } finally {
       setFollowingRemoveBusyId(null)
     }
@@ -9810,12 +9821,12 @@ function PlansSection({
                           {isDead ? (
                             <button
                               type="button"
-                              aria-label="Remove follow"
+                              aria-label="Unfollow"
                               disabled={followingRemoveBusyId === row.subscriptionDocumentId}
                               onClick={(e) => {
                                 e.preventDefault()
                                 e.stopPropagation()
-                                void removeFollowingSubscriptionWithConfirm(row.subscriptionDocumentId)
+                                openUnavailableFollowRemoveDialog(row.subscriptionDocumentId)
                               }}
                               className="flex shrink-0 items-center justify-center border-l border-gray-200 px-3 text-gray-400 transition-colors hover:bg-red-50 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
                             >
@@ -10015,9 +10026,7 @@ function PlansSection({
                               type="button"
                               className="mt-3 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
                               disabled={followingRemoveBusyId === sr.subscriptionDocumentId}
-                              onClick={() =>
-                                void removeFollowingSubscriptionWithConfirm(sr.subscriptionDocumentId)
-                              }
+                              onClick={() => openUnavailableFollowRemoveDialog(sr.subscriptionDocumentId)}
                             >
                               Unfollow
                             </button>
@@ -10033,9 +10042,7 @@ function PlansSection({
                               type="button"
                               className="mt-3 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
                               disabled={followingRemoveBusyId === sr.subscriptionDocumentId}
-                              onClick={() =>
-                                void removeFollowingSubscriptionWithConfirm(sr.subscriptionDocumentId)
-                              }
+                              onClick={() => openUnavailableFollowRemoveDialog(sr.subscriptionDocumentId)}
                             >
                               Unfollow
                             </button>
@@ -10953,9 +10960,7 @@ function PlansSection({
                     className="mt-2 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
                     disabled={followingRemoveBusyId === selectedFollowingRow.subscriptionDocumentId}
                     onClick={() =>
-                      void removeFollowingSubscriptionWithConfirm(
-                        selectedFollowingRow.subscriptionDocumentId,
-                      )
+                      openUnavailableFollowRemoveDialog(selectedFollowingRow.subscriptionDocumentId)
                     }
                   >
                     Unfollow
@@ -11024,9 +11029,7 @@ function PlansSection({
                               followingRemoveBusyId === selectedFollowingRow.subscriptionDocumentId
                             }
                             onClick={() =>
-                              void removeFollowingSubscriptionWithConfirm(
-                                selectedFollowingRow.subscriptionDocumentId,
-                              )
+                              openUnavailableFollowRemoveDialog(selectedFollowingRow.subscriptionDocumentId)
                             }
                           >
                             Unfollow
@@ -12324,6 +12327,54 @@ function PlansSection({
           </div>
         </div>
       )}
+
+      {unavailableFollowRemoveDialogSubId ? (() => {
+        const row =
+          followingPlans.find((f) => f.subscriptionDocumentId === unavailableFollowRemoveDialogSubId) ?? null
+        const label = row?.remotePlanName?.trim() || 'This plan'
+        const busy = followingRemoveBusyId === unavailableFollowRemoveDialogSubId
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div
+              className="absolute inset-0 bg-black/50"
+              aria-hidden
+              onClick={() => !busy && setUnavailableFollowRemoveDialogSubId(null)}
+            />
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="unavailable-follow-remove-title"
+              className="relative w-full max-w-sm rounded-lg border border-gymnext-muted/30 bg-white p-4 shadow-lg"
+            >
+              <h2 id="unavailable-follow-remove-title" className="text-sm font-semibold text-gray-900">
+                Unfollow?
+              </h2>
+              <p className="mt-2 text-sm text-gray-700">
+                Remove <span className="font-medium text-gray-900">{label}</span> from Following? The coach&apos;s
+                plan is no longer available at this link. You can follow again later if it returns.
+              </p>
+              <div className="mt-4 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => !busy && setUnavailableFollowRemoveDialogSubId(null)}
+                  disabled={busy}
+                  className="rounded bg-gymnext-background px-3 py-2 text-sm font-medium text-gymnext-dark hover:bg-gymnext-muted/30 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void confirmUnavailableFollowRemove()}
+                  disabled={busy}
+                  className="rounded bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                >
+                  {busy ? 'Unfollowing…' : 'Unfollow'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })() : null}
 
       <PublicUserProfileDialog
         open={planOwnerPublicProfileUserId != null}
