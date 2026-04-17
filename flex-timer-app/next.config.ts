@@ -6,6 +6,14 @@ const nextConfig: NextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
   },
+  /** iOS instant-links client calls `/instant-links/...` on the apex host (no `/api` prefix). */
+  async rewrites() {
+    return {
+      beforeFiles: [
+        { source: '/instant-links/:path*', destination: '/api/instant-links/:path*' },
+      ],
+    }
+  },
 }
 
 export default nextConfig

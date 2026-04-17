@@ -323,3 +323,59 @@ export async function withdrawOutgoingConnectionRequest(senderUid: string, toUse
 
   await iosOutgoingRef.delete()
 }
+
+/**
+ * Instant user-connect / idempotent: ensure `userConnections/{sortedPair}` exists,
+ * clear `userConnectionInvites` on both users (both directions), and write the same
+ * personal feed connect pair as {@link acceptConnectionRequest}.
+ */
+export async function establishMutualUserConnectionIfNeeded(userA: string, userB: string): Promise<void> {
+  if (!adminDb) throw new Error('Database not configured')
+  const a = userA.trim()
+  const b = userB.trim()
+  if (!a || !b || a === b) throw new Error('Invalid request')
+
+  const iosAtoB = adminDb.collection(USERS).doc(a).collection(USER_CONNECTION_INVITES).doc(b)
+  const iosBtoA = adminDb.collection(USERS).doc(b).collection(USER_CONNECTION_INVITES).doc(a)
+
+  if (await assertUsersAreConnected(a, b)) {
+    const batch = adminDb.batch()
+    batch.delete(iosAtoB)
+    batch.delete(iosBtoA)
+    await batch.commit()
+    return
+  }
+
+  const connId = userConnectionDocumentId(a, b)
+  if (!connId) throw new Error('Invalid request')
+  const participants = a < b ? [a, b] : [b, a]
+  const connRef = adminDb.collection('userConnections').doc(connId)
+  const connectedAt = FieldValue.serverTimestamp()
+  const batch = adminDb.batch()
+  batch.set(connRef, {
+    participants,
+    connectedAt,
+    sharedContentItemCount: 0,
+    updatedAt: connectedAt,
+  })
+  batch.delete(iosAtoB)
+  batch.delete(iosBtoA)
+
+  const recipientFeedRef = adminDb.collection(USERS).doc(a).collection(USER_FEED).doc()
+  const inviterFeedRef = adminDb.collection(USERS).doc(b).collection(USER_FEED).doc()
+  batch.set(recipientFeedRef, {
+    actionType: 'connect',
+    userFeedOwnerId: a,
+    actorUserId: a,
+    objectId: b,
+    createdAt: connectedAt,
+  })
+  batch.set(inviterFeedRef, {
+    actionType: 'connect',
+    userFeedOwnerId: b,
+    actorUserId: b,
+    objectId: a,
+    createdAt: connectedAt,
+  })
+  await batch.commit()
+}
