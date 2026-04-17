@@ -7,14 +7,13 @@ import {
   getCollectionById,
   getWorkoutById,
   getWorkoutsByIds,
-  updateWorkoutMetadata,
 } from '@/lib/firestore'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
 
 /**
  * POST /api/app/workouts/duplicate
- * Deep-copy a workout that already belongs to the signed-in user into the same library,
- * rename it to `Copy of (original name)`, and append it to each listed collection.
+ * Deep-copy a workout that already belongs to the signed-in user into the same library
+ * (same display name as the source) and append it to each listed collection.
  * Body: { sourceWorkoutId: string, collectionIds: string[] }
  */
 export async function POST(request: NextRequest) {
@@ -84,9 +83,6 @@ export async function POST(request: NextRequest) {
     }
 
     const newId = await cloneWorkoutToUserLibrary(uid, sourceWorkoutId, uid)
-    const baseName = (source.workoutName ?? '').trim() || source.workoutId
-    const copyName = `Copy of (${baseName})`
-    await updateWorkoutMetadata(uid, newId, { workoutName: copyName })
 
     for (const cid of collectionIds) {
       await addWorkoutToCollection(uid, cid, newId)

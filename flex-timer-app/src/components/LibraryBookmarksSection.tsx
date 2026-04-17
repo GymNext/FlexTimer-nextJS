@@ -15,6 +15,7 @@ import {
   type WorkoutEntryLike,
 } from '@/lib/json-workout-format'
 import type { SharedCollectionBookmarkRow, SharedWorkoutBookmarkRow } from '@/lib/bookmarks'
+import { UNLIMITED } from '@/lib/subscription-limits-constants'
 
 /** Bar color when list row has no loaded workout (matches default / unknown timer strip). */
 const BOOKMARK_LIST_WORKOUT_BAR_SOURCE: WorkoutEntryLike = {}
@@ -347,7 +348,16 @@ function BookmarksCollectionDetail({
 
 const WORKOUT_PREVIEW_FETCH_BATCH = 6
 
-export function LibraryBookmarksSection({ user }: { user: User }) {
+export function LibraryBookmarksSection({
+  user,
+  bookmarksCount: bookmarksCountFromOverview,
+  maxBookmarks,
+}: {
+  user: User
+  /** From GET /api/app/overview `counts.bookmarks` while the local list is loading. */
+  bookmarksCount?: number
+  maxBookmarks?: number
+}) {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [data, setData] = useState<BookmarksResponse>({ collections: [], workouts: [] })
@@ -630,12 +640,34 @@ export function LibraryBookmarksSection({ user }: { user: User }) {
 
   const empty = !loading && leftCollections.length === 0 && leftWorkouts.length === 0
 
+  const bookmarksTitleSuffix = useMemo(() => {
+    const maxBm = maxBookmarks ?? UNLIMITED
+    const localTotal = data.collections.length + data.workouts.length
+    const total =
+      loading && typeof bookmarksCountFromOverview === 'number'
+        ? bookmarksCountFromOverview
+        : localTotal
+    if (maxBm >= UNLIMITED) {
+      return ` (${total})`
+    }
+    return ` (${total}/${maxBm})`
+  }, [
+    loading,
+    bookmarksCountFromOverview,
+    data.collections.length,
+    data.workouts.length,
+    maxBookmarks,
+  ])
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="grid min-h-[28rem] w-full flex-1 gap-6 lg:min-h-0 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.8fr)] lg:grid-rows-[minmax(0,1fr)]">
         <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-gymnext-muted/30 bg-white">
           <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3">
-            <h3 className="text-sm font-medium text-gray-800">Bookmarks</h3>
+            <h3 className="text-sm font-medium text-gray-800">
+              Bookmarks
+              {bookmarksTitleSuffix}
+            </h3>
             <div className="flex shrink-0 items-center gap-2" />
           </div>
 

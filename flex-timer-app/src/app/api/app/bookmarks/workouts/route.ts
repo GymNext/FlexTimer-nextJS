@@ -1,10 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUserAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
-import { deleteSharedWorkoutBookmark, upsertActiveSharedWorkoutBookmark } from '@/lib/bookmarks'
+import {
+  countActiveSharedBookmarksForUser,
+  isActiveSharedWorkoutBookmark,
+  upsertActiveSharedWorkoutBookmark,
+  deleteSharedWorkoutBookmark,
+} from '@/lib/bookmarks'
 import { getUserDocument, getWorkoutById } from '@/lib/firestore'
 import { getWorkoutDisplayDescription, getWorkoutDisplayName } from '@/lib/json-workout-format'
 import { resolveSharedMirrorReadContextForViewer } from '@/lib/shared-resource-access'
+import { UNLIMITED } from '@/lib/subscription-limits-constants'
+import { getSubscriptionLimits } from '@/lib/subscription-limits'
 
 /**
  * POST /api/app/bookmarks/workouts
@@ -52,6 +59,23 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    const limits = await getSubscriptionLimits(uid)
+    if (limits.maxBookmarks < UNLIMITED) {
+      const already = await isActiveSharedWorkoutBookmark(uid, ownerUserId, remoteWorkoutId)
+      if (!already) {
+        const n = await countActiveSharedBookmarksForUser(uid)
+        if (n >= limits.maxBookmarks) {
+          return NextResponse.json(
+            {
+              error: `Your plan allows up to ${limits.maxBookmarks} bookmarks. Remove one or upgrade to add more.`,
+              code: 'SUBSCRIPTION_LIMIT_BOOKMARKS',
+            },
+            { status: 403 },
+          )
+        }
+      }
+    }
+
     const w = await getWorkoutById(ownerUserId, remoteWorkoutId)
     if (!w || w.deletedAt) {
       return NextResponse.json({ error: 'Workout not found' }, { status: 404 })

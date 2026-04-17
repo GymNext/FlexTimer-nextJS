@@ -1,8 +1,8 @@
 /**
  * Subscription-based limits for the user app (server-only).
- * Basic: 5 favorites, 1 collection, 1 plan.
- * Classic: unlimited favorites, 5 collections, 1 plan.
- * Pro / Pro Plus: unlimited favorites, collections, and plans.
+ * Basic: 5 favorites, 1 collection, 1 plan, 5 bookmarks.
+ * Classic: unlimited favorites, 5 collections, 2 plans, unlimited bookmarks.
+ * Pro / Pro Plus: unlimited favorites, collections, plans, and bookmarks.
  */
 
 import { getRevenueCatCustomer } from '@/lib/revenuecat'
@@ -22,13 +22,15 @@ const LIMITS_BASIC: SubscriptionLimits = {
   maxFavorites: 5,
   maxCollections: 1,
   maxPlans: 1,
+  maxBookmarks: 5,
 }
 
 const LIMITS_CLASSIC: SubscriptionLimits = {
   tier: 'classic' as SubscriptionTier,
   maxFavorites: UNLIMITED,
   maxCollections: 5,
-  maxPlans: 1,
+  maxPlans: 2,
+  maxBookmarks: UNLIMITED,
 }
 
 const LIMITS_PRO: SubscriptionLimits = {
@@ -36,6 +38,7 @@ const LIMITS_PRO: SubscriptionLimits = {
   maxFavorites: UNLIMITED,
   maxCollections: UNLIMITED,
   maxPlans: UNLIMITED,
+  maxBookmarks: UNLIMITED,
 }
 
 /**

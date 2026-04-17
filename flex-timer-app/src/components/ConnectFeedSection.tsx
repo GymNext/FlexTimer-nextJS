@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { User } from 'firebase/auth'
 import toast from 'react-hot-toast'
-import { ListFilter } from 'lucide-react'
+import { Bookmark, ListFilter, Users } from 'lucide-react'
 import { PublicUserProfileDialog } from '@/components/PublicUserProfileDialog'
 import { AddSharedWorkoutToPlanDialog } from '@/components/AddSharedWorkoutToPlanDialog'
 import {
@@ -672,7 +672,7 @@ function FeedRow({
                           role="menuitem"
                           aria-disabled="true"
                           className="w-full px-3 py-2 text-left text-sm text-gray-400 cursor-not-allowed select-none"
-                          aria-label="You have a subscription to this plan"
+                          aria-label="You are following this plan"
                         >
                           Subscribed
                         </div>
@@ -1053,26 +1053,28 @@ function FeedRow({
                     <p className="text-sm font-medium text-gray-900 mt-0.5 line-clamp-3">{shared.label}</p>
                     <p className="text-xs font-medium text-[#6B21A8] mt-1.5">View details</p>
                   </div>
-                  {((shared.kind === 'plan' && alreadyFollowing) ||
-                    (shared.kind === 'workout' && sharedWorkoutBookmarked) ||
-                    (shared.kind === 'collection' && sharedCollectionBookmarked)) && (
+                  {shared.kind === 'plan' && alreadyFollowing && (
                     <span
-                      className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700"
-                      aria-label={
-                        shared.kind === 'plan'
-                          ? 'You have a subscription to this plan'
-                          : shared.kind === 'workout'
-                            ? 'You have bookmarked this workout'
-                            : 'You have bookmarked this collection'
-                      }
+                      className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-teal-100 text-teal-800"
+                      aria-label="You are following this plan"
                     >
-                      <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-                        <path
-                          fillRule="evenodd"
-                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                          clipRule="evenodd"
-                        />
-                      </svg>
+                      <Users className="h-4 w-4" strokeWidth={2} aria-hidden />
+                    </span>
+                  )}
+                  {shared.kind === 'workout' && sharedWorkoutBookmarked && (
+                    <span
+                      className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-purple-200 text-purple-900 shadow-sm"
+                      aria-label="You have bookmarked this workout"
+                    >
+                      <Bookmark className="h-4 w-4" strokeWidth={2} aria-hidden />
+                    </span>
+                  )}
+                  {shared.kind === 'collection' && sharedCollectionBookmarked && (
+                    <span
+                      className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-purple-200 text-purple-900 shadow-sm"
+                      aria-label="You have bookmarked this collection"
+                    >
+                      <Bookmark className="h-4 w-4" strokeWidth={2} aria-hidden />
                     </span>
                   )}
                 </button>

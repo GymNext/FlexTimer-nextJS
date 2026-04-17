@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { User } from 'firebase/auth'
 import toast from 'react-hot-toast'
+import { Bookmark, Users } from 'lucide-react'
 import {
   getCollectionDisplayDescription,
   getCollectionDisplayName,
@@ -639,34 +640,22 @@ export function SharedResourcePreviewDialog({
             </button>
             {showPlanFollowMenu && alreadyFollowingPlan && (
               <span
-                className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700"
-                aria-label="You have a subscription to this plan"
+                className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-teal-100 text-teal-800"
+                aria-label="You are following this plan"
               >
-                <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-                  <path
-                    fillRule="evenodd"
-                    d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                    clipRule="evenodd"
-                  />
-                </svg>
+                <Users className="h-4 w-4" strokeWidth={2} aria-hidden />
               </span>
             )}
             {showLibraryItemBookmarked && (
               <span
-                className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700"
+                className="shrink-0 flex h-8 w-8 items-center justify-center rounded-full bg-purple-200 text-purple-900 shadow-sm"
                 aria-label={
                   target.kind === 'workout'
                     ? 'You have bookmarked this workout'
                     : 'You have bookmarked this collection'
                 }
               >
-                <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-                  <path
-                    fillRule="evenodd"
-                    d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                    clipRule="evenodd"
-                  />
-                </svg>
+                <Bookmark className="h-4 w-4" strokeWidth={2} aria-hidden />
               </span>
             )}
           </div>

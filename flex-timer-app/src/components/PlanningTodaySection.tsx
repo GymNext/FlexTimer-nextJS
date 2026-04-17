@@ -94,7 +94,7 @@ export function PlanningTodaySection({
   user: User
   plans: WorkoutPlan[]
   followedPlans?: TodayFollowedPlanEntry[]
-  /** Jump to Plan Ahead: owned plan (editable) or followed subscription (read-only). */
+  /** Jump to Plan Ahead: owned plan or followed subscription. */
   onOpenPlanAhead?: (target: PlanAheadLookTarget) => void
 }) {
   const [viewDateKey, setViewDateKey] = useState(() => localDateKey(new Date()))

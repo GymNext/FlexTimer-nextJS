@@ -23,7 +23,6 @@ const PLAN_GROUP_SHARES_ROOT = 'planGroupShares'
 const SHARE_ITEMS_SUB = 'items'
 
 /** Top-level fields on `sharedPlans` mirrors (matches iOS / `plan-share.ts`). */
-const PLAN_SHARE_ALLOW_EDITING_FIELD = 'allowEditing'
 const PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD = 'hideFutureWorkouts'
 
 const BATCH = 450
@@ -325,16 +324,14 @@ export async function syncPlanUserConnectionMirrors(ownerUserId: string, planId:
     const itemSnaps = await Promise.all(peers.map((peer) => itemsCol.doc(peer).get()))
     const ops = peers.map((peer, i) => {
       const d = itemSnaps[i]?.exists ? (itemSnaps[i].data() as Record<string, unknown>) : {}
-      const allowRaw = d[PLAN_SHARE_ALLOW_EDITING_FIELD]
-      const allowEditing = typeof allowRaw === 'boolean' ? allowRaw : false
       const hideRaw = d[PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]
       const hideFutureWorkouts = typeof hideRaw === 'boolean' ? hideRaw : true
       return {
         ref: db.collection('users').doc(peer).collection(SHARED_PLANS_SUB).doc(mirrorId),
         data: {
           ...userConnectionMirrorEnvelope(peer, uid, payload),
-          [PLAN_SHARE_ALLOW_EDITING_FIELD]: allowEditing,
           [PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]: hideFutureWorkouts,
+          allowEditing: FieldValue.delete(),
         },
         merge: true,
       }
@@ -379,8 +376,8 @@ export async function syncPlanGroupShareMirrors(ownerUserId: string, planId: str
         ref: db.collection(GROUPS_COLLECTION).doc(gid).collection(SHARED_PLANS_SUB).doc(mirrorId),
         data: {
           ...groupMirrorEnvelope(gid, uid, payload),
-          [PLAN_SHARE_ALLOW_EDITING_FIELD]: false,
           [PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]: hideFutureWorkouts,
+          allowEditing: FieldValue.delete(),
         },
         merge: true,
       }

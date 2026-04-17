@@ -120,11 +120,9 @@ type FollowingPlanRow = {
   updatedAt?: string | null
   subscriberFullName: string | null
   subscriberHandle: string | null
-  /** Resolved for UI: owner allowed editing on the connection share (otherwise read-only). */
-  shareAllowEditing: boolean
   /** Resolved for UI: future scheduled workouts hidden from this follow / share. */
   shareHideFutureWorkouts: boolean
-  /** From live coach plan (GET /api/app/following-plans); drives subscription “Your access” copy. */
+  /** From live coach plan (GET /api/app/following-plans). */
   remotePlanIsPersonal?: boolean
   /** 0 = private training, 1 = group training; omitted when personal or plan unavailable. */
   remotePlanTrainingIntent?: 0 | 1
@@ -137,14 +135,13 @@ type FollowingPlanRow = {
 function normalizeFollowingPlanRows(raw: FollowingPlanRow[] | undefined): FollowingPlanRow[] {
   return (raw ?? []).map((r) => ({
     ...r,
-    shareAllowEditing: Boolean(r.shareAllowEditing),
     shareHideFutureWorkouts: r.shareHideFutureWorkouts !== false,
     remotePlanUnavailable: Boolean(r.remotePlanUnavailable),
     sharedPlanMirrorMissing: Boolean(r.sharedPlanMirrorMissing),
   }))
 }
 
-/** When the primary column is a followed plan, planned-workout reads/writes use the following-plans API (coach calendar); the server enforces edit permission. */
+/** When the primary column is a followed plan, planned-workout reads use the following-plans API (coach calendar). */
 function plannedWorkoutsCollectionUrl(
   targetPlanId: string,
   plannedWorkoutId: string | undefined,
@@ -213,9 +210,71 @@ interface OverviewData {
     cooldownDuration?: number
     cooldownDirection?: boolean
   }
-  counts?: { favorites: number; collections: number; plans: number }
+  counts?: { favorites: number; collections: number; plans: number; bookmarks?: number }
   hubLookupIds: UserHubLookupIds
   hubLookupLabels: UserHubLookupLabels
+}
+
+const LOCAL_WEB_PRO_BYPASS_MS = 60 * 60 * 1000
+const LOCAL_WEB_PRO_BYPASS_STORAGE_PREFIX = 'flexTimer_localWebProBypassUntil:'
+
+function isFlexTimerLocalWebHost(): boolean {
+  if (typeof window === 'undefined') return false
+  const h = window.location.hostname
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]'
+}
+
+function getLocalWebProBypassExpiresAt(uid: string): number {
+  if (typeof window === 'undefined') return 0
+  try {
+    const raw = window.localStorage.getItem(`${LOCAL_WEB_PRO_BYPASS_STORAGE_PREFIX}${uid}`)
+    if (raw == null) return 0
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : 0
+  } catch {
+    return 0
+  }
+}
+
+function setLocalWebProBypassOneHour(uid: string): void {
+  try {
+    window.localStorage.setItem(
+      `${LOCAL_WEB_PRO_BYPASS_STORAGE_PREFIX}${uid}`,
+      String(Date.now() + LOCAL_WEB_PRO_BYPASS_MS)
+    )
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function WebProRequiredPanel({ onDeveloperLocalBypass }: { onDeveloperLocalBypass?: () => void }) {
+  return (
+    <div className="flex min-h-[280px] w-full min-w-0 flex-1 flex-col justify-center rounded-lg border border-gymnext-muted/30 bg-white p-8 shadow-sm">
+      <h2 className="text-base font-semibold text-gray-900">Flex Timer on the web requires Pro</h2>
+      <div className="mt-4 max-w-xl space-y-3 text-sm leading-relaxed text-gray-600">
+        <p>
+          Planning, library, community, and the rest of the web workspace are included with a Pro plan. Open the Flex
+          Timer mobile app to manage your subscription or start a Pro trial there.
+        </p>
+        <p>
+          We do not sell subscriptions or run trials on the web—once you have Pro (including an active trial from the
+          app), you can use this site alongside the app.
+        </p>
+      </div>
+      {onDeveloperLocalBypass && (
+        <div className="mt-8 max-w-xl rounded-md border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-xs font-medium text-amber-900">Local development</p>
+          <button
+            type="button"
+            onClick={onDeveloperLocalBypass}
+            className="mt-3 rounded-md bg-amber-700 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-800"
+          >
+            Unlock web for 1 hour
+          </button>
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function HomePage() {
@@ -238,6 +297,35 @@ export default function HomePage() {
   const { connectionInvites, membershipInvites, refreshPendingInvitations } =
     usePendingInvitationsNavBadges(user)
   const { pendingHubJoinRequests, refreshHubJoinRequestBadges } = useHubJoinRequestNavBadges(user)
+
+  /** Bumped when localhost Pro bypass is activated so `webAppUnlockedEffective` re-reads localStorage. */
+  const [localWebProBypassVersion, setLocalWebProBypassVersion] = useState(0)
+
+  const activateLocalWebProBypass = useCallback(() => {
+    if (!user || !isFlexTimerLocalWebHost()) return
+    setLocalWebProBypassOneHour(user.uid)
+    setLocalWebProBypassVersion((v) => v + 1)
+  }, [user])
+
+  const webAppUnlockedEffective = useMemo(() => {
+    if (overview?.subscriptionLimits?.tier === 'pro') return true
+    if (typeof window === 'undefined' || !user) return false
+    if (!isFlexTimerLocalWebHost()) return false
+    return getLocalWebProBypassExpiresAt(user.uid) > Date.now()
+  }, [overview?.subscriptionLimits?.tier, user, localWebProBypassVersion])
+
+  const onDeveloperLocalWebProBypass =
+    typeof window !== 'undefined' && isFlexTimerLocalWebHost() ? activateLocalWebProBypass : undefined
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !user || !isFlexTimerLocalWebHost()) return
+    if (overview?.subscriptionLimits?.tier === 'pro') return
+    const exp = getLocalWebProBypassExpiresAt(user.uid)
+    const ms = exp - Date.now()
+    if (ms <= 0) return
+    const t = window.setTimeout(() => setLocalWebProBypassVersion((v) => v + 1), ms)
+    return () => window.clearTimeout(t)
+  }, [user, overview?.subscriptionLimits?.tier, localWebProBypassVersion])
 
   const resetToDefaultRef = useRef<(() => void) | null>(null)
   const openHandleEditorRef = useRef<(() => void) | null>(null)
@@ -336,16 +424,16 @@ export default function HomePage() {
   }, [user])
 
   useEffect(() => {
-    if (mainNav === 'connections') {
+    if (mainNav === 'connections' && webAppUnlockedEffective) {
       void refreshPendingInvitations()
     }
-  }, [mainNav, connectionsTab, refreshPendingInvitations])
+  }, [mainNav, connectionsTab, refreshPendingInvitations, webAppUnlockedEffective])
 
   useEffect(() => {
-    if (mainNav === 'connect') {
+    if (mainNav === 'connect' && webAppUnlockedEffective) {
       void refreshHubJoinRequestBadges()
     }
-  }, [mainNav, refreshHubJoinRequestBadges])
+  }, [mainNav, refreshHubJoinRequestBadges, webAppUnlockedEffective])
 
   useEffect(() => {
     const handler = () => {
@@ -402,6 +490,7 @@ export default function HomePage() {
           pendingConnectionInvites={connectionInvites}
           pendingMembershipInvites={membershipInvites}
           pendingHubJoinRequests={pendingHubJoinRequests}
+          webAppUnlocked={webAppUnlockedEffective}
           setMainNav={setMainNav}
           setConnectionsTab={setConnectionsTab}
           setLibraryTab={setLibraryTab}
@@ -418,6 +507,8 @@ export default function HomePage() {
               overviewLoading={overviewLoading}
               overviewError={overviewError}
               reloadOverview={() => loadOverview(user)}
+              webAppUnlocked={webAppUnlockedEffective}
+              onDeveloperLocalWebProBypass={onDeveloperLocalWebProBypass}
               mainNav={mainNav}
               setMainNav={setMainNav}
               connectionsTab={connectionsTab}
@@ -1157,6 +1248,8 @@ function UserAppLayout({
   overviewLoading,
   overviewError,
   reloadOverview,
+  webAppUnlocked,
+  onDeveloperLocalWebProBypass,
   mainNav,
   setMainNav,
   connectionsTab,
@@ -1178,6 +1271,10 @@ function UserAppLayout({
   overviewLoading: boolean
   overviewError: string | null
   reloadOverview: () => void
+  /** True when the user has Pro on the server, or localhost dev bypass is active (see HomePage). */
+  webAppUnlocked: boolean
+  /** Localhost-only: shown on Pro gate panel to unlock web for 1 hour in this browser. */
+  onDeveloperLocalWebProBypass?: () => void
   mainNav: MainNavId
   setMainNav: (id: MainNavId) => void
   connectionsTab: ConnectionsSubTabId
@@ -1275,8 +1372,7 @@ function UserAppLayout({
     [followingPlans, selectedFollowingSubscriptionId]
   )
 
-  const planScheduleReadOnly =
-    selectedFollowingSubscriptionId !== null && !selectedFollowingRowForLayout?.shareAllowEditing
+  const planScheduleReadOnly = selectedFollowingSubscriptionId !== null
 
   const plannedWorkoutsApiCtx = useMemo(
     () => ({
@@ -2228,6 +2324,14 @@ function UserAppLayout({
   }
 
   useEffect(() => {
+    if (!webAppUnlocked) {
+      setPlannedWorkouts([])
+      setPlannedWorkoutsSecondary([])
+      setOptimisticPlannedWorkouts(null)
+      setPlansError(null)
+      setPlansLoading(false)
+      return
+    }
     let cancelled = false
     ;(async () => {
       const planAheadOwned =
@@ -2381,6 +2485,7 @@ function UserAppLayout({
     mainNav,
     planningTab,
     followingPlans,
+    webAppUnlocked,
   ])
 
   const refetchFollowingPlansQuiet = useCallback(async () => {
@@ -2400,6 +2505,7 @@ function UserAppLayout({
   useEffect(() => {
     const needFollowingPlans =
       overview &&
+      webAppUnlocked &&
       ((mainNav === 'planning' &&
         (planningTab === 'plans' || planningTab === 'plan-ahead' || planningTab === 'today')) ||
         (mainNav === 'connect' &&
@@ -2431,7 +2537,7 @@ function UserAppLayout({
     return () => {
       cancelled = true
     }
-  }, [mainNav, planningTab, connectTab, overview, user])
+  }, [mainNav, planningTab, connectTab, overview, webAppUnlocked, user])
 
   const planningTodayFollowedEntries = useMemo(
     () =>
@@ -2473,59 +2579,69 @@ function UserAppLayout({
     mainNav === 'connect' ||
     mainNav === 'settings' ||
     mainNav === 'connections' ||
-    mainNav === 'support'
+    mainNav === 'support' ||
+    !webAppUnlocked
 
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col gap-6">
-      {mainNav === 'home' && (
-        <div className="w-full min-w-0 space-y-6">
-          <div className="w-full rounded-lg border border-gymnext-muted/30 bg-white p-6 shadow-sm">
-            <h2 className="text-sm font-semibold text-gray-900">Welcome to Flex Timer!</h2>
-            <div className="mt-3 space-y-3 text-sm text-gray-600 leading-relaxed">
-              <p>
-                You’re now using the web app—your hub for managing everything with more space, speed, and control.
-                While the mobile app is perfect for workouts on the go, the desktop experience makes it easier to view,
-                edit, and organize your data all in one place.
-              </p>
-              <p>
-                From here, you can quickly update workouts and collections, manage workout plans, and manage your
-                connections and memberships. Everything is fully connected, so any updates you make here are instantly
-                reflected in your mobile app.
-              </p>
-              <p>
-                Whether you’re fine-tuning details or managing your entire setup, Flex Timer on the web gives you the
-                flexibility to do it all—seamlessly.
-              </p>
+      {mainNav === 'home' &&
+        (webAppUnlocked ? (
+          <div className="w-full min-w-0 space-y-6">
+            <div className="w-full rounded-lg border border-gymnext-muted/30 bg-white p-6 shadow-sm">
+              <h2 className="text-sm font-semibold text-gray-900">Welcome to Flex Timer!</h2>
+              <div className="mt-3 space-y-3 text-sm text-gray-600 leading-relaxed">
+                <p>
+                  You’re now using the web app—your hub for managing everything with more space, speed, and control.
+                  While the mobile app is perfect for workouts on the go, the desktop experience makes it easier to view,
+                  edit, and organize your data all in one place.
+                </p>
+                <p>
+                  From here, you can quickly update workouts and collections, manage workout plans, and manage your
+                  connections and memberships. Everything is fully connected, so any updates you make here are instantly
+                  reflected in your mobile app.
+                </p>
+                <p>
+                  Whether you’re fine-tuning details or managing your entire setup, Flex Timer on the web gives you the
+                  flexibility to do it all—seamlessly.
+                </p>
+              </div>
+            </div>
+            <div className="w-full min-w-0">
+              <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                What you can do here
+              </h2>
+              <HomeGlossaryCards />
             </div>
           </div>
-          <div className="w-full min-w-0">
-            <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
-              What you can do here
-            </h2>
-            <HomeGlossaryCards />
+        ) : (
+          <WebProRequiredPanel onDeveloperLocalBypass={onDeveloperLocalWebProBypass} />
+        ))}
+      {mainNav === 'connect' &&
+        (webAppUnlocked ? (
+          <div className="flex min-h-0 w-full flex-1 flex-col">
+            <ConnectSection
+              connectTab={connectTab}
+              user={user}
+              followedPlansForFeed={followingPlans}
+              onFollowedPlanFromFeed={refetchFollowingPlansQuiet}
+              reloadOverview={reloadOverview}
+              onGoToOwnedPlan={goToPlansWithOwnedPlanSelected}
+              onGoToSubscribedPlanAhead={goToPlanAheadWithFollowedPlanActive}
+              onGoToOwnedWorkout={goToLibraryWithOwnedWorkoutSelected}
+              onGoToOwnedCollection={goToLibraryWithOwnedCollectionSelected}
+            />
           </div>
-        </div>
-      )}
-      {mainNav === 'connect' && (
-        <div className="flex min-h-0 w-full flex-1 flex-col">
-          <ConnectSection
-            connectTab={connectTab}
-            user={user}
-            followedPlansForFeed={followingPlans}
-            onFollowedPlanFromFeed={refetchFollowingPlansQuiet}
-            reloadOverview={reloadOverview}
-            onGoToOwnedPlan={goToPlansWithOwnedPlanSelected}
-            onGoToSubscribedPlanAhead={goToPlanAheadWithFollowedPlanActive}
-            onGoToOwnedWorkout={goToLibraryWithOwnedWorkoutSelected}
-            onGoToOwnedCollection={goToLibraryWithOwnedCollectionSelected}
-          />
-        </div>
-      )}
-      {mainNav === 'connections' && (
-        <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
-          <ConnectionsMembershipsSection connectionsTab={connectionsTab} user={user} />
-        </div>
-      )}
+        ) : (
+          <WebProRequiredPanel onDeveloperLocalBypass={onDeveloperLocalWebProBypass} />
+        ))}
+      {mainNav === 'connections' &&
+        (webAppUnlocked ? (
+          <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
+            <ConnectionsMembershipsSection connectionsTab={connectionsTab} user={user} />
+          </div>
+        ) : (
+          <WebProRequiredPanel onDeveloperLocalBypass={onDeveloperLocalWebProBypass} />
+        ))}
       {mainNav === 'settings' && (
         <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
           <UserSettingsScreen
@@ -2537,10 +2653,13 @@ function UserAppLayout({
           />
         </div>
       )}
-      {mainNav === 'support' && (
+      {mainNav === 'support' && webAppUnlocked && (
         <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
           <RecoverDeletedItemsSection user={user} onLibraryChanged={reloadOverview} />
         </div>
+      )}
+      {mainNav === 'support' && !webAppUnlocked && (
+        <WebProRequiredPanel onDeveloperLocalBypass={onDeveloperLocalWebProBypass} />
       )}
 
       {!hideOverviewStatusChrome && overviewLoading && !overview && (
@@ -2565,11 +2684,16 @@ function UserAppLayout({
             mainNav === 'connect' ||
             mainNav === 'settings' ||
             mainNav === 'connections' ||
-            mainNav === 'support'
+            mainNav === 'support' ||
+            (mainNav === 'home' && !webAppUnlocked)
               ? 'hidden'
               : 'flex-1'
           }`}
         >
+          {!webAppUnlocked && (mainNav === 'library' || mainNav === 'planning') ? (
+            <WebProRequiredPanel onDeveloperLocalBypass={onDeveloperLocalWebProBypass} />
+          ) : (
+            <>
           {mainNav === 'library' && libraryTab === 'favorites' && (
             <FavoritesSection
               favoritesCollection={favoritesCollection}
@@ -2637,7 +2761,11 @@ function UserAppLayout({
           )}
           {mainNav === 'library' && libraryTab === 'bookmarks' && (
             <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-              <LibraryBookmarksSection user={user} />
+              <LibraryBookmarksSection
+                user={user}
+                bookmarksCount={overview?.counts?.bookmarks}
+                maxBookmarks={overview?.subscriptionLimits?.maxBookmarks}
+              />
             </div>
           )}
           {mainNav === 'planning' && planningTab === 'today' && (
@@ -2730,6 +2858,8 @@ function UserAppLayout({
               planScheduleReadOnly={planScheduleReadOnly}
               selectedFollowingPlanRow={selectedFollowingRowForLayout}
             />
+          )}
+            </>
           )}
         </div>
       )}
@@ -2830,6 +2960,7 @@ function MainNavSidebar({
   pendingConnectionInvites,
   pendingMembershipInvites,
   pendingHubJoinRequests,
+  webAppUnlocked,
   setMainNav,
   setConnectionsTab,
   setLibraryTab,
@@ -2845,6 +2976,7 @@ function MainNavSidebar({
   pendingConnectionInvites: number
   pendingMembershipInvites: number
   pendingHubJoinRequests: number
+  webAppUnlocked: boolean
   setMainNav: (id: MainNavId) => void
   setConnectionsTab: (id: ConnectionsSubTabId) => void
   setLibraryTab: (id: LibrarySubTabId) => void
@@ -3013,12 +3145,12 @@ function MainNavSidebar({
                 Bookmarks
               </button>
             </div>
-            <div className="flex flex-col gap-2" role="group" aria-labelledby="main-nav-connect-heading">
+            <div className="flex flex-col gap-2" role="group" aria-labelledby="main-nav-community-heading">
               <p
                 className="px-1 text-xs font-semibold uppercase tracking-wide text-gray-500"
-                id="main-nav-connect-heading"
+                id="main-nav-community-heading"
               >
-                Connect
+                Community
               </p>
               <button
                 type="button"
@@ -3158,20 +3290,22 @@ function MainNavSidebar({
                   <Settings className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
                   User Settings
                 </button>
-                <button
-                  type="button"
-                  onClick={() => select('support')}
-                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
-                    mainNav === 'support'
-                      ? 'text-white shadow-sm'
-                      : 'text-gray-800 hover:bg-gymnext-background'
-                  }`}
-                  style={mainNav === 'support' ? { backgroundColor: '#6B21A8' } : undefined}
-                  aria-current={mainNav === 'support' ? 'page' : undefined}
-                >
-                  <ArchiveRestore className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
-                  Recover Deleted Items
-                </button>
+                {webAppUnlocked && (
+                  <button
+                    type="button"
+                    onClick={() => select('support')}
+                    className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition-colors ${
+                      mainNav === 'support'
+                        ? 'text-white shadow-sm'
+                        : 'text-gray-800 hover:bg-gymnext-background'
+                    }`}
+                    style={mainNav === 'support' ? { backgroundColor: '#6B21A8' } : undefined}
+                    aria-current={mainNav === 'support' ? 'page' : undefined}
+                  >
+                    <ArchiveRestore className="h-5 w-5 shrink-0 opacity-90" strokeWidth={2} aria-hidden />
+                    Recover Deleted Items
+                  </button>
+                )}
               </div>
             )}
 
@@ -7264,7 +7398,7 @@ function planShowsInTodayTab(plan: WorkoutPlan): boolean {
   return plan.showInSchedule !== false
 }
 
-/** True when followed plan is non-personal group training (visibility rules); else privileges copy. */
+/** True when followed plan is non-personal group training (drives shared-calendar visibility copy). */
 function followedPlanIsGroupTraining(row: FollowingPlanRow): boolean {
   if (row.remotePlanIsPersonal === true) return false
   return row.remotePlanTrainingIntent === 1
@@ -7590,7 +7724,6 @@ function PlansSection({
       handle: string | null
       sharedAt: string | null
       recipientFeedItemId: string | null
-      allowEditing: boolean
       hideFutureWorkouts: boolean
     }[]
   }>({ groups: [], users: [] })
@@ -7907,34 +8040,6 @@ function PlansSection({
     }
   }
 
-  async function patchPlanShareUserPrivateAllowEdit(peerUserId: string, nextAllow: boolean) {
-    if (!selectedPlanId) return
-    const busyKey = `user:${peerUserId}`
-    setPlanSharePatchKey(busyKey)
-    try {
-      const res = await authedFetch(`/api/app/plans/${encodeURIComponent(selectedPlanId)}/shares`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          target: 'user',
-          peerUserId,
-          allowEditing: nextAllow,
-        }),
-      })
-      if (!res.ok) {
-        const j = (await res.json().catch(() => ({}))) as { error?: string }
-        throw new Error(j.error || `HTTP ${res.status}`)
-      }
-      setPlanShareRowMenuKey(null)
-      await loadPlanShares()
-      toast.success('Share updated')
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Update failed')
-    } finally {
-      setPlanSharePatchKey(null)
-    }
-  }
-
   async function patchPlanShareUserGroupHideFuture(peerUserId: string, nextHide: boolean) {
     if (!selectedPlanId) return
     const busyKey = `user:${peerUserId}`
@@ -8141,9 +8246,7 @@ function PlansSection({
                         ) : null}
                         {!allowsHubShare ? (
                           <p className="text-xs text-gray-600">
-                            {p.allowEditing
-                              ? 'Can edit planned workouts (read/write).'
-                              : 'Cannot edit planned workouts (view only).'}
+                            Scheduled workouts stay on the owner&apos;s calendar.
                           </p>
                         ) : (
                           <p className="text-xs text-gray-600">
@@ -8154,38 +8257,26 @@ function PlansSection({
                         )}
                       </div>
                       <div className="flex shrink-0 items-start gap-1">
-                        <div className="relative" data-plan-share-actions-menu>
-                          <button
-                            type="button"
-                            aria-label="Edit share settings"
-                            aria-expanded={userMenuOpen}
-                            aria-haspopup="menu"
-                            disabled={planSharePatchKey === userPatchKey}
-                            onClick={() =>
-                              setPlanShareRowMenuKey((k) => (k === userMenuKey ? null : userMenuKey))
-                            }
-                            className="rounded border border-gray-200 bg-white px-2 py-1.5 text-xs font-medium text-gray-900 shadow-sm hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 disabled:opacity-50"
-                          >
-                            Edit
-                          </button>
-                          {userMenuOpen ? (
-                            <div
-                              role="menu"
-                              className="absolute right-0 z-[9000] mt-1 min-w-[12rem] rounded-md border border-gray-200 bg-white py-1 shadow-lg"
+                        {allowsHubShare ? (
+                          <div className="relative" data-plan-share-actions-menu>
+                            <button
+                              type="button"
+                              aria-label="Edit share settings"
+                              aria-expanded={userMenuOpen}
+                              aria-haspopup="menu"
+                              disabled={planSharePatchKey === userPatchKey}
+                              onClick={() =>
+                                setPlanShareRowMenuKey((k) => (k === userMenuKey ? null : userMenuKey))
+                              }
+                              className="rounded border border-gray-200 bg-white px-2 py-1.5 text-xs font-medium text-gray-900 shadow-sm hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-1 disabled:opacity-50"
                             >
-                              {!allowsHubShare ? (
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  disabled={planSharePatchKey !== null}
-                                  className="block w-full px-3 py-2 text-left text-xs text-gray-800 hover:bg-gray-50 disabled:opacity-50"
-                                  onClick={() =>
-                                    void patchPlanShareUserPrivateAllowEdit(p.peerUserId, !p.allowEditing)
-                                  }
-                                >
-                                  {p.allowEditing ? 'Change to view only' : 'Allow editing'}
-                                </button>
-                              ) : (
+                              Edit
+                            </button>
+                            {userMenuOpen ? (
+                              <div
+                                role="menu"
+                                className="absolute right-0 z-[9000] mt-1 min-w-[12rem] rounded-md border border-gray-200 bg-white py-1 shadow-lg"
+                              >
                                 <button
                                   type="button"
                                   role="menuitem"
@@ -8202,10 +8293,10 @@ function PlansSection({
                                     ? 'Show future workouts'
                                     : "Don't show future workouts"}
                                 </button>
-                              )}
-                            </div>
-                          ) : null}
-                        </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
                         <button
                           type="button"
                           disabled={planSharePatchKey === userPatchKey}
@@ -8246,7 +8337,6 @@ function PlansSection({
     planShareRowMenuKey,
     planSharePatchKey,
     patchPlanShareHubHideFuture,
-    patchPlanShareUserPrivateAllowEdit,
     patchPlanShareUserGroupHideFuture,
   ])
 
@@ -8975,7 +9065,6 @@ function PlansSection({
           handle?: string | null
           sharedAt?: string | null
           recipientFeedItemId?: string | null
-          allowEditing?: unknown
           hideFutureWorkouts?: unknown
         }[]
       }
@@ -8999,7 +9088,6 @@ function PlansSection({
             typeof u.recipientFeedItemId === 'string' && u.recipientFeedItemId.trim()
               ? u.recipientFeedItemId.trim()
               : null,
-          allowEditing: u.allowEditing === true,
           hideFutureWorkouts: u.hideFutureWorkouts === false ? false : true,
         })),
       })
@@ -10419,7 +10507,7 @@ function PlansSection({
                           const w = pw.workout
                           const trimmedPlanWorkoutDetails = trimWorkoutDetailsForPreview(pw.workout)
                           const barColor = getWorkoutBarColor(w)
-                          /** Owned plans: past days are still editable (⋯ menu + inline schedule). Subscribed (remote) plans: view-only. */
+                          /** Owned plans: past days stay editable (⋯ menu + inline schedule). Followed plans: coach calendar (no drag/reorder). */
                           const isReadOnly = planScheduleReadOnly
                           const canReorderPlanned = !planScheduleReadOnly
                           const isDragging =
@@ -11149,26 +11237,19 @@ function PlansSection({
                         </div>
                         )}
                       </div>
-                      <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
-                        <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
-                          Your access
-                        </h4>
-                        {followedPlanIsGroupTraining(selectedFollowingRow) ? (
+                      {followedPlanIsGroupTraining(selectedFollowingRow) ? (
+                        <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                          <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
+                            Your access
+                          </h4>
                           <p className="text-sm text-gray-800">
                             <span className="font-semibold text-gray-900">Visibility.</span>{' '}
                             {!selectedFollowingRow.shareHideFutureWorkouts
                               ? 'You can view all scheduled workouts.'
                               : 'Future workouts are hidden—your calendar currently shows up to today only.'}
                           </p>
-                        ) : (
-                          <p className="text-sm text-gray-800">
-                            <span className="font-semibold text-gray-900">Privileges.</span>{' '}
-                            {selectedFollowingRow.shareAllowEditing
-                              ? 'You can edit this plan and scheduled workouts with the owner.'
-                              : 'Read-only: you cannot edit the plan or workouts.'}
-                          </p>
-                        )}
-                      </div>
+                        </div>
+                      ) : null}
                         </>
                       )}
                     </div>

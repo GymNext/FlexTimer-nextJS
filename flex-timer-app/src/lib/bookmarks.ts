@@ -71,6 +71,49 @@ export function collectionBookmarkDocumentId(ownerUserId: string, remoteCollecti
   return `${ownerUserId.trim()}_${remoteCollectionId.trim()}`
 }
 
+/** Active shared workout bookmark doc already exists for this viewer + owner workout. */
+export async function isActiveSharedWorkoutBookmark(
+  viewerUid: string,
+  ownerUserId: string,
+  remoteWorkoutId: string,
+): Promise<boolean> {
+  if (!adminDb) return false
+  const v = viewerUid.trim()
+  const subId = workoutBookmarkDocumentId(ownerUserId, remoteWorkoutId)
+  const snap = await adminDb.collection('users').doc(v).collection('workoutSubscriptions').doc(subId).get()
+  if (!snap.exists) return false
+  const d = snap.data() as Record<string, unknown>
+  return str(d, 'status') === 'active'
+}
+
+/** Active shared collection bookmark doc already exists for this viewer + owner collection. */
+export async function isActiveSharedCollectionBookmark(
+  viewerUid: string,
+  ownerUserId: string,
+  remoteCollectionId: string,
+): Promise<boolean> {
+  if (!adminDb) return false
+  const v = viewerUid.trim()
+  const subId = collectionBookmarkDocumentId(ownerUserId, remoteCollectionId)
+  const snap = await adminDb.collection('users').doc(v).collection('workoutCollectionSubscriptions').doc(subId).get()
+  if (!snap.exists) return false
+  const d = snap.data() as Record<string, unknown>
+  return str(d, 'status') === 'active'
+}
+
+/** Count of active shared bookmarks (workouts + collections) for subscription limit checks. */
+export async function countActiveSharedBookmarksForUser(uid: string): Promise<number> {
+  if (!adminDb) return 0
+  const u = uid.trim()
+  if (!u) return 0
+  const userRef = adminDb.collection('users').doc(u)
+  const [w, c] = await Promise.all([
+    userRef.collection('workoutSubscriptions').where('status', '==', 'active').count().get(),
+    userRef.collection('workoutCollectionSubscriptions').where('status', '==', 'active').count().get(),
+  ])
+  return (w.data().count ?? 0) + (c.data().count ?? 0)
+}
+
 const stripLegacyWorkoutBookmarkFields = {
   mirrorGroupId: FieldValue.delete(),
   followSource: FieldValue.delete(),

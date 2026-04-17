@@ -30,9 +30,8 @@ const SHARER_FEED_ITEM_FIELD = 'sharerFeedItemId'
 const GROUP_FEED_ITEM_FIELD = 'groupFeedItemId'
 const SHARED_HUB_FEED_COUNT_FIELD = 'sharedHubContentItemCount'
 const USER_CONNECTION_SHARED_COUNT_FIELD = 'sharedContentItemCount'
-/** Matches iOS `PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD` / `PLAN_SHARE_ALLOW_EDITING_FIELD`. */
+/** Matches iOS `PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD`. */
 export const PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD = 'hideFutureWorkouts'
-export const PLAN_SHARE_ALLOW_EDITING_FIELD = 'allowEditing'
 
 export const MAX_PLAN_SHARE_DESTINATIONS = 10
 
@@ -40,7 +39,6 @@ const MAX_SHARE_COMMENT_LENGTH = 4000
 
 /** Resolved access flags for a subscriber following someone else's plan (UI + API). */
 export type ResolvedPlanFollowAccess = {
-  shareAllowEditing: boolean
   shareHideFutureWorkouts: boolean
 }
 
@@ -58,12 +56,12 @@ export async function resolvePlanFollowAccessForSubscriber(
   const pid = remotePlanId.trim()
   const sub = subscriberUserId.trim()
   if (!o || !pid || !sub || !adminDb) {
-    return { shareAllowEditing: false, shareHideFutureWorkouts: false }
+    return { shareHideFutureWorkouts: false }
   }
 
   const ctx = await resolveSharedMirrorReadContextForViewer(sub, o, 'plan', pid, null, opts)
   if (!ctx) {
-    return { shareAllowEditing: false, shareHideFutureWorkouts: false }
+    return { shareHideFutureWorkouts: false }
   }
 
   const planDocId = groupShareMirrorDocumentId(o, pid)
@@ -73,11 +71,10 @@ export async function resolvePlanFollowAccessForSubscriber(
 
   const snap = await mirrorRef.get()
   if (!snap.exists) {
-    return { shareAllowEditing: false, shareHideFutureWorkouts: false }
+    return { shareHideFutureWorkouts: false }
   }
   const d = snap.data() as Record<string, unknown>
   const access: ResolvedPlanFollowAccess = {
-    shareAllowEditing: readAllowEditingFromShareDoc(d),
     shareHideFutureWorkouts: readHideFutureWorkoutsFromShareDoc(d),
   }
 
@@ -100,7 +97,6 @@ export type PlanUserShareRow = {
   sharedAt: string | null
   recipientFeedItemId: string | null
   sharerFeedItemId: string | null
-  allowEditing: boolean
   hideFutureWorkouts: boolean
 }
 
@@ -116,12 +112,6 @@ function readHideFutureWorkoutsFromShareDoc(d: Record<string, unknown>): boolean
   const raw = d[PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]
   if (typeof raw === 'boolean') return raw
   return true
-}
-
-function readAllowEditingFromShareDoc(d: Record<string, unknown>): boolean {
-  const raw = d[PLAN_SHARE_ALLOW_EDITING_FIELD]
-  if (typeof raw === 'boolean') return raw
-  return false
 }
 
 function sanitizeComment(raw: string | undefined | null): string | undefined {
@@ -150,14 +140,11 @@ function userConnectionMirrorEnvelope(recipientUserId: string, ownerUid: string,
   }
 }
 
-/** Top-level mirror fields (same paths as iOS); not part of `payload`. */
-function planMirrorShareFlagsDoc(
-  allowEditing: boolean,
-  hideFutureWorkouts: boolean
-): Record<string, unknown> {
+/** Top-level mirror fields (same paths as iOS); not part of `payload`. Strips legacy `allowEditing`. */
+function planMirrorShareFlagsDoc(hideFutureWorkouts: boolean): Record<string, unknown> {
   return {
-    [PLAN_SHARE_ALLOW_EDITING_FIELD]: allowEditing,
     [PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]: hideFutureWorkouts,
+    allowEditing: FieldValue.delete(),
   }
 }
 
@@ -267,7 +254,6 @@ export async function listPlanUserShares(uid: string, planId: string): Promise<P
   const rows: PlanUserShareRow[] = []
   for (const doc of snap.docs) {
     const d = doc.data() as Record<string, unknown>
-    const allowEdit = readAllowEditingFromShareDoc(d)
     rows.push({
       peerUserId: doc.id,
       sharedAt: tsToIso(d.sharedAt),
@@ -279,7 +265,6 @@ export async function listPlanUserShares(uid: string, planId: string): Promise<P
         typeof d[SHARER_FEED_ITEM_FIELD] === 'string'
           ? String(d[SHARER_FEED_ITEM_FIELD]).trim() || null
           : null,
-      allowEditing: allowEdit,
       hideFutureWorkouts: readHideFutureWorkoutsFromShareDoc(d),
     })
   }
@@ -375,7 +360,7 @@ export async function sharePlanWithGroup(
     planMirrorRef,
     {
       ...groupMirrorEnvelope(gid, u, planPayload),
-      ...planMirrorShareFlagsDoc(false, hideFutureWorkouts),
+      ...planMirrorShareFlagsDoc(hideFutureWorkouts),
     },
     { merge: true }
   )
@@ -387,9 +372,8 @@ export async function sharePlanWithUser(
   uid: string,
   planId: string,
   peerUserId: string,
-  comment?: string | null,
-  allowEditing = false,
-  hideFutureWorkouts = true
+  hideFutureWorkouts: boolean,
+  comment?: string | null
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const u = uid.trim()
@@ -474,7 +458,6 @@ export async function sharePlanWithUser(
       sharedAt: FieldValue.serverTimestamp(),
       [RECIPIENT_FEED_ITEM_FIELD]: recipientFeedItemId,
       [SHARER_FEED_ITEM_FIELD]: sharerFeedItemId,
-      [PLAN_SHARE_ALLOW_EDITING_FIELD]: allowEditing,
       [PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]: hideFutureWorkouts,
     },
     { merge: false }
@@ -485,7 +468,7 @@ export async function sharePlanWithUser(
     planMirrorRef,
     {
       ...userConnectionMirrorEnvelope(rid, u, planPayload),
-      ...planMirrorShareFlagsDoc(allowEditing, hideFutureWorkouts),
+      ...planMirrorShareFlagsDoc(hideFutureWorkouts),
     },
     { merge: true }
   )
@@ -543,26 +526,26 @@ export async function updatePlanGroupShareHideFuture(
   const planMirrorRef = db.collection(GROUPS_COLLECTION).doc(gid).collection(SHARED_PLANS_SUB).doc(planKey)
 
   const batch = db.batch()
-  batch.update(shareRef, { [PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]: hideFutureWorkouts })
-  batch.update(planMirrorRef, {
-    [PLAN_SHARE_ALLOW_EDITING_FIELD]: false,
+  batch.update(shareRef, {
     [PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]: hideFutureWorkouts,
+    allowEditing: FieldValue.delete(),
+  })
+  batch.update(planMirrorRef, {
+    ...planMirrorShareFlagsDoc(hideFutureWorkouts),
     updatedAt: FieldValue.serverTimestamp(),
   })
   await batch.commit()
 }
 
 /**
- * Update flags on an existing connection share (`planUserShares` item) and the recipient’s
- * `users/{peer}/sharedPlans/{mirrorId}` mirror.
- * Private training: only `allowEditing` (hide future stays false on share + mirror).
- * Group training: only `hideFutureWorkouts` (`allowEditing` remains false).
+ * Update `hideFutureWorkouts` on an existing group-training connection share (`planUserShares` item)
+ * and the recipient’s `users/{peer}/sharedPlans/{mirrorId}` mirror.
  */
 export async function updatePlanUserShareFlags(
   ownerUid: string,
   planId: string,
   peerUserId: string,
-  patch: { allowEditing?: boolean; hideFutureWorkouts?: boolean }
+  hideFutureWorkouts: boolean
 ): Promise<void> {
   if (!adminDb) throw new Error('Firebase Admin not configured')
   const u = ownerUid.trim()
@@ -586,30 +569,10 @@ export async function updatePlanUserShareFlags(
     ;(err as Error & { status?: number }).status = 400
     throw err
   }
-
-  const groupTraining = plan.trainingIntent === 1
-  if (groupTraining) {
-    if (patch.hideFutureWorkouts === undefined) {
-      const err = new Error('hideFutureWorkouts (boolean) is required for group training plan shares')
-      ;(err as Error & { status?: number }).status = 400
-      throw err
-    }
-    if (patch.allowEditing !== undefined) {
-      const err = new Error('allowEditing cannot be updated for group training plan shares')
-      ;(err as Error & { status?: number }).status = 400
-      throw err
-    }
-  } else {
-    if (patch.allowEditing === undefined) {
-      const err = new Error('allowEditing (boolean) is required for private training plan shares')
-      ;(err as Error & { status?: number }).status = 400
-      throw err
-    }
-    if (patch.hideFutureWorkouts !== undefined) {
-      const err = new Error('hideFutureWorkouts cannot be updated for private training plan shares')
-      ;(err as Error & { status?: number }).status = 400
-      throw err
-    }
+  if (plan.trainingIntent !== 1) {
+    const err = new Error('Connection share visibility can only be updated for group training plans')
+    ;(err as Error & { status?: number }).status = 400
+    throw err
   }
 
   const connected = await assertUsersAreConnected(u, rid)
@@ -634,29 +597,16 @@ export async function updatePlanUserShareFlags(
     throw err
   }
 
-  const shareUpdate: Record<string, unknown> = {}
-  let mirrorAllow: boolean
-  let mirrorHide: boolean
-  if (groupTraining) {
-    shareUpdate[PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD] = patch.hideFutureWorkouts
-    shareUpdate[PLAN_SHARE_ALLOW_EDITING_FIELD] = false
-    mirrorAllow = false
-    mirrorHide = patch.hideFutureWorkouts!
-  } else {
-    shareUpdate[PLAN_SHARE_ALLOW_EDITING_FIELD] = patch.allowEditing
-    shareUpdate[PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD] = false
-    mirrorAllow = patch.allowEditing!
-    mirrorHide = false
-  }
-
   const planKey = groupShareMirrorDocumentId(u, pid)
   const planMirrorRef = db.collection('users').doc(rid).collection(SHARED_PLANS_SUB).doc(planKey)
 
   const batch = db.batch()
-  batch.update(shareRef, shareUpdate)
+  batch.update(shareRef, {
+    [PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]: hideFutureWorkouts,
+    allowEditing: FieldValue.delete(),
+  })
   batch.update(planMirrorRef, {
-    [PLAN_SHARE_ALLOW_EDITING_FIELD]: mirrorAllow,
-    [PLAN_SHARE_HIDE_FUTURE_WORKOUTS_FIELD]: mirrorHide,
+    ...planMirrorShareFlagsDoc(hideFutureWorkouts),
     updatedAt: FieldValue.serverTimestamp(),
   })
   await batch.commit()

@@ -1,9 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUserAuth } from '@/lib/auth'
 import { adminAuth } from '@/lib/firebase-admin'
-import { deleteSharedCollectionBookmark, upsertActiveSharedCollectionBookmark } from '@/lib/bookmarks'
+import {
+  countActiveSharedBookmarksForUser,
+  isActiveSharedCollectionBookmark,
+  upsertActiveSharedCollectionBookmark,
+  deleteSharedCollectionBookmark,
+} from '@/lib/bookmarks'
 import { getCollectionById, getUserDocument } from '@/lib/firestore'
 import { resolveSharedMirrorReadContextForViewer } from '@/lib/shared-resource-access'
+import { UNLIMITED } from '@/lib/subscription-limits-constants'
+import { getSubscriptionLimits } from '@/lib/subscription-limits'
 
 /**
  * POST /api/app/bookmarks/collections
@@ -54,6 +61,23 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    const limits = await getSubscriptionLimits(uid)
+    if (limits.maxBookmarks < UNLIMITED) {
+      const already = await isActiveSharedCollectionBookmark(uid, ownerUserId, remoteCollectionId)
+      if (!already) {
+        const n = await countActiveSharedBookmarksForUser(uid)
+        if (n >= limits.maxBookmarks) {
+          return NextResponse.json(
+            {
+              error: `Your plan allows up to ${limits.maxBookmarks} bookmarks. Remove one or upgrade to add more.`,
+              code: 'SUBSCRIPTION_LIMIT_BOOKMARKS',
+            },
+            { status: 403 },
+          )
+        }
+      }
+    }
+
     const c = await getCollectionById(ownerUserId, remoteCollectionId)
     if (!c || c.deletedAt) {
       return NextResponse.json({ error: 'Collection not found' }, { status: 404 })

@@ -95,10 +95,10 @@ function parseOptionalBoolean(value: unknown, defaultValue: boolean): boolean {
 
 /**
  * POST /api/app/plans/[planId]/shares
- * Body: { target, groupId?, peerUserId?, comment?, hideFutureWorkouts?, allowEditing? }
+ * Body: { target, groupId?, peerUserId?, comment?, hideFutureWorkouts? }
  * - Hub (group): `hideFutureWorkouts` optional, default true.
- * - Connection + private training: `allowEditing` optional, default false; future visibility is always on (hideFutureWorkouts stored false).
- * - Connection + group training: `hideFutureWorkouts` optional, default true; allowEditing is always false.
+ * - Connection + private training: future visibility is always on (`hideFutureWorkouts` stored false).
+ * - Connection + group training: `hideFutureWorkouts` optional, default true.
  */
 export async function POST(request: NextRequest, { params }: { params: RouteParams }) {
   const authResult = await requireUserAuth(request.headers.get('authorization'))
@@ -121,7 +121,6 @@ export async function POST(request: NextRequest, { params }: { params: RoutePara
     peerUserId?: string
     comment?: string | null
     hideFutureWorkouts?: unknown
-    allowEditing?: unknown
   }
   try {
     body = await request.json()
@@ -164,13 +163,10 @@ export async function POST(request: NextRequest, { params }: { params: RoutePara
       return NextResponse.json({ error: 'peerUserId is required' }, { status: 400 })
     }
     const groupTraining = plan.trainingIntent === 1
-    if (groupTraining) {
-      const hideFuture = parseOptionalBoolean(body.hideFutureWorkouts, true)
-      await sharePlanWithUser(uid, planId, peer, body.comment ?? null, false, hideFuture)
-    } else {
-      const allowEdit = parseOptionalBoolean(body.allowEditing, false)
-      await sharePlanWithUser(uid, planId, peer, body.comment ?? null, allowEdit, false)
-    }
+    const hideFuture = groupTraining
+      ? parseOptionalBoolean(body.hideFutureWorkouts, true)
+      : false
+    await sharePlanWithUser(uid, planId, peer, hideFuture, body.comment ?? null)
     return NextResponse.json({ ok: true })
   } catch (err) {
     const e = err as Error & { status?: number }
@@ -188,10 +184,9 @@ export async function POST(request: NextRequest, { params }: { params: RoutePara
 
 /**
  * PATCH /api/app/plans/[planId]/shares
- * Body: { target: 'group'|'user', groupId?, peerUserId?, hideFutureWorkouts?, allowEditing? }
+ * Body: { target: 'group'|'user', groupId?, peerUserId?, hideFutureWorkouts? }
  * Hub share: `hideFutureWorkouts` (boolean) required.
  * Connection + group training: `hideFutureWorkouts` (boolean) required.
- * Connection + private training: `allowEditing` (boolean) required.
  */
 export async function PATCH(request: NextRequest, { params }: { params: RouteParams }) {
   const authResult = await requireUserAuth(request.headers.get('authorization'))
@@ -212,7 +207,6 @@ export async function PATCH(request: NextRequest, { params }: { params: RoutePar
     target?: string
     groupId?: string
     peerUserId?: string
-    allowEditing?: unknown
     hideFutureWorkouts?: unknown
   }
   try {
@@ -260,25 +254,19 @@ export async function PATCH(request: NextRequest, { params }: { params: RoutePar
     if (!peer) {
       return NextResponse.json({ error: 'peerUserId is required' }, { status: 400 })
     }
-    if (plan.trainingIntent === 1) {
-      if (typeof body.hideFutureWorkouts !== 'boolean') {
-        return NextResponse.json(
-          { error: 'hideFutureWorkouts (boolean) is required' },
-          { status: 400 }
-        )
-      }
-      await updatePlanUserShareFlags(uid, planId, peer, {
-        hideFutureWorkouts: body.hideFutureWorkouts,
-      })
-    } else {
-      if (typeof body.allowEditing !== 'boolean') {
-        return NextResponse.json(
-          { error: 'allowEditing (boolean) is required' },
-          { status: 400 }
-        )
-      }
-      await updatePlanUserShareFlags(uid, planId, peer, { allowEditing: body.allowEditing })
+    if (plan.trainingIntent !== 1) {
+      return NextResponse.json(
+        { error: 'Connection share visibility can only be updated for group training plans' },
+        { status: 400 }
+      )
     }
+    if (typeof body.hideFutureWorkouts !== 'boolean') {
+      return NextResponse.json(
+        { error: 'hideFutureWorkouts (boolean) is required' },
+        { status: 400 }
+      )
+    }
+    await updatePlanUserShareFlags(uid, planId, peer, body.hideFutureWorkouts)
     return NextResponse.json({ ok: true })
   } catch (err) {
     const e = err as Error & { status?: number }

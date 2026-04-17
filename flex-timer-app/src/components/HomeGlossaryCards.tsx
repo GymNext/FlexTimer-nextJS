@@ -11,7 +11,7 @@ function Term({ label, children }: { label: string; children: ReactNode }) {
 }
 
 /**
- * Home-page glossary: Planning, Library, and Connect terminology for new users.
+ * Home-page glossary: Planning, Library, and Community terminology for new users.
  */
 export function HomeGlossaryCards() {
   return (
@@ -65,7 +65,7 @@ export function HomeGlossaryCards() {
       <section className="min-w-0 rounded-lg border border-gymnext-muted/30 bg-white p-5 shadow-sm">
         <h3 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
           <Users className="h-4 w-4 shrink-0 text-teal-700" aria-hidden />
-          Connect
+          Community
         </h3>
         <p className="mt-2 text-xs text-gray-500 leading-relaxed">
           People, groups, and shared activity—how you discover content and stay connected with others.

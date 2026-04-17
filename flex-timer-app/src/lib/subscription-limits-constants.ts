@@ -20,4 +20,6 @@ export interface SubscriptionLimits {
   maxFavorites: number
   maxCollections: number
   maxPlans: number
+  /** Shared workout + collection bookmarks (`workoutSubscriptions` / `workoutCollectionSubscriptions`, active). */
+  maxBookmarks: number
 }

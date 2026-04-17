@@ -8,6 +8,7 @@ import {
   getUserDocument,
 } from '@/lib/firestore'
 import { EMPTY_USER_HUB_LOOKUP_IDS, resolveHubLookupLabels } from '@/types/hub-profile'
+import { countActiveSharedBookmarksForUser } from '@/lib/bookmarks'
 import { getSubscriptionLimits } from '@/lib/subscription-limits'
 import type { SubscriptionLimits } from '@/lib/subscription-limits-constants'
 
@@ -32,7 +33,7 @@ export async function GET(request: NextRequest) {
   const { uid } = authResult
 
   try {
-    const [allWorkouts, allWorkoutPlans, allWorkoutCollections, subscriptionLimitsResult, userDoc] =
+    const [allWorkouts, allWorkoutPlans, allWorkoutCollections, subscriptionLimitsResult, userDoc, bookmarksCount] =
       await Promise.all([
         getUserWorkouts(uid),
         getUserWorkoutPlans(uid),
@@ -42,6 +43,10 @@ export async function GET(request: NextRequest) {
           return null
         }),
         getUserDocument(uid),
+        countActiveSharedBookmarksForUser(uid).catch((err) => {
+          console.error('[app overview] bookmarks count failed:', err)
+          return 0
+        }),
       ])
 
     const settings = userDoc?.settings
@@ -84,6 +89,7 @@ export async function GET(request: NextRequest) {
       maxFavorites: 5,
       maxCollections: 1,
       maxPlans: 1,
+      maxBookmarks: 5,
     }
 
     const hubLookupIds = userDoc?.hubLookupIds ?? EMPTY_USER_HUB_LOOKUP_IDS
@@ -108,6 +114,7 @@ export async function GET(request: NextRequest) {
         favorites: favoritesCount,
         collections: collectionsCount,
         plans: plansCount,
+        bookmarks: bookmarksCount,
       },
     })
   } catch (err) {

@@ -1082,7 +1082,7 @@ service cloud.firestore {
       }
 
       /**
-       * Private plan share index on the plan owner’s user doc (`allowEditing` / `hideFutureWorkouts` per destination).
+       * Plan share index on the plan owner’s user doc (`planUserShares` / `planGroupShares` items; flags mirrored on recipient `sharedPlans`).
        * Followers read their own `items/{peerUid}` doc before subscribing; owners list all items via the catch-all below.
        */
       match /planUserShares/{planId}/items/{peerUid} {

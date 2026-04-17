@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { User } from 'firebase/auth'
 import toast from 'react-hot-toast'
+import { Bookmark, Users } from 'lucide-react'
 import { PlanKindIcon, planVisualKindFromFlags } from '@/components/PlanKindIcon'
 import { AddSharedWorkoutToPlanDialog } from '@/components/AddSharedWorkoutToPlanDialog'
 import {
@@ -137,14 +138,8 @@ function SharedWorkoutRow({
           className="flex shrink-0 items-center border-r border-gray-100 pl-3 pr-2"
           aria-label="You have bookmarked this workout"
         >
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
-            <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-              <path
-                fillRule="evenodd"
-                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                clipRule="evenodd"
-              />
-            </svg>
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-200 text-purple-900 shadow-sm">
+            <Bookmark className="h-4 w-4" strokeWidth={2} aria-hidden />
           </span>
         </div>
       )}
@@ -352,14 +347,8 @@ function SharedCollectionRow({
           className="flex shrink-0 items-center border-r border-gray-100 pl-3 pr-2"
           aria-label="You have bookmarked this collection"
         >
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
-            <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-              <path
-                fillRule="evenodd"
-                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                clipRule="evenodd"
-              />
-            </svg>
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-200 text-purple-900 shadow-sm">
+            <Bookmark className="h-4 w-4" strokeWidth={2} aria-hidden />
           </span>
         </div>
       )}
@@ -610,16 +599,10 @@ function SharedPlanRow({
       {!isOwnPlan && isFollowing && (
         <div
           className="flex shrink-0 items-center border-r border-gray-100 pl-3 pr-2"
-          aria-label="You have a subscription to this plan"
+          aria-label="You are following this plan"
         >
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
-            <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-              <path
-                fillRule="evenodd"
-                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                clipRule="evenodd"
-              />
-            </svg>
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-teal-100 text-teal-800">
+            <Users className="h-4 w-4" strokeWidth={2} aria-hidden />
           </span>
         </div>
       )}

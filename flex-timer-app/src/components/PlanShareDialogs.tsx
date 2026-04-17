@@ -114,7 +114,6 @@ export function PlanShareDialogs({
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
   const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null)
   const [comment, setComment] = useState('')
-  const [allowEditing, setAllowEditing] = useState(false)
   /** UI: show future dates on shared calendar; API stores inverse as `hideFutureWorkouts`. */
   const [showFutureWorkouts, setShowFutureWorkouts] = useState(false)
   const [shareBusy, setShareBusy] = useState(false)
@@ -195,7 +194,6 @@ export function PlanShareDialogs({
       setSelectedGroupId(null)
       setSelectedPeerId(null)
       setComment('')
-      setAllowEditing(false)
       setShowFutureWorkouts(!isGroupTrainingPlan)
       setShareError(null)
       setShareTarget('user')
@@ -205,7 +203,6 @@ export function PlanShareDialogs({
     setSelectedGroupId(null)
     setSelectedPeerId(null)
     setComment('')
-    setAllowEditing(false)
     setShowFutureWorkouts(!isGroupTrainingPlan)
     setShareError(null)
     setShareTarget('user')
@@ -294,7 +291,6 @@ export function PlanShareDialogs({
                   target: 'user',
                   peerUserId: selectedPeerId,
                   comment: comment.trim() || undefined,
-                  allowEditing,
                 }
           ),
         })
@@ -362,7 +358,6 @@ export function PlanShareDialogs({
                       setPickerQuery('')
                       setSelectedGroupId(null)
                       setSelectedPeerId(null)
-                      setAllowEditing(false)
                       setShowFutureWorkouts(!isGroupTrainingPlan)
                     }}
                   />
@@ -379,7 +374,6 @@ export function PlanShareDialogs({
                         setPickerQuery('')
                         setSelectedGroupId(null)
                         setSelectedPeerId(null)
-                        setAllowEditing(false)
                         setShowFutureWorkouts(false)
                       }}
                     />
@@ -522,15 +516,6 @@ export function PlanShareDialogs({
                 )}
               </div>
               <div className="space-y-2">
-                {shareTarget === 'user' && !isGroupTrainingPlan ? (
-                  <PlanShareSwitchRow
-                    id="plan-share-allow-edit"
-                    label="Allow editing"
-                    description="They can also modify and update the plan with you."
-                    checked={allowEditing}
-                    onCheckedChange={setAllowEditing}
-                  />
-                ) : null}
                 {(shareTarget === 'group' ||
                   (shareTarget === 'user' && isGroupTrainingPlan)) && (
                   <PlanShareSwitchRow
