@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { User } from 'firebase/auth'
+import { Link2, Search } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { PublicUserProfileDialog } from '@/components/PublicUserProfileDialog'
+import { SendInviteLinkDialog } from '@/components/SendInviteLinkDialog'
 import { UserSearchDialog } from '@/components/UserSearchDialog'
 import { CONNECTIONS_LIST_REFRESH_EVENT, notifyConnectionsListRefresh } from '@/lib/connections-list-events'
 import { notifyPendingInvitesNavChanged } from '@/hooks/usePendingInvitationsNavBadges'
@@ -78,11 +80,14 @@ export function ConnectionsSection({ user }: { user: User }) {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [userSearchOpen, setUserSearchOpen] = useState(false)
+  const [sendInviteLinkOpen, setSendInviteLinkOpen] = useState(false)
+  const [inviteMenuOpen, setInviteMenuOpen] = useState(false)
   const [connectionMenuOpen, setConnectionMenuOpen] = useState(false)
   const [endConfirmOpen, setEndConfirmOpen] = useState(false)
   const [ending, setEnding] = useState(false)
   const [endError, setEndError] = useState<string | null>(null)
   const connectionMenuRef = useRef<HTMLDivElement | null>(null)
+  const inviteMenuRef = useRef<HTMLDivElement | null>(null)
 
   const [incomingInvites, setIncomingInvites] = useState<IncomingInviteRow[]>([])
   const [incomingLoading, setIncomingLoading] = useState(true)
@@ -314,6 +319,21 @@ export function ConnectionsSection({ user }: { user: User }) {
     }
   }, [connectionMenuOpen])
 
+  useEffect(() => {
+    if (!inviteMenuOpen) return
+    const onPointerDown = (e: MouseEvent | TouchEvent) => {
+      const el = inviteMenuRef.current
+      const t = e.target
+      if (el && t instanceof Node && !el.contains(t)) setInviteMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('touchstart', onPointerDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('touchstart', onPointerDown)
+    }
+  }, [inviteMenuOpen])
+
   async function confirmEndConnection() {
     if (!selectedId || !detail) return
     setEnding(true)
@@ -347,6 +367,11 @@ export function ConnectionsSection({ user }: { user: User }) {
         viewer={user}
       />
       <UserSearchDialog open={userSearchOpen} onClose={() => setUserSearchOpen(false)} user={user} />
+      <SendInviteLinkDialog
+        open={sendInviteLinkOpen}
+        onClose={() => setSendInviteLinkOpen(false)}
+        user={user}
+      />
       {endConfirmOpen && detail && (
         <div className="fixed inset-0 z-[55] flex items-center justify-center p-4">
           <div
@@ -505,14 +530,61 @@ export function ConnectionsSection({ user }: { user: User }) {
       <div className="flex h-full min-h-[12rem] min-w-0 flex-col overflow-hidden rounded-lg border border-gymnext-muted/30 bg-white lg:min-h-0">
         <div className="shrink-0 border-b border-gymnext-muted/30 bg-gymnext-background px-4 py-3 flex items-center justify-between gap-2">
           <h3 className="text-sm font-medium text-gray-800">Connections</h3>
-          <button
-            type="button"
-            onClick={() => setUserSearchOpen(true)}
-            className="rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
-            style={{ backgroundColor: '#6B21A8' }}
-          >
-            Search Users
-          </button>
+          <div className="relative" ref={inviteMenuRef}>
+            <button
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={inviteMenuOpen}
+              onClick={() => setInviteMenuOpen((o) => !o)}
+              className="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+              style={{ backgroundColor: '#6B21A8' }}
+            >
+              Invite Users
+              <svg
+                viewBox="0 0 12 12"
+                aria-hidden
+                className={`h-3 w-3 transition-transform ${inviteMenuOpen ? 'rotate-180' : ''}`}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.75"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M3 4.5 6 7.5l3-3" />
+              </svg>
+            </button>
+            {inviteMenuOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 top-full mt-1 z-20 min-w-[12rem] rounded-md border border-gymnext-muted/30 bg-white py-1 shadow-lg"
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="w-full text-left px-3 py-2 text-sm text-gray-800 hover:bg-gray-100 flex items-center gap-2"
+                  onClick={() => {
+                    setInviteMenuOpen(false)
+                    setUserSearchOpen(true)
+                  }}
+                >
+                  <Search className="h-4 w-4 text-gray-500" aria-hidden />
+                  Search Users
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="w-full text-left px-3 py-2 text-sm text-gray-800 hover:bg-gray-100 flex items-center gap-2"
+                  onClick={() => {
+                    setInviteMenuOpen(false)
+                    setSendInviteLinkOpen(true)
+                  }}
+                >
+                  <Link2 className="h-4 w-4 text-gray-500" aria-hidden />
+                  Send Invite Link
+                </button>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="min-h-0 flex-1 overflow-y-auto">

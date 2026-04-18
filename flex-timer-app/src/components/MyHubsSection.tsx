@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { User } from 'firebase/auth'
+import { Link2, Search } from 'lucide-react'
 import { findHubInTree, type HubTreeNode } from '@/types/hub-tree'
 import type { AppGroupType } from '@/types/group'
 import { hubTypeCard } from '@/lib/hub-type-cards'
@@ -10,6 +11,7 @@ import { normalizeGroupHandleKey } from '@/lib/group-handle'
 import { CreateHubWizard } from '@/components/CreateHubWizard'
 import { HubMembersInvitesPanel } from '@/components/HubMembersInvitesPanel'
 import { InviteUsersDialog } from '@/components/InviteUsersDialog'
+import { SendHubInviteLinkDialog } from '@/components/SendHubInviteLinkDialog'
 import { NavCountBadge } from '@/components/NavCountBadge'
 import {
   HUB_JOIN_REQUESTS_NAV_CHANGED_EVENT,
@@ -135,6 +137,9 @@ export function MyHubsSection({ user }: { user: User }) {
   const [changeHandleSaveError, setChangeHandleSaveError] = useState<string | null>(null)
   const [changeHandleSaving, setChangeHandleSaving] = useState(false)
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false)
+  const [inviteLinkDialogOpen, setInviteLinkDialogOpen] = useState(false)
+  const [inviteMenuOpen, setInviteMenuOpen] = useState(false)
+  const inviteMenuRef = useRef<HTMLDivElement | null>(null)
   const [hubPanelRefresh, setHubPanelRefresh] = useState(0)
 
   const loadOwnedHubTreeFromApi = useCallback(async (): Promise<HubTreeNode[]> => {
@@ -220,7 +225,24 @@ export function MyHubsSection({ user }: { user: User }) {
     setHubMenuOpen(false)
     setChangeHandleTarget(null)
     setInviteDialogOpen(false)
+    setInviteLinkDialogOpen(false)
+    setInviteMenuOpen(false)
   }, [selectedHubId])
+
+  useEffect(() => {
+    if (!inviteMenuOpen) return
+    const onPointerDown = (e: MouseEvent | TouchEvent) => {
+      const el = inviteMenuRef.current
+      const t = e.target
+      if (el && t instanceof Node && !el.contains(t)) setInviteMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('touchstart', onPointerDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('touchstart', onPointerDown)
+    }
+  }, [inviteMenuOpen])
 
   useEffect(() => {
     const id = changeHandleTarget?.id
@@ -512,6 +534,14 @@ export function MyHubsSection({ user }: { user: User }) {
         onInviteSent={() => setHubPanelRefresh((n) => n + 1)}
       />
 
+      <SendHubInviteLinkDialog
+        open={inviteLinkDialogOpen}
+        onClose={() => setInviteLinkDialogOpen(false)}
+        user={user}
+        groupId={inviteLinkDialogOpen && selectedHub ? selectedHub.id : null}
+        fallbackName={selectedHub?.name ?? null}
+      />
+
       <CreateHubWizard
         open={createOpen || editWizardOpen}
         onClose={closeWizard}
@@ -596,6 +626,61 @@ export function MyHubsSection({ user }: { user: User }) {
                   <p className="text-xs text-gray-600 mt-1">{selectedHub.subtitle}</p>
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 self-start">
+                  <div className="relative" ref={inviteMenuRef}>
+                    <button
+                      type="button"
+                      aria-haspopup="menu"
+                      aria-expanded={inviteMenuOpen}
+                      onClick={() => setInviteMenuOpen((o) => !o)}
+                      className="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+                      style={{ backgroundColor: '#6B21A8' }}
+                    >
+                      Invite Users
+                      <svg
+                        viewBox="0 0 12 12"
+                        aria-hidden
+                        className={`h-3 w-3 transition-transform ${inviteMenuOpen ? 'rotate-180' : ''}`}
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.75"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M3 4.5 6 7.5l3-3" />
+                      </svg>
+                    </button>
+                    {inviteMenuOpen && (
+                      <div
+                        role="menu"
+                        className="absolute right-0 top-full mt-1 z-20 min-w-[12rem] rounded-md border border-gymnext-muted/30 bg-white py-1 shadow-lg"
+                      >
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="w-full text-left px-3 py-2 text-sm text-gray-800 hover:bg-gray-100 flex items-center gap-2"
+                          onClick={() => {
+                            setInviteMenuOpen(false)
+                            setInviteDialogOpen(true)
+                          }}
+                        >
+                          <Search className="h-4 w-4 text-gray-500" aria-hidden />
+                          Search Users
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="w-full text-left px-3 py-2 text-sm text-gray-800 hover:bg-gray-100 flex items-center gap-2"
+                          onClick={() => {
+                            setInviteMenuOpen(false)
+                            setInviteLinkDialogOpen(true)
+                          }}
+                        >
+                          <Link2 className="h-4 w-4 text-gray-500" aria-hidden />
+                          Invite via Link
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   {selectedHub.groupType != null && canHaveChildGroups(selectedHub.groupType) && (
                     <button
                       type="button"
@@ -642,17 +727,6 @@ export function MyHubsSection({ user }: { user: User }) {
                           }}
                         >
                           Edit hub
-                        </button>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gray-50"
-                          onClick={() => {
-                            setHubMenuOpen(false)
-                            setInviteDialogOpen(true)
-                          }}
-                        >
-                          Invite users
                         </button>
                         {!selectedHub.parentGroupId && (
                           <button
